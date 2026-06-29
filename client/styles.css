@@ -235,11 +235,12 @@ body {
 
 /* Workspace */
 .workspace {
-  display: grid;
-  grid-template-rows: 1.15fr 0.85fr;
+  display: flex;
+  flex-direction: column;
   gap: 18px;
   padding: 20px;
   min-height: 0;
+  overflow: auto;
 }
 
 .text-card,
@@ -249,10 +250,21 @@ body {
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--paper-2);
-  min-height: 0;
   position: relative;
   overflow: hidden;
   box-shadow: 0 2px 10px var(--shadow);
+}
+
+/* Text editor: fixed, comfortable height; its textarea scrolls internally. */
+.text-card {
+  height: 44vh;
+  min-height: 240px;
+  flex-shrink: 0;
+}
+
+/* Results grow with content; the whole workspace scrolls. */
+.results {
+  flex-shrink: 0;
 }
 
 .text-card.drag-over {
@@ -280,13 +292,19 @@ body {
 
 /* Stepper */
 .stepper {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
   background: var(--paper);
   border: 1px solid var(--border);
   border-radius: 9px;
   padding: 3px 6px;
+}
+
+.stepper-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .stepper-label {
@@ -370,10 +388,6 @@ body {
 }
 
 /* Results */
-.results {
-  overflow: auto;
-}
-
 .empty {
   padding: 28px 16px;
   text-align: center;
@@ -437,7 +451,7 @@ body {
 /* Options (multiple responses) */
 .options.grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 10px;
   padding: 12px;
 }

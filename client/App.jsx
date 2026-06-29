@@ -67,7 +67,6 @@ export default function App() {
     "Paste or type any text here.\n\nThen drag a symbol from the left onto this box to transform it with Claude. Tip: select part of the text first to only transform that part."
   );
   const [results, setResults] = useState([]);
-  const [responseCount, setResponseCount] = useState(1);
   const [busy, setBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [editing, setEditing] = useState(null); // symbol being edited or "new"
@@ -106,7 +105,7 @@ export default function App() {
       return;
     }
     const runId = uid();
-    const count = responseCount;
+    const count = Math.min(Math.max(symbol.count || 1, 1), MAX_RESPONSES);
     setBusy(true);
     pushResult({
       id: runId,
@@ -224,27 +223,7 @@ export default function App() {
           >
             <div className="card-head">
               <span>Your text</span>
-              <div className="head-right">
-                <div className="stepper" title="How many options Claude generates per run">
-                  <span className="stepper-label">Responses</span>
-                  <button
-                    className="stepper-btn"
-                    onClick={() => setResponseCount((c) => Math.max(1, c - 1))}
-                    disabled={responseCount <= 1}
-                  >
-                    −
-                  </button>
-                  <span className="stepper-value">{responseCount}</span>
-                  <button
-                    className="stepper-btn"
-                    onClick={() => setResponseCount((c) => Math.min(MAX_RESPONSES, c + 1))}
-                    disabled={responseCount >= MAX_RESPONSES}
-                  >
-                    +
-                  </button>
-                </div>
-                <span className="muted">{text.length} chars</span>
-              </div>
+              <span className="muted">{text.length} chars</span>
             </div>
             <textarea
               ref={textRef}
@@ -301,6 +280,7 @@ function makeBlankSymbol() {
     image: null, // hand-drawn PNG data URL
     strokes: [], // vector strokes, so the drawing stays editable
     prompt: "",
+    count: 1, // how many responses Claude generates per run
     __isNew: true,
   };
 }
@@ -675,6 +655,39 @@ function SymbolEditor({ symbol, onSave, onDelete, onClose }) {
                 </button>
               ))}
             </div>
+          </div>
+        </div>
+
+        <div className="field">
+          <span>Responses per run</span>
+          <div className="stepper-row">
+            <div className="stepper">
+              <button
+                className="stepper-btn"
+                onClick={() =>
+                  setDraft((d) => ({ ...d, count: Math.max(1, (d.count || 1) - 1) }))
+                }
+                disabled={(draft.count || 1) <= 1}
+              >
+                −
+              </button>
+              <span className="stepper-value">{draft.count || 1}</span>
+              <button
+                className="stepper-btn"
+                onClick={() =>
+                  setDraft((d) => ({
+                    ...d,
+                    count: Math.min(MAX_RESPONSES, (d.count || 1) + 1),
+                  }))
+                }
+                disabled={(draft.count || 1) >= MAX_RESPONSES}
+              >
+                +
+              </button>
+            </div>
+            <span className="muted small">
+              Claude generates this many options each run; you pick one.
+            </span>
           </div>
         </div>
 
