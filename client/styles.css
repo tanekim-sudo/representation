@@ -51,15 +51,29 @@ body {
 
 .nebula {
   position: fixed;
-  inset: -20%;
+  inset: -25%;
   z-index: 0;
   pointer-events: none;
   background:
-    radial-gradient(420px 420px at 30% 35%, rgba(99, 102, 241, 0.18), transparent 70%),
-    radial-gradient(520px 520px at 70% 65%, rgba(168, 85, 247, 0.16), transparent 70%),
-    radial-gradient(380px 380px at 55% 20%, rgba(34, 211, 238, 0.12), transparent 70%);
-  filter: blur(40px);
+    radial-gradient(460px 380px at 28% 32%, rgba(99, 102, 241, 0.22), transparent 70%),
+    radial-gradient(560px 520px at 72% 66%, rgba(168, 85, 247, 0.2), transparent 70%),
+    radial-gradient(420px 380px at 55% 18%, rgba(34, 211, 238, 0.14), transparent 70%),
+    radial-gradient(640px 520px at 12% 84%, rgba(236, 72, 153, 0.12), transparent 72%),
+    radial-gradient(520px 460px at 90% 24%, rgba(56, 189, 248, 0.1), transparent 72%);
+  filter: blur(48px);
   animation: drift 34s ease-in-out infinite alternate;
+}
+
+/* second, slower nebula layer for depth */
+.nebula::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(700px 540px at 40% 60%, rgba(76, 29, 149, 0.16), transparent 72%),
+    radial-gradient(620px 480px at 80% 40%, rgba(14, 116, 144, 0.12), transparent 72%);
+  filter: blur(30px);
+  animation: drift2 52s ease-in-out infinite alternate;
 }
 
 @keyframes drift {
@@ -67,7 +81,18 @@ body {
     transform: translate(-2%, -1%) scale(1);
   }
   to {
-    transform: translate(3%, 2%) scale(1.08);
+    transform: translate(3%, 2%) scale(1.1);
+  }
+}
+
+@keyframes drift2 {
+  from {
+    transform: translate(2%, 1%) scale(1.05) rotate(0deg);
+    opacity: 0.7;
+  }
+  to {
+    transform: translate(-3%, -2%) scale(1.16) rotate(4deg);
+    opacity: 1;
   }
 }
 
@@ -125,24 +150,76 @@ body {
   position: absolute;
   transform: translate(-50%, -50%);
   cursor: pointer;
-  animation: birth 0.8s ease both;
+  animation: birth 1s cubic-bezier(0.16, 1, 0.3, 1) both;
   z-index: 2;
 }
 
+/* dramatic supernova flash on birth */
+.seed::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #fff 0%, var(--glow, #9fb4ff) 40%, transparent 70%);
+  pointer-events: none;
+  animation: supernova 1.1s ease-out both;
+  z-index: -1;
+}
+
 @keyframes birth {
-  from {
+  0% {
     opacity: 0;
+    transform: translate(-50%, -50%) scale(0.2);
   }
-  to {
+  60% {
     opacity: 1;
+    transform: translate(-50%, -50%) scale(1.18);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes supernova {
+  0% {
+    opacity: 0.95;
+    transform: scale(0.3);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(9);
   }
 }
 
 .seed-core {
+  position: relative;
   border-radius: 50%;
   background: radial-gradient(circle at 35% 30%, #ffffff 0%, var(--glow) 45%, transparent 74%);
   box-shadow: 0 0 14px var(--glow), 0 0 30px var(--glow);
   animation: float 7s ease-in-out infinite, pulse 4.4s ease-in-out infinite;
+}
+
+/* slow rotating halo on every seed */
+.seed-core::after {
+  content: "";
+  position: absolute;
+  inset: -45%;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0deg, color-mix(in srgb, var(--glow) 60%, transparent) 40deg, transparent 120deg);
+  opacity: 0.35;
+  animation: spin 9s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @keyframes float {
@@ -943,4 +1020,262 @@ body {
   flex: 1;
   min-width: 50px;
   accent-color: #aab9ff;
+}
+
+/* ---- Seed foot / replay button ---- */
+.seed-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.seed-foot .spacer {
+  flex: 1;
+}
+
+.ghost-btn.replay {
+  color: #bfe0ff;
+}
+
+.ghost-btn.replay:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* ---- Replay overlay ---- */
+.replay-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(900px 700px at 50% 45%, rgba(10, 14, 34, 0.72), rgba(2, 3, 9, 0.92));
+  backdrop-filter: blur(10px);
+  animation: panelin 0.25s ease both;
+}
+
+.replay-stage {
+  position: relative;
+  width: min(560px, 92vw);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 30px 28px 22px;
+  text-align: center;
+}
+
+.replay-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.replay-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.replay-label {
+  font-family: var(--serif);
+  font-size: 22px;
+  letter-spacing: 0.5px;
+  text-shadow: 0 0 24px var(--c);
+}
+
+.replay-from {
+  max-width: 460px;
+  font-size: 13px;
+  font-style: italic;
+  color: var(--faint);
+  opacity: 0.85;
+  animation: fadein 0.5s ease both;
+}
+
+.replay-from::before {
+  content: "from  ";
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 1px;
+  opacity: 0.6;
+}
+
+.replay-parents {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  animation: fadein 0.5s ease both;
+}
+
+.replay-parent {
+  max-width: 200px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  color: var(--faint);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line);
+}
+
+.replay-orb-wrap {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: orbpop 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.replay-orb {
+  width: 92px;
+  height: 92px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 38% 32%, #fff 0%, var(--c) 52%, transparent 78%);
+  box-shadow: 0 0 34px var(--c), 0 0 80px color-mix(in srgb, var(--c) 60%, transparent);
+  animation: pulse 2.6s ease-in-out infinite;
+}
+
+.replay-shock,
+.replay-shock.two {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 92px;
+  height: 92px;
+  margin: -46px 0 0 -46px;
+  border-radius: 50%;
+  border: 2px solid var(--c);
+  opacity: 0;
+  animation: shock 1s ease-out both;
+}
+
+.replay-shock.two {
+  animation-delay: 0.18s;
+}
+
+@keyframes shock {
+  0% {
+    opacity: 0.8;
+    transform: scale(0.4);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2.6);
+  }
+}
+
+@keyframes orbpop {
+  0% {
+    transform: scale(0.3);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.12);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.stage-symbol {
+  font-size: 40px;
+  line-height: 1;
+  text-shadow: 0 0 16px currentColor;
+}
+
+.stage-emoji {
+  font-size: 38px;
+  line-height: 1;
+  filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.5));
+}
+
+.stage-img {
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+  filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.6));
+}
+
+.replay-text {
+  max-width: 480px;
+  min-height: 48px;
+  font-family: var(--serif);
+  font-size: 17px;
+  line-height: 1.5;
+  color: var(--ink);
+  text-shadow: 0 0 20px rgba(0, 0, 0, 0.7);
+  animation: textrise 0.6s ease both;
+}
+
+@keyframes textrise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadein {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.replay-dots {
+  display: flex;
+  gap: 8px;
+}
+
+.replay-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.replay-dot.done {
+  background: rgba(160, 185, 255, 0.4);
+}
+
+.replay-dot.on {
+  background: var(--c);
+  box-shadow: 0 0 10px var(--c);
+  transform: scale(1.35);
+}
+
+.replay-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 6px;
+  border-radius: 14px;
+  background: var(--glass);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(12px);
+}
+
+.replay-controls .spacer {
+  width: 6px;
 }

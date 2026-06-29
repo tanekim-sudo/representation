@@ -31,6 +31,28 @@ const PROMPTS = {
     "Synthesize these two ideas into a single new idea that captures the essence of both. Return only the combined idea, no preamble.",
 };
 
+// Provenance / formation metadata for replay (invisible until a node is replayed)
+const VERB_META = {
+  plant: { label: "planted", color: "#9fb4ff", symbol: "✦" },
+  write: { label: "written", color: "#cbd5ff", symbol: "✎" },
+  evolve: { label: "evolved", color: "#a78bfa", symbol: "❂" },
+  branch: { label: "branched", color: "#5eead4", symbol: "❧" },
+  split: { label: "split", color: "#fcd34d", symbol: "✸" },
+  combine: { label: "combined", color: "#fb7185", symbol: "⧉" },
+  operator: { label: "operator", color: "#8ab4ff", symbol: "◈" },
+};
+
+function lastText(h) {
+  return h && h.length ? h[h.length - 1].to ?? "" : "";
+}
+
+// Capture a manual edit as a formation stage if the text drifted since last step
+function withWrite(seed) {
+  const h = seed.history && seed.history.length ? seed.history : [{ kind: "plant", op: null, to: "" }];
+  if ((seed.text || "") !== lastText(h)) return [...h, { kind: "write", op: null, to: seed.text || "" }];
+  return h;
+}
+
 const DEFAULT_SYMBOLS = [
   {
     id: "op-summarize",
@@ -73,7 +95,18 @@ function pickColor() {
 }
 
 function makeSeed(x, y, text = "", extra = {}) {
-  return { id: uid(), type: "text", x, y, text, color: pickColor(), born: Date.now(), ...extra };
+  const { history, ...rest } = extra;
+  return {
+    id: uid(),
+    type: "text",
+    x,
+    y,
+    text,
+    color: pickColor(),
+    born: Date.now(),
+    ...rest,
+    history: history || [{ kind: "plant", op: null, to: text }],
+  };
 }
 
 async function runClaude(prompt, text, count = 1) {
@@ -106,6 +139,7 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [editing, setEditing] = useState(null);
   const [toolboxOpen, setToolboxOpen] = useState(true);
+  const [replaySeed, setReplaySeed] = useState(null);
 
   const viewportRef = useRef(null);
   const panRef = useRef(null);
@@ -231,8 +265,10 @@ export default function App() {
     if (!seed.text.trim()) return showToast("This seed is still empty.");
     setBusy(seed.id, true);
     try {
+      const baseH = withWrite(seed);
       const out = await ask(PROMPTS.evolve, seed.text);
-      updateSeed(seed.id, { text: out, color: pickColor() });
+      const history = [...baseH, { kind: "evolve", op: null, to: out }];
+      updateSeed(seed.id, { text: out, color: pickColor(), history });
     } catch (e) {
       showToast(e.message);
     } finally {
@@ -244,9 +280,12 @@ export default function App() {
     if (!seed.text.trim()) return showToast("This seed is still empty.");
     setBusy(seed.id, true);
     try {
+      const baseH = withWrite(seed);
       const out = await ask(PROMPTS.branch, seed.text);
       const pos = placeNear(seed);
-      const child = makeSeed(pos.x, pos.y, out);
+      const child = makeSeed(pos.x, pos.y, out, {
+        history: [...baseH, { kind: "branch", op: null, to: out }],
+      });
       setSeeds((p) => [...p, child]);
       connect(seed.id, child.id);
     } catch (e) {
@@ -268,11 +307,14 @@ export default function App() {
     if (!seed.text.trim()) return showToast("This seed is still empty.");
     setBusy(seed.id, true);
     try {
+      const baseH = withWrite(seed);
       const out = await ask(PROMPTS.split, seed.text);
       const list = parseLines(out);
       const children = list.map((t, i) => {
         const pos = placeNear(seed, i, list.length);
-        return makeSeed(pos.x, pos.y, t);
+        return makeSeed(pos.x, pos.y, t, {
+          history: [...baseH, { kind: "split", op: null, to: t }],
+        });
       });
       setSeeds((p) => [...p, ...children]);
       setEdges((p) => [...p, ...children.map((c) => ({ id: uid(), a: seed.id, b: c.id }))]);
@@ -289,7 +331,19 @@ export default function App() {
     try {
       const out = await ask(PROMPTS.combine, `Idea A:\n${a.text}\n\nIdea B:\n${b.text}`);
       const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 40 };
-      const child = makeSeed(mid.x, mid.y, out);
+      const child = makeSeed(mid.x, mid.y, out, {
+        history: [
+          {
+            kind: "combine",
+            op: null,
+            to: out,
+            parents: [
+              { text: a.text, history: a.history },
+              { text: b.text, history: b.history },
+            ],
+          },
+        ],
+      });
       setSeeds((p) => [...p, child]);
       setEdges((p) => [
         ...p,
@@ -312,6 +366,8 @@ export default function App() {
     const text = (seed.text || "").trim();
     if (!text && seed.type !== "sketch") return showToast("This seed is still empty.");
     const n = Math.min(Math.max(op.count || 1, 1), MAX_RESPONSES);
+    const baseH = withWrite(seed);
+    const opMeta = { name: op.name, color: op.color, image: op.image, emoji: op.emoji };
 
     const placeholders = Array.from({ length: n }, (_, i) => {
       const pos = placeNear(seed, i, n);
@@ -324,6 +380,7 @@ export default function App() {
         color: op.color,
         born: Date.now(),
         loading: true,
+        history: [...baseH, { kind: "operator", op: opMeta, to: "" }],
       };
     });
     setSeeds((p) => [...p, ...placeholders]);
@@ -336,8 +393,10 @@ export default function App() {
         placeholders.forEach((ph, i) => {
           const idx = arr.findIndex((o) => o.id === ph.id);
           if (idx === -1) return;
-          if (i < outs.length) arr[idx] = { ...arr[idx], loading: false, text: outs[i] };
-          else arr.splice(idx, 1);
+          if (i < outs.length) {
+            const hist = [...baseH, { kind: "operator", op: opMeta, to: outs[i] }];
+            arr[idx] = { ...arr[idx], loading: false, text: outs[i], history: hist };
+          } else arr.splice(idx, 1);
         });
         return arr;
       });
@@ -376,7 +435,7 @@ export default function App() {
 
   return (
     <div className="void-app">
-      <Starfield />
+      <Starfield camera={camera} />
       <div className="nebula" />
 
       <div
@@ -475,9 +534,12 @@ export default function App() {
           onSplit={() => split(selectedSeed)}
           onCombine={() => setCombineFrom(selectedSeed.id)}
           onDelete={() => deleteSeed(selectedSeed.id)}
+          onReplay={() => setReplaySeed(selectedSeed)}
           onClose={() => setSelected(null)}
         />
       )}
+
+      {replaySeed && <Replay seed={replaySeed} onClose={() => setReplaySeed(null)} />}
 
       {editing && (
         <SymbolEditor
@@ -563,8 +625,25 @@ function OperatorChip({ operator, onEdit }) {
   );
 }
 
-function Starfield() {
+// Realistic star tints (blue-white giants, sun-like, warm dwarfs)
+const STAR_TINTS = [
+  [170, 196, 255],
+  [202, 220, 255],
+  [235, 240, 255],
+  [255, 252, 240],
+  [255, 232, 200],
+  [255, 210, 170],
+];
+
+function mod(v, m) {
+  return ((v % m) + m) % m;
+}
+
+function Starfield({ camera }) {
   const ref = useRef(null);
+  const camRef = useRef(camera);
+  camRef.current = camera;
+
   useEffect(() => {
     const canvas = ref.current;
     const ctx = canvas.getContext("2d");
@@ -572,41 +651,117 @@ function Starfield() {
     let w = 0;
     let h = 0;
     let stars = [];
+    let shoots = [];
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
     function init() {
-      const n = Math.floor((w * h) / (9000 * dpr));
-      stars = Array.from({ length: Math.max(80, Math.min(260, n)) }, () => ({
-        x: Math.random() * w,
-        y: Math.random() * h,
-        r: Math.random() * 1.5 * dpr + 0.2,
-        a: Math.random() * Math.PI * 2,
-        tw: Math.random() * 0.02 + 0.004,
-        vx: (Math.random() - 0.5) * 0.05 * dpr,
-        vy: (Math.random() - 0.5) * 0.05 * dpr,
-      }));
+      const n = Math.floor((w * h) / (5200 * dpr));
+      const count = Math.max(140, Math.min(420, n));
+      stars = Array.from({ length: count }, () => {
+        const depth = Math.random();
+        const bright = Math.random() < 0.07;
+        return {
+          x: Math.random() * w,
+          y: Math.random() * h,
+          r: (bright ? 1.4 + Math.random() * 1.8 : 0.3 + depth * 1.2) * dpr,
+          base: bright ? 0.85 : 0.25 + depth * 0.5,
+          tw: Math.random() * Math.PI * 2,
+          tws: (bright ? 0.012 : 0.02 + Math.random() * 0.03),
+          par: (0.015 + depth * 0.07) * dpr,
+          tint: STAR_TINTS[Math.floor(Math.random() * STAR_TINTS.length)],
+          bright,
+          spike: bright ? (3 + Math.random() * 4) * dpr : 0,
+        };
+      });
     }
     function resize() {
       w = canvas.width = canvas.offsetWidth * dpr;
       h = canvas.height = canvas.offsetHeight * dpr;
       init();
     }
+
+    function spawnShoot() {
+      const fromLeft = Math.random() < 0.5;
+      const y = Math.random() * h * 0.6;
+      const speed = (7 + Math.random() * 6) * dpr;
+      const ang = (fromLeft ? 0.32 : Math.PI - 0.32) + (Math.random() - 0.5) * 0.18;
+      shoots.push({
+        x: fromLeft ? -40 : w + 40,
+        y,
+        vx: Math.cos(ang) * speed,
+        vy: Math.sin(ang) * speed,
+        life: 1,
+        len: (90 + Math.random() * 80) * dpr,
+        tint: STAR_TINTS[Math.floor(Math.random() * 3)],
+      });
+    }
+
     function tick() {
       ctx.clearRect(0, 0, w, h);
+      const cam = camRef.current || { x: 0, y: 0 };
+
       for (const s of stars) {
-        s.a += s.tw;
-        s.x += s.vx;
-        s.y += s.vy;
-        if (s.x < 0) s.x += w;
-        if (s.x > w) s.x -= w;
-        if (s.y < 0) s.y += h;
-        if (s.y > h) s.y -= h;
-        const alpha = 0.35 + 0.45 * (0.5 + 0.5 * Math.sin(s.a));
+        s.tw += s.tws;
+        const tw = 0.55 + 0.45 * Math.sin(s.tw);
+        const a = Math.min(1, s.base * tw);
+        const px = mod(s.x - cam.x * s.par, w);
+        const py = mod(s.y - cam.y * s.par, h);
+        const [r, g, b] = s.tint;
+
+        if (s.bright) {
+          const glowR = s.r * 7;
+          const grad = ctx.createRadialGradient(px, py, 0, px, py, glowR);
+          grad.addColorStop(0, `rgba(${r},${g},${b},${a * 0.7})`);
+          grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(px, py, glowR, 0, Math.PI * 2);
+          ctx.fill();
+
+          // diffraction spikes
+          ctx.strokeStyle = `rgba(${r},${g},${b},${a * 0.5})`;
+          ctx.lineWidth = 0.7 * dpr;
+          const sp = s.spike * (0.7 + 0.3 * tw);
+          ctx.beginPath();
+          ctx.moveTo(px - sp, py);
+          ctx.lineTo(px + sp, py);
+          ctx.moveTo(px, py - sp);
+          ctx.lineTo(px, py + sp);
+          ctx.stroke();
+        }
+
+        ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
         ctx.beginPath();
-        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(205, 222, 255, ${alpha})`;
+        ctx.arc(px, py, s.r, 0, Math.PI * 2);
         ctx.fill();
       }
+
+      // shooting stars
+      if (Math.random() < 0.005 && shoots.length < 2) spawnShoot();
+      shoots = shoots.filter((sh) => sh.life > 0 && sh.x > -80 && sh.x < w + 80);
+      for (const sh of shoots) {
+        sh.x += sh.vx;
+        sh.y += sh.vy;
+        sh.life -= 0.012;
+        const tx = sh.x - sh.vx * (sh.len / Math.hypot(sh.vx, sh.vy));
+        const ty = sh.y - sh.vy * (sh.len / Math.hypot(sh.vx, sh.vy));
+        const [r, g, b] = sh.tint;
+        const grad = ctx.createLinearGradient(sh.x, sh.y, tx, ty);
+        grad.addColorStop(0, `rgba(${r},${g},${b},${0.9 * sh.life})`);
+        grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+        ctx.strokeStyle = grad;
+        ctx.lineWidth = 1.6 * dpr;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(sh.x, sh.y);
+        ctx.lineTo(tx, ty);
+        ctx.stroke();
+        ctx.fillStyle = `rgba(255,255,255,${sh.life})`;
+        ctx.beginPath();
+        ctx.arc(sh.x, sh.y, 1.6 * dpr, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
       raf = requestAnimationFrame(tick);
     }
     resize();
@@ -708,9 +863,10 @@ function Seed({ seed, scale, selected, combineFrom, combineMode, busy, onActivat
   );
 }
 
-function SeedPanel({ seed, pos, flip, busy, onChange, onEvolve, onBranch, onSplit, onCombine, onDelete, onClose }) {
+function SeedPanel({ seed, pos, flip, busy, onChange, onEvolve, onBranch, onSplit, onCombine, onDelete, onReplay, onClose }) {
   const ref = useRef(null);
   const isSketch = seed.type === "sketch";
+  const stages = (seed.history || []).length;
   useEffect(() => {
     const el = ref.current;
     if (el) {
@@ -762,12 +918,142 @@ function SeedPanel({ seed, pos, flip, busy, onChange, onEvolve, onBranch, onSpli
       )}
 
       <div className="seed-foot">
+        <button className="ghost-btn replay" onClick={onReplay} disabled={stages < 2} title={stages < 2 ? "no formation yet" : "replay formation"}>
+          ▷ replay
+        </button>
+        <div className="spacer" />
         <button className="ghost-btn" onClick={onDelete}>
           dissolve
         </button>
         <button className="ghost-btn" onClick={onClose}>
           close
         </button>
+      </div>
+    </div>
+  );
+}
+
+function StepGlyph({ step, color }) {
+  const op = step.op;
+  if (op && op.image) return <img className="stage-img" src={op.image} alt={op.name || ""} />;
+  if (op && op.emoji) return <span className="stage-emoji">{op.emoji}</span>;
+  const meta = VERB_META[step.kind] || VERB_META.operator;
+  return <span className="stage-symbol" style={{ color }}>{meta.symbol}</span>;
+}
+
+function Replay({ seed, onClose }) {
+  const steps =
+    seed.history && seed.history.length ? seed.history : [{ kind: "plant", op: null, to: seed.text }];
+  const [i, setI] = useState(0);
+  const [playing, setPlaying] = useState(true);
+
+  useEffect(() => {
+    if (!playing) return;
+    if (i >= steps.length - 1) {
+      setPlaying(false);
+      return;
+    }
+    const t = setTimeout(() => setI((v) => v + 1), 2100);
+    return () => clearTimeout(t);
+  }, [i, playing, steps.length]);
+
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key === "Escape") onClose();
+      if (e.key === "ArrowRight") setI((v) => Math.min(steps.length - 1, v + 1));
+      if (e.key === "ArrowLeft") setI((v) => Math.max(0, v - 1));
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [steps.length, onClose]);
+
+  const step = steps[i];
+  const meta = VERB_META[step.kind] || VERB_META.operator;
+  const color = (step.op && step.op.color) || meta.color;
+  const prev = i > 0 ? steps[i - 1] : null;
+  const opLabel = step.op && step.op.name ? step.op.name : meta.label;
+
+  return (
+    <div className="replay-overlay" onClick={onClose}>
+      <div className="replay-stage" onClick={(e) => e.stopPropagation()} style={{ "--c": color }}>
+        <div className="replay-head">
+          <span className="replay-count">
+            stage {i + 1} / {steps.length}
+          </span>
+          <span className="replay-label" style={{ color }}>
+            {opLabel}
+          </span>
+        </div>
+
+        {step.parents && (
+          <div className="replay-parents" key={"p" + i}>
+            {step.parents.map((p, k) => (
+              <div className="replay-parent" key={k}>
+                {(p.text || "").slice(0, 70) || "—"}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {prev && !step.parents && (
+          <div className="replay-from" key={"f" + i}>
+            {(prev.to || "").slice(0, 90) || "an empty seed"}
+          </div>
+        )}
+
+        <div className="replay-orb-wrap" key={"o" + i}>
+          <span className="replay-shock" />
+          <span className="replay-shock two" />
+          <div className="replay-orb">
+            <StepGlyph step={step} color={color} />
+          </div>
+        </div>
+
+        <div className="replay-text" key={"t" + i}>
+          {step.to ? step.to : <em className="muted">empty</em>}
+        </div>
+
+        <div className="replay-dots">
+          {steps.map((_, k) => (
+            <button
+              key={k}
+              className={"replay-dot" + (k === i ? " on" : "") + (k < i ? " done" : "")}
+              onClick={() => {
+                setPlaying(false);
+                setI(k);
+              }}
+            />
+          ))}
+        </div>
+
+        <div className="replay-controls">
+          <button
+            className="ghost-btn"
+            onClick={() => {
+              setI(0);
+              setPlaying(true);
+            }}
+          >
+            ⟲ restart
+          </button>
+          <button className="ghost-btn" onClick={() => setI((v) => Math.max(0, v - 1))} disabled={i === 0}>
+            ‹ prev
+          </button>
+          <button className="ghost-btn" onClick={() => setPlaying((v) => !v)}>
+            {playing ? "❚❚ pause" : "▷ play"}
+          </button>
+          <button
+            className="ghost-btn"
+            onClick={() => setI((v) => Math.min(steps.length - 1, v + 1))}
+            disabled={i >= steps.length - 1}
+          >
+            next ›
+          </button>
+          <div className="spacer" />
+          <button className="ghost-btn" onClick={onClose}>
+            close
+          </button>
+        </div>
       </div>
     </div>
   );
