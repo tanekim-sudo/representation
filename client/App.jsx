@@ -371,21 +371,29 @@ function ResultCard({ result, onApply }) {
       {result.error && <div className="result-body error">{result.error}</div>}
 
       {outputs.length > 0 && (
-        <div className={"options" + (multi ? " grid" : "")}>
-          {outputs.map((out, i) => (
-            <OptionCard
-              key={i}
-              index={i}
-              total={outputs.length}
-              text={out}
-              selected={chosen === i}
-              onChoose={() => setChosen(i)}
-              onApply={() => {
-                setChosen(i);
-                onApply(out);
-              }}
-            />
-          ))}
+        <div className={"options" + (multi && chosen === null ? " grid" : "")}>
+          {multi && chosen !== null && (
+            <button className="show-all" onClick={() => setChosen(null)}>
+              ← Show all {outputs.length} options
+            </button>
+          )}
+          {(chosen !== null ? [outputs[chosen]] : outputs).map((out, idx) => {
+            const i = chosen !== null ? chosen : idx;
+            return (
+              <OptionCard
+                key={i}
+                index={i}
+                total={chosen !== null ? 1 : outputs.length}
+                text={out}
+                selected={chosen === i}
+                onChoose={() => setChosen(i)}
+                onApply={() => {
+                  setChosen(i);
+                  onApply(out);
+                }}
+              />
+            );
+          })}
         </div>
       )}
     </div>
