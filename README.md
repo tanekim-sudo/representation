@@ -31,12 +31,30 @@ Symbols are saved in your browser (localStorage). Your API key stays on the serv
 
    Open the app at http://localhost:5173
 
-## Production
+## Production (self-hosted)
 
 ```bash
 npm run build   # builds the web app into ./dist
 npm start       # serves the app + API on http://localhost:8787
 ```
+
+## Deploy to Vercel
+
+This repo is Vercel-ready. The web app is built statically and the backend runs
+as serverless functions in `api/` (`/api/run`, `/api/health`).
+
+1. Import the GitHub repo into Vercel (or run `vercel`).
+2. Add an Environment Variable in **Project Settings → Environment Variables**:
+
+   | Name                | Value              |
+   | ------------------- | ------------------ |
+   | `ANTHROPIC_API_KEY` | your Claude API key |
+
+   (Optionally also set `CLAUDE_MODEL`.)
+3. Deploy. Vercel uses `vercel.json`: build command `npm run build`, output `dist`.
+
+> Never put your API key in the code or commit it. Set it only in Vercel's
+> Environment Variables (or your local `.env`, which is gitignored).
 
 ## Configuration
 
