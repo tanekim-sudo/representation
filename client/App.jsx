@@ -1,129 +1,96 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const SYMBOLS_KEY = "lens.symbols.v1";
-const OBJECTS_KEY = "lens.objects.v1";
-const CAMERA_KEY = "lens.camera.v1";
-const THEME_KEY = "lens.theme";
-const MAX_RESPONSES = 6;
+const SEEDS_KEY = "lens.seeds.v2";
+const EDGES_KEY = "lens.edges.v2";
+const CAMERA_KEY = "lens.camera.v2";
 
-const GRID = 26;
-const NOTE_W = 268;
-const SKETCH_W = 360;
+const STAR_COLORS = ["#8ab4ff", "#a78bfa", "#22d3ee", "#f0abfc", "#fcd34d", "#7dd3fc", "#5eead4"];
 
-const EMOJI_CHOICES = [
-  "✨", "📝", "🔍", "🌍", "🎯", "💡", "🧹", "📌", "🔥", "🧠",
-  "⚡", "🪄", "📖", "✂️", "🎨", "🧪", "🗜️", "💬", "🔧", "⭐",
-];
-
-const COLOR_CHOICES = [
-  "#6366f1", "#8b5cf6", "#ec4899", "#ef4444", "#f59e0b",
-  "#10b981", "#06b6d4", "#3b82f6", "#14b8a6", "#f43f5e",
-];
-
-const PEN_COLORS = ["#000000", "#ffffff", "#6366f1", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444"];
-const CANVAS_SIZE = 256;
-
-const DEFAULT_SYMBOLS = [
-  {
-    id: "sym-summarize",
-    name: "Summarize",
-    emoji: "📝",
-    color: "#6366f1",
-    prompt: "Summarize the following text concisely while keeping the key points.",
-    count: 1,
-  },
-  {
-    id: "sym-expand",
-    name: "Expand",
-    emoji: "🌱",
-    color: "#10b981",
-    prompt: "Expand this idea into a richer, more developed paragraph with concrete detail.",
-    count: 2,
-  },
-  {
-    id: "sym-remix",
-    name: "Remix",
-    emoji: "🪄",
-    color: "#ec4899",
-    prompt:
-      "Riff on this idea and give a few surprising, creative variations or directions it could go.",
-    count: 3,
-  },
-  {
-    id: "sym-critique",
-    name: "Critique",
-    emoji: "🔍",
-    color: "#f59e0b",
-    prompt: "Critique this idea: what's weak, what's missing, and how could it be stronger?",
-    count: 1,
-  },
-];
+const PROMPTS = {
+  evolve:
+    "Evolve and deepen this idea into a more developed, more interesting form. Keep it a single idea. Return only the evolved idea, no preamble.",
+  branch:
+    "Given this idea, propose ONE new idea that branches off it in a fresh, related but distinct direction. Return only the new idea, no preamble.",
+  split:
+    "Break this idea into 2 to 4 distinct sub-ideas. Return each sub-idea on its own line as a short phrase or sentence. No numbering, no bullets, no preamble.",
+  combine:
+    "Synthesize these two ideas into a single new idea that captures the essence of both. Return only the combined idea, no preamble.",
+};
 
 function uid() {
-  return "id-" + Math.random().toString(36).slice(2, 9);
+  return "s-" + Math.random().toString(36).slice(2, 9);
 }
 
 function load(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return fallback;
-    const parsed = JSON.parse(raw);
-    return parsed ?? fallback;
+    return JSON.parse(raw) ?? fallback;
   } catch {
     return fallback;
   }
 }
 
-function loadSymbols() {
-  const s = load(SYMBOLS_KEY, null);
-  return Array.isArray(s) && s.length ? s : DEFAULT_SYMBOLS;
+function pickColor() {
+  return STAR_COLORS[Math.floor(Math.random() * STAR_COLORS.length)];
 }
 
-function loadObjects() {
-  const o = load(OBJECTS_KEY, null);
-  if (!Array.isArray(o)) {
-    return [
-      {
-        id: uid(),
-        type: "text",
-        x: 60,
-        y: 60,
-        w: NOTE_W,
-        text:
-          "This is your field — an infinite canvas of half-formed ideas.\n\n• Double-click anywhere to drop a new thought.\n• Drag an operator from the left onto any card to transform it.\n• Add sketches, move things around, let ideas float.",
-      },
-    ];
-  }
-  // Clear any transient run state from a previous session.
-  return o.map((obj) => ({ ...obj, loading: false, error: undefined }));
+function makeSeed(x, y, text = "") {
+  return { id: uid(), x, y, text, color: pickColor(), born: Date.now() };
+}
+
+async function ask(prompt, text) {
+  const res = await fetch("/api/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, text, count: 1 }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "The void did not answer.");
+  return (data.outputs && data.outputs[0]) || "";
 }
 
 export default function App() {
-  const [symbols, setSymbols] = useState(loadSymbols);
-  const [objects, setObjects] = useState(loadObjects);
+  const [seeds, setSeeds] = useState(() => load(SEEDS_KEY, []));
+  const [edges, setEdges] = useState(() => load(EDGES_KEY, []));
   const [camera, setCamera] = useState(() => load(CAMERA_KEY, { x: 0, y: 0, scale: 1 }));
-  const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || "light");
-  const [editing, setEditing] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [dropTarget, setDropTarget] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [combineFrom, setCombineFrom] = useState(null);
+  const [busyIds, setBusyIds] = useState([]);
+  const [toast, setToast] = useState(null);
 
   const viewportRef = useRef(null);
   const panRef = useRef(null);
 
-  useEffect(() => localStorage.setItem(SYMBOLS_KEY, JSON.stringify(symbols)), [symbols]);
   useEffect(() => {
-    const clean = objects.map((o) => ({ ...o, loading: false, error: undefined }));
-    localStorage.setItem(OBJECTS_KEY, JSON.stringify(clean));
-  }, [objects]);
+    const clean = seeds.map(({ busy, flash, ...s }) => s);
+    localStorage.setItem(SEEDS_KEY, JSON.stringify(clean));
+  }, [seeds]);
+  useEffect(() => localStorage.setItem(EDGES_KEY, JSON.stringify(edges)), [edges]);
   useEffect(() => localStorage.setItem(CAMERA_KEY, JSON.stringify(camera)), [camera]);
-  useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem(THEME_KEY, theme);
-  }, [theme]);
 
-  // ---- camera helpers ----
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key === "Escape") {
+        setSelected(null);
+        setCombineFrom(null);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  function showToast(msg) {
+    setToast(msg);
+    setTimeout(() => setToast(null), 3200);
+  }
+
+  // ---- camera ----
   function screenToWorld(sx, sy) {
     return { x: (sx - camera.x) / camera.scale, y: (sy - camera.y) / camera.scale };
+  }
+  function worldToScreen(wx, wy) {
+    return { x: wx * camera.scale + camera.x, y: wy * camera.scale + camera.y };
   }
   function viewCenterWorld() {
     const r = viewportRef.current?.getBoundingClientRect();
@@ -131,736 +98,431 @@ export default function App() {
     return screenToWorld(r.width / 2, r.height / 2);
   }
 
-  // ---- panning ----
-  function onViewportPointerDown(e) {
-    // Only pan when the background itself is grabbed.
-    if (e.target.closest(".note")) return;
-    panRef.current = { x: e.clientX, y: e.clientY };
+  function onPointerDown(e) {
+    if (e.target.closest(".seed") || e.target.closest(".seed-panel")) return;
+    panRef.current = { x: e.clientX, y: e.clientY, moved: 0 };
     viewportRef.current.setPointerCapture(e.pointerId);
   }
-  function onViewportPointerMove(e) {
+  function onPointerMove(e) {
     if (!panRef.current) return;
     const dx = e.clientX - panRef.current.x;
     const dy = e.clientY - panRef.current.y;
-    panRef.current = { x: e.clientX, y: e.clientY };
+    panRef.current.x = e.clientX;
+    panRef.current.y = e.clientY;
+    panRef.current.moved += Math.abs(dx) + Math.abs(dy);
     setCamera((c) => ({ ...c, x: c.x + dx, y: c.y + dy }));
   }
-  function onViewportPointerUp() {
+  function onPointerUp() {
+    const p = panRef.current;
     panRef.current = null;
+    if (p && p.moved < 4) {
+      setSelected(null);
+      setCombineFrom(null);
+    }
   }
-
   function onWheel(e) {
     const r = viewportRef.current.getBoundingClientRect();
     const sx = e.clientX - r.left;
     const sy = e.clientY - r.top;
     setCamera((c) => {
       const factor = Math.exp(-e.deltaY * 0.0015);
-      const scale = Math.min(2.5, Math.max(0.3, c.scale * factor));
+      const scale = Math.min(2.6, Math.max(0.25, c.scale * factor));
       const wx = (sx - c.x) / c.scale;
       const wy = (sy - c.y) / c.scale;
       return { x: sx - wx * scale, y: sy - wy * scale, scale };
     });
   }
-
-  function onBackgroundDoubleClick(e) {
-    if (e.target.closest(".note")) return;
+  function onDoubleClick(e) {
+    if (e.target.closest(".seed") || e.target.closest(".seed-panel")) return;
     const r = viewportRef.current.getBoundingClientRect();
     const w = screenToWorld(e.clientX - r.left, e.clientY - r.top);
-    addText(w.x - NOTE_W / 2, w.y - 30);
+    const seed = makeSeed(w.x, w.y, "");
+    setSeeds((p) => [...p, seed]);
+    setSelected(seed.id);
   }
 
-  // ---- objects ----
-  function addText(x, y) {
-    const c = viewCenterWorld();
-    const obj = {
-      id: uid(),
-      type: "text",
-      x: x ?? c.x - NOTE_W / 2,
-      y: y ?? c.y - 30,
-      w: NOTE_W,
-      text: "",
-    };
-    setObjects((p) => [...p, obj]);
+  // ---- seed ops ----
+  function updateSeed(id, patch) {
+    setSeeds((p) => p.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   }
-  function addSketch() {
-    const c = viewCenterWorld();
-    setObjects((p) => [
-      ...p,
-      {
-        id: uid(),
-        type: "sketch",
-        x: c.x - SKETCH_W / 2,
-        y: c.y - 120,
-        w: SKETCH_W,
-        image: null,
-        strokes: [],
-        color: COLOR_CHOICES[Math.floor(Math.random() * COLOR_CHOICES.length)],
-      },
-    ]);
+  function moveSeedBy(id, dx, dy) {
+    setSeeds((p) => p.map((s) => (s.id === id ? { ...s, x: s.x + dx, y: s.y + dy } : s)));
   }
-  function updateObject(id, patch) {
-    setObjects((p) => p.map((o) => (o.id === id ? { ...o, ...patch } : o)));
+  function deleteSeed(id) {
+    setSeeds((p) => p.filter((s) => s.id !== id));
+    setEdges((p) => p.filter((e) => e.a !== id && e.b !== id));
+    if (selected === id) setSelected(null);
+    if (combineFrom === id) setCombineFrom(null);
   }
-  function moveObjectBy(id, dxWorld, dyWorld) {
-    setObjects((p) => p.map((o) => (o.id === id ? { ...o, x: o.x + dxWorld, y: o.y + dyWorld } : o)));
+  function connect(a, b) {
+    setEdges((p) => [...p, { id: uid(), a, b }]);
   }
-  function removeObject(id) {
-    setObjects((p) => p.filter((o) => o.id !== id));
+  function setBusy(id, on) {
+    setBusyIds((p) => (on ? [...new Set([...p, id])] : p.filter((x) => x !== id)));
   }
 
-  // ---- run an operator on a note ----
-  async function runOperator(opId, target) {
-    const op = symbols.find((s) => s.id === opId);
-    if (!op) return;
-    const text = (target.text || "").trim();
-    const n = Math.min(Math.max(op.count || 1, 1), MAX_RESPONSES);
-    const startX = target.x + (target.w || NOTE_W) + 64;
+  function placeNear(seed, index = 0, total = 1) {
+    const base = Math.random() * Math.PI * 2;
+    const angle = total > 1 ? base + (index / total) * Math.PI * 1.6 : base;
+    const radius = 150 + Math.random() * 40;
+    return { x: seed.x + Math.cos(angle) * radius, y: seed.y + Math.sin(angle) * radius };
+  }
 
-    const placeholders = Array.from({ length: n }, (_, i) => ({
-      id: uid(),
-      type: "text",
-      x: startX,
-      y: target.y + i * 150,
-      w: NOTE_W,
-      text: "",
-      loading: true,
-      from: { name: op.name, color: op.color, image: op.image, emoji: op.emoji },
-    }));
-    setObjects((p) => [...p, ...placeholders]);
-    setBusy(true);
-
+  async function evolve(seed) {
+    if (!seed.text.trim()) return showToast("This seed is still empty.");
+    setBusy(seed.id, true);
     try {
-      const res = await fetch("/api/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: op.prompt, text, count: n }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Request failed");
-      const outs = data.outputs || [];
-      setObjects((prev) => {
-        const arr = [...prev];
-        placeholders.forEach((ph, i) => {
-          const idx = arr.findIndex((o) => o.id === ph.id);
-          if (idx === -1) return;
-          if (i < outs.length) arr[idx] = { ...arr[idx], loading: false, text: outs[i] };
-          else arr.splice(idx, 1);
-        });
-        return arr;
-      });
-    } catch (err) {
-      setObjects((prev) =>
-        prev.map((o) =>
-          placeholders.some((p) => p.id === o.id)
-            ? { ...o, loading: false, error: err.message }
-            : o
-        )
-      );
+      const out = await ask(PROMPTS.evolve, seed.text);
+      updateSeed(seed.id, { text: out, color: pickColor() });
+      pulse(seed.id);
+    } catch (e) {
+      showToast(e.message);
     } finally {
-      setBusy(false);
+      setBusy(seed.id, false);
     }
   }
 
-  // ---- operators ----
-  function saveSymbol(sym) {
-    setSymbols((prev) => {
-      const exists = prev.some((s) => s.id === sym.id);
-      return exists ? prev.map((s) => (s.id === sym.id ? sym : s)) : [...prev, sym];
-    });
-    setEditing(null);
-  }
-  function deleteSymbol(id) {
-    setSymbols((prev) => prev.filter((s) => s.id !== id));
+  async function branch(seed) {
+    if (!seed.text.trim()) return showToast("This seed is still empty.");
+    setBusy(seed.id, true);
+    try {
+      const out = await ask(PROMPTS.branch, seed.text);
+      const pos = placeNear(seed);
+      const child = makeSeed(pos.x, pos.y, out);
+      setSeeds((p) => [...p, child]);
+      connect(seed.id, child.id);
+    } catch (e) {
+      showToast(e.message);
+    } finally {
+      setBusy(seed.id, false);
+    }
   }
 
-  function resetView() {
-    setCamera({ x: 0, y: 0, scale: 1 });
+  async function split(seed) {
+    if (!seed.text.trim()) return showToast("This seed is still empty.");
+    setBusy(seed.id, true);
+    try {
+      const out = await ask(PROMPTS.split, seed.text);
+      const parts = out
+        .split("\n")
+        .map((l) => l.replace(/^[\s\-\*\d.\)]+/, "").trim())
+        .filter(Boolean);
+      const list = parts.length ? parts : [out];
+      const children = list.map((t, i) => {
+        const pos = placeNear(seed, i, list.length);
+        return makeSeed(pos.x, pos.y, t);
+      });
+      setSeeds((p) => [...p, ...children]);
+      setEdges((p) => [...p, ...children.map((c) => ({ id: uid(), a: seed.id, b: c.id }))]);
+    } catch (e) {
+      showToast(e.message);
+    } finally {
+      setBusy(seed.id, false);
+    }
   }
+
+  async function combine(a, b) {
+    setBusy(a.id, true);
+    setBusy(b.id, true);
+    try {
+      const out = await ask(PROMPTS.combine, `Idea A:\n${a.text}\n\nIdea B:\n${b.text}`);
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 40 };
+      const child = makeSeed(mid.x, mid.y, out);
+      setSeeds((p) => [...p, child]);
+      setEdges((p) => [
+        ...p,
+        { id: uid(), a: a.id, b: child.id },
+        { id: uid(), a: b.id, b: child.id },
+      ]);
+      setSelected(child.id);
+    } catch (e) {
+      showToast(e.message);
+    } finally {
+      setBusy(a.id, false);
+      setBusy(b.id, false);
+    }
+  }
+
+  function pulse(id) {
+    setSeeds((p) => p.map((s) => (s.id === id ? { ...s, flash: Date.now() } : s)));
+  }
+
+  function onSeedActivate(id) {
+    if (combineFrom && combineFrom !== id) {
+      const a = seeds.find((s) => s.id === combineFrom);
+      const b = seeds.find((s) => s.id === id);
+      setCombineFrom(null);
+      if (a && b) combine(a, b);
+      return;
+    }
+    setSelected(id);
+  }
+
+  const selectedSeed = seeds.find((s) => s.id === selected) || null;
+  const screenPos = selectedSeed ? worldToScreen(selectedSeed.x, selectedSeed.y) : null;
 
   return (
-    <div className="app">
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">◎</span>
-          <div>
-            <h1>Lens</h1>
-            <p>A lab for your ideas — drag operators onto thoughts.</p>
-          </div>
+    <div className="void-app">
+      <Starfield />
+
+      <div className="nebula" />
+
+      <div
+        className="viewport"
+        ref={viewportRef}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerLeave={onPointerUp}
+        onWheel={onWheel}
+        onDoubleClick={onDoubleClick}
+      >
+        <div
+          className="world"
+          style={{ transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.scale})` }}
+        >
+          <Synapses seeds={seeds} edges={edges} />
+          {seeds.map((s) => (
+            <Seed
+              key={s.id}
+              seed={s}
+              scale={camera.scale}
+              selected={selected === s.id}
+              combineFrom={combineFrom === s.id}
+              combineMode={Boolean(combineFrom)}
+              busy={busyIds.includes(s.id)}
+              onActivate={() => onSeedActivate(s.id)}
+              onMoveBy={(dx, dy) => moveSeedBy(s.id, dx, dy)}
+            />
+          ))}
         </div>
-        <div className="topbar-actions">
-          <button
-            className="btn ghost theme-toggle"
-            onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
-            title={theme === "light" ? "Switch to dark" : "Switch to light"}
-          >
-            {theme === "light" ? "☾" : "☀"}
-          </button>
-          <button className="btn primary" onClick={() => setEditing(makeBlankSymbol())}>
-            + New operator
-          </button>
-        </div>
+      </div>
+
+      <header className="void-brand">
+        <span className="void-mark">✦</span>
+        <span>lens</span>
       </header>
 
-      <main className="layout">
-        <aside className="toolbox">
-          <div className="toolbox-head">
-            <h2>Operators</h2>
-            <p className="hint">Your toolbox. Drag one onto an idea to transform it.</p>
-          </div>
-          <div className="operator-list">
-            {symbols.map((s) => (
-              <OperatorChip key={s.id} operator={s} onEdit={() => setEditing(s)} />
-            ))}
-          </div>
-          <button className="btn ghost add-op" onClick={() => setEditing(makeBlankSymbol())}>
-            + Form a new operator
-          </button>
-        </aside>
+      {seeds.length === 0 && (
+        <div className="void-hint">
+          <p>emptiness, full of potential</p>
+          <span>double&#8209;click anywhere to plant a seed of light</span>
+        </div>
+      )}
 
-        <section className="field">
-          <div
-            className="viewport"
-            ref={viewportRef}
-            onPointerDown={onViewportPointerDown}
-            onPointerMove={onViewportPointerMove}
-            onPointerUp={onViewportPointerUp}
-            onPointerLeave={onViewportPointerUp}
-            onWheel={onWheel}
-            onDoubleClick={onBackgroundDoubleClick}
-            style={{
-              backgroundSize: `${GRID * camera.scale}px ${GRID * camera.scale}px`,
-              backgroundPosition: `${camera.x}px ${camera.y}px`,
-            }}
-          >
-            <div
-              className="world"
-              style={{
-                transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.scale})`,
-              }}
-            >
-              {objects.map((obj) => (
-                <NoteCard
-                  key={obj.id}
-                  obj={obj}
-                  scale={camera.scale}
-                  isDropTarget={dropTarget === obj.id}
-                  onMoveBy={(dx, dy) => moveObjectBy(obj.id, dx, dy)}
-                  onChange={(patch) => updateObject(obj.id, patch)}
-                  onRemove={() => removeObject(obj.id)}
-                  onOperatorEnter={() => setDropTarget(obj.id)}
-                  onOperatorLeave={() => setDropTarget((d) => (d === obj.id ? null : d))}
-                  onRunOperator={(opId) => {
-                    setDropTarget(null);
-                    runOperator(opId, obj);
-                  }}
-                />
-              ))}
-            </div>
+      {combineFrom && (
+        <div className="combine-banner">
+          choose another seed to combine · <em>esc to cancel</em>
+        </div>
+      )}
 
-            {objects.length === 0 && (
-              <div className="field-empty">
-                Double-click anywhere to drop your first idea
-              </div>
-            )}
-
-            <div className="field-toolbar">
-              <button className="btn small" onClick={() => addText()}>
-                + Note
-              </button>
-              <button className="btn small" onClick={addSketch}>
-                + Sketch
-              </button>
-            </div>
-
-            <div className="field-zoom">
-              <button
-                className="btn ghost small"
-                onClick={() =>
-                  setCamera((c) => ({ ...c, scale: Math.max(0.3, c.scale - 0.15) }))
-                }
-              >
-                −
-              </button>
-              <button className="btn ghost small" onClick={resetView}>
-                {Math.round(camera.scale * 100)}%
-              </button>
-              <button
-                className="btn ghost small"
-                onClick={() =>
-                  setCamera((c) => ({ ...c, scale: Math.min(2.5, c.scale + 0.15) }))
-                }
-              >
-                +
-              </button>
-            </div>
-          </div>
-        </section>
-      </main>
-
-      {editing && (
-        <SymbolEditor
-          symbol={editing}
-          onSave={saveSymbol}
-          onDelete={editing.id && symbols.some((s) => s.id === editing.id) ? deleteSymbol : null}
-          onClose={() => setEditing(null)}
+      {selectedSeed && screenPos && (
+        <SeedPanel
+          seed={selectedSeed}
+          pos={screenPos}
+          flip={screenPos.x > window.innerWidth - 340}
+          busy={busyIds.includes(selectedSeed.id)}
+          onChange={(text) => updateSeed(selectedSeed.id, { text })}
+          onEvolve={() => evolve(selectedSeed)}
+          onBranch={() => branch(selectedSeed)}
+          onSplit={() => split(selectedSeed)}
+          onCombine={() => setCombineFrom(selectedSeed.id)}
+          onDelete={() => deleteSeed(selectedSeed.id)}
+          onClose={() => setSelected(null)}
         />
       )}
 
-      {busy && <div className="busybar" />}
+      {toast && <div className="void-toast">{toast}</div>}
     </div>
   );
 }
 
-function makeBlankSymbol() {
-  return {
-    id: uid(),
-    name: "",
-    emoji: EMOJI_CHOICES[Math.floor(Math.random() * EMOJI_CHOICES.length)],
-    color: COLOR_CHOICES[Math.floor(Math.random() * COLOR_CHOICES.length)],
-    image: null,
-    strokes: [],
-    prompt: "",
-    count: 1,
-    __isNew: true,
-  };
+function Starfield() {
+  const ref = useRef(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    const ctx = canvas.getContext("2d");
+    let raf;
+    let w = 0;
+    let h = 0;
+    let stars = [];
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    function init() {
+      const n = Math.floor((w * h) / (9000 * dpr));
+      stars = Array.from({ length: Math.max(80, Math.min(260, n)) }, () => ({
+        x: Math.random() * w,
+        y: Math.random() * h,
+        r: Math.random() * 1.5 * dpr + 0.2,
+        a: Math.random() * Math.PI * 2,
+        tw: Math.random() * 0.02 + 0.004,
+        vx: (Math.random() - 0.5) * 0.05 * dpr,
+        vy: (Math.random() - 0.5) * 0.05 * dpr,
+      }));
+    }
+    function resize() {
+      w = canvas.width = canvas.offsetWidth * dpr;
+      h = canvas.height = canvas.offsetHeight * dpr;
+      init();
+    }
+    function tick() {
+      ctx.clearRect(0, 0, w, h);
+      for (const s of stars) {
+        s.a += s.tw;
+        s.x += s.vx;
+        s.y += s.vy;
+        if (s.x < 0) s.x += w;
+        if (s.x > w) s.x -= w;
+        if (s.y < 0) s.y += h;
+        if (s.y > h) s.y -= h;
+        const alpha = 0.35 + 0.45 * (0.5 + 0.5 * Math.sin(s.a));
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(205, 222, 255, ${alpha})`;
+        ctx.fill();
+      }
+      raf = requestAnimationFrame(tick);
+    }
+    resize();
+    tick();
+    window.addEventListener("resize", resize);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", resize);
+    };
+  }, []);
+  return <canvas ref={ref} className="starfield" />;
 }
 
-function SymbolIcon({ symbol, size = 22 }) {
-  if (symbol?.image) {
-    return (
-      <img
-        className="symbol-icon"
-        src={symbol.image}
-        alt={symbol.name || "operator"}
-        width={size}
-        height={size}
-        draggable={false}
-      />
-    );
-  }
+function Synapses({ seeds, edges }) {
+  const pos = useMemo(() => {
+    const m = {};
+    for (const s of seeds) m[s.id] = s;
+    return m;
+  }, [seeds]);
+
   return (
-    <span className="symbol-icon emoji" style={{ fontSize: size * 0.9 }}>
-      {symbol?.emoji}
-    </span>
+    <svg className="synapses" overflow="visible">
+      {edges.map((e) => {
+        const a = pos[e.a];
+        const b = pos[e.b];
+        if (!a || !b) return null;
+        return (
+          <line
+            key={e.id}
+            x1={a.x}
+            y1={a.y}
+            x2={b.x}
+            y2={b.y}
+            className="synapse"
+            stroke={a.color}
+          />
+        );
+      })}
+    </svg>
   );
 }
 
-function OperatorChip({ operator, onEdit }) {
-  const ghostRef = useRef(null);
+function Seed({ seed, scale, selected, combineFrom, combineMode, busy, onActivate, onMoveBy }) {
+  const drag = useRef(null);
+  const size = Math.round(20 + Math.min((seed.text || "").length / 12, 26));
+
+  function down(e) {
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    drag.current = { x: e.clientX, y: e.clientY, moved: 0 };
+  }
+  function move(e) {
+    if (!drag.current) return;
+    const dx = (e.clientX - drag.current.x) / scale;
+    const dy = (e.clientY - drag.current.y) / scale;
+    drag.current.x = e.clientX;
+    drag.current.y = e.clientY;
+    drag.current.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
+    onMoveBy(dx, dy);
+  }
+  function up(e) {
+    const d = drag.current;
+    drag.current = null;
+    if (d && d.moved < 4) onActivate();
+  }
+
+  const preview = (seed.text || "").trim().split("\n")[0].slice(0, 36);
+
   return (
     <div
-      className="operator-chip"
-      draggable
-      onDragStart={(e) => {
-        e.dataTransfer.setData("text/lens-operator", operator.id);
-        e.dataTransfer.effectAllowed = "copy";
-        if (ghostRef.current) e.dataTransfer.setDragImage(ghostRef.current, 28, 28);
-      }}
-      style={{ "--accent": operator.color }}
-      title="Drag onto an idea in the field"
+      className={
+        "seed" +
+        (selected ? " selected" : "") +
+        (combineFrom ? " combine-from" : "") +
+        (combineMode ? " targetable" : "") +
+        (busy ? " busy" : "")
+      }
+      style={{ left: seed.x, top: seed.y }}
+      onPointerDown={down}
+      onPointerMove={move}
+      onPointerUp={up}
+      onPointerLeave={up}
     >
-      <span className="chip-icon">
-        <SymbolIcon symbol={operator} size={22} />
-      </span>
-      <span className="chip-name">{operator.name || "Untitled"}</span>
-      {operator.count > 1 && <span className="chip-count">×{operator.count}</span>}
-      <button
-        className="chip-edit"
-        onClick={(e) => {
-          e.stopPropagation();
-          onEdit();
+      <div
+        className="seed-core"
+        style={{
+          width: size,
+          height: size,
+          "--glow": seed.color,
         }}
-        title="Edit operator"
-      >
-        ⚙
-      </button>
-      <div className="drag-ghost" ref={ghostRef} style={{ "--accent": operator.color }}>
-        <SymbolIcon symbol={operator} size={40} />
-      </div>
+      />
+      {preview && <div className="seed-label">{preview}</div>}
     </div>
   );
 }
 
-function AutoTextarea({ value, onChange, ...rest }) {
+function SeedPanel({ seed, pos, flip, busy, onChange, onEvolve, onBranch, onSplit, onCombine, onDelete, onClose }) {
   const ref = useRef(null);
   useEffect(() => {
     const el = ref.current;
     if (el) {
       el.style.height = "auto";
-      el.style.height = el.scrollHeight + "px";
+      el.style.height = Math.min(el.scrollHeight, 220) + "px";
     }
-  }, [value]);
-  return <textarea ref={ref} value={value} onChange={onChange} {...rest} />;
-}
-
-function NoteCard({
-  obj,
-  scale,
-  isDropTarget,
-  onMoveBy,
-  onChange,
-  onRemove,
-  onRunOperator,
-  onOperatorEnter,
-  onOperatorLeave,
-}) {
-  const last = useRef(null);
-  const accent = obj.from?.color || obj.color;
-
-  function onHandleDown(e) {
-    e.stopPropagation();
-    e.currentTarget.setPointerCapture(e.pointerId);
-    last.current = { x: e.clientX, y: e.clientY };
-  }
-  function onHandleMove(e) {
-    if (!last.current) return;
-    const dx = (e.clientX - last.current.x) / scale;
-    const dy = (e.clientY - last.current.y) / scale;
-    last.current = { x: e.clientX, y: e.clientY };
-    onMoveBy(dx, dy);
-  }
-  function onHandleUp() {
-    last.current = null;
-  }
+  }, [seed.text]);
 
   return (
     <div
-      className={"note" + (isDropTarget ? " drop-target" : "") + (obj.from ? " result" : "")}
-      style={{ left: obj.x, top: obj.y, width: obj.w, "--accent": accent || "var(--border)" }}
-      onDragOver={(e) => {
-        e.preventDefault();
-        onOperatorEnter();
-      }}
-      onDragLeave={onOperatorLeave}
-      onDrop={(e) => {
-        e.preventDefault();
-        const id = e.dataTransfer.getData("text/lens-operator");
-        if (id) onRunOperator(id);
-      }}
+      className={"seed-panel" + (flip ? " left" : "")}
+      style={{ left: pos.x, top: pos.y, "--glow": seed.color }}
+      onPointerDown={(e) => e.stopPropagation()}
     >
-      <div
-        className="note-handle"
-        onPointerDown={onHandleDown}
-        onPointerMove={onHandleMove}
-        onPointerUp={onHandleUp}
-        onPointerLeave={onHandleUp}
-      >
-        {obj.from ? (
-          <span className="note-from">
-            <SymbolIcon symbol={obj.from} size={15} /> {obj.from.name}
-          </span>
-        ) : (
-          <span className="note-grip">⋮⋮</span>
-        )}
-        <button
-          className="note-close"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={onRemove}
-          title="Delete"
-        >
-          ×
+      <div className="seed-panel-glow" />
+      <textarea
+        ref={ref}
+        autoFocus
+        className="seed-input"
+        value={seed.text}
+        placeholder="speak the thought into being…"
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <div className="seed-actions">
+        <button className="orb-btn" onClick={onBranch} disabled={busy} title="Branch a new direction">
+          branch
+        </button>
+        <button className="orb-btn" onClick={onEvolve} disabled={busy} title="Evolve this seed">
+          evolve
+        </button>
+        <button className="orb-btn" onClick={onSplit} disabled={busy} title="Split into sub-ideas">
+          split
+        </button>
+        <button className="orb-btn" onClick={onCombine} disabled={busy} title="Combine with another seed">
+          combine
         </button>
       </div>
-
-      {obj.type === "sketch" ? (
-        <div className="note-body sketch" onPointerDown={(e) => e.stopPropagation()}>
-          <DrawPad
-            initialStrokes={obj.strokes}
-            accent={accent}
-            onChange={(image, strokes) => onChange({ image, strokes })}
-          />
-        </div>
-      ) : obj.loading ? (
-        <div className="note-body note-loading">Thinking…</div>
-      ) : obj.error ? (
-        <div className="note-body note-error">{obj.error}</div>
-      ) : (
-        <AutoTextarea
-          className="note-body note-text"
-          value={obj.text}
-          placeholder="an idea…"
-          onPointerDown={(e) => e.stopPropagation()}
-          onChange={(e) => onChange({ text: e.target.value })}
-        />
-      )}
-    </div>
-  );
-}
-
-function DrawPad({ initialStrokes = [], accent = "#6366f1", onChange }) {
-  const canvasRef = useRef(null);
-  const [strokes, setStrokes] = useState(() => initialStrokes || []);
-  const [color, setColor] = useState("#000000");
-  const [size, setSize] = useState(8);
-  const [erasing, setErasing] = useState(false);
-  const drawingRef = useRef(null);
-
-  function paintStroke(ctx, stroke) {
-    if (!stroke.points.length) return;
-    ctx.globalCompositeOperation = stroke.erase ? "destination-out" : "source-over";
-    ctx.strokeStyle = stroke.color;
-    ctx.fillStyle = stroke.color;
-    ctx.lineWidth = stroke.size;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    const pts = stroke.points;
-    if (pts.length === 1) {
-      ctx.beginPath();
-      ctx.arc(pts[0].x, pts[0].y, stroke.size / 2, 0, Math.PI * 2);
-      ctx.fill();
-      return;
-    }
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-    ctx.stroke();
-  }
-
-  function redraw(allStrokes) {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
-    for (const s of allStrokes) paintStroke(ctx, s);
-    ctx.globalCompositeOperation = "source-over";
-  }
-
-  useEffect(() => {
-    redraw(strokes);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function commit(next) {
-    setStrokes(next);
-    redraw(next);
-    const hasInk = next.some((s) => !s.erase && s.points.length);
-    const image = hasInk ? canvasRef.current.toDataURL("image/png") : null;
-    onChange?.(image, next);
-  }
-
-  function toCanvasCoords(e) {
-    const rect = canvasRef.current.getBoundingClientRect();
-    return {
-      x: ((e.clientX - rect.left) / rect.width) * CANVAS_SIZE,
-      y: ((e.clientY - rect.top) / rect.height) * CANVAS_SIZE,
-    };
-  }
-
-  function onPointerDown(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    canvasRef.current.setPointerCapture(e.pointerId);
-    const stroke = { color, size, erase: erasing, points: [toCanvasCoords(e)] };
-    drawingRef.current = stroke;
-    const ctx = canvasRef.current.getContext("2d");
-    paintStroke(ctx, stroke);
-    ctx.globalCompositeOperation = "source-over";
-  }
-  function onPointerMove(e) {
-    if (!drawingRef.current) return;
-    drawingRef.current.points.push(toCanvasCoords(e));
-    redraw([...strokes, drawingRef.current]);
-  }
-  function onPointerUp() {
-    if (!drawingRef.current) return;
-    const next = [...strokes, drawingRef.current];
-    drawingRef.current = null;
-    commit(next);
-  }
-
-  return (
-    <div className="drawpad">
-      <div className="drawpad-canvas-wrap" style={{ "--accent": accent }}>
-        <canvas
-          ref={canvasRef}
-          width={CANVAS_SIZE}
-          height={CANVAS_SIZE}
-          className="drawpad-canvas"
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerLeave={onPointerUp}
-        />
-        {strokes.length === 0 && <div className="drawpad-placeholder">draw here</div>}
-      </div>
-
-      <div className="drawpad-tools">
-        <div className="pen-colors">
-          {PEN_COLORS.map((c) => (
-            <button
-              key={c}
-              className={"pen-dot" + (!erasing && color === c ? " on" : "")}
-              style={{ background: c }}
-              onClick={() => {
-                setColor(c);
-                setErasing(false);
-              }}
-              title={c}
-            />
-          ))}
-          <label className="pen-dot custom" title="Custom color">
-            <input
-              type="color"
-              value={color}
-              onChange={(e) => {
-                setColor(e.target.value);
-                setErasing(false);
-              }}
-            />
-          </label>
-        </div>
-
-        <div className="drawpad-row">
-          <button
-            className={"btn ghost small" + (erasing ? " active" : "")}
-            onClick={() => setErasing((v) => !v)}
-          >
-            {erasing ? "Erasing" : "Eraser"}
-          </button>
-          <input
-            className="size-slider"
-            type="range"
-            min="2"
-            max="40"
-            value={size}
-            onChange={(e) => setSize(Number(e.target.value))}
-            title="Brush size"
-          />
-          <button className="btn ghost small" onClick={() => commit(strokes.slice(0, -1))} disabled={!strokes.length}>
-            Undo
-          </button>
-          <button className="btn ghost small" onClick={() => commit([])} disabled={!strokes.length}>
-            Clear
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SymbolEditor({ symbol, onSave, onDelete, onClose }) {
-  const [draft, setDraft] = useState({ ...symbol });
-  const valid = draft.name.trim() && draft.prompt.trim();
-
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{symbol.__isNew ? "Form a new operator" : "Edit operator"}</h2>
-
-        <label className="field">
-          <span>Name</span>
-          <input
-            autoFocus
-            value={draft.name}
-            placeholder="e.g. Make formal"
-            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-          />
-        </label>
-
-        <div className="field">
-          <span>Draw its glyph</span>
-          <DrawPad
-            initialStrokes={draft.strokes}
-            accent={draft.color}
-            onChange={(image, strokes) => setDraft((d) => ({ ...d, image, strokes }))}
-          />
-          <small className="muted">Draw the operator's mark, or leave blank to use the emoji below.</small>
-        </div>
-
-        <div className="field-row">
-          <div className="field">
-            <span>Accent color</span>
-            <div className="color-grid">
-              {COLOR_CHOICES.map((c) => (
-                <button
-                  key={c}
-                  className={"color-opt" + (draft.color === c ? " on" : "")}
-                  style={{ background: c }}
-                  onClick={() => setDraft({ ...draft, color: c })}
-                />
-              ))}
-            </div>
-          </div>
-          <div className="field">
-            <span>Emoji fallback</span>
-            <div className="emoji-grid small">
-              {EMOJI_CHOICES.map((em) => (
-                <button
-                  key={em}
-                  className={"emoji-opt" + (draft.emoji === em ? " on" : "")}
-                  onClick={() => setDraft({ ...draft, emoji: em })}
-                >
-                  {em}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="field">
-          <span>Responses per run</span>
-          <div className="stepper-row">
-            <div className="stepper">
-              <button
-                className="stepper-btn"
-                onClick={() => setDraft((d) => ({ ...d, count: Math.max(1, (d.count || 1) - 1) }))}
-                disabled={(draft.count || 1) <= 1}
-              >
-                −
-              </button>
-              <span className="stepper-value">{draft.count || 1}</span>
-              <button
-                className="stepper-btn"
-                onClick={() =>
-                  setDraft((d) => ({ ...d, count: Math.min(MAX_RESPONSES, (d.count || 1) + 1) }))
-                }
-                disabled={(draft.count || 1) >= MAX_RESPONSES}
-              >
-                +
-              </button>
-            </div>
-            <span className="muted small">Spawns this many idea-cards each run.</span>
-          </div>
-        </div>
-
-        <label className="field">
-          <span>Prompt</span>
-          <textarea
-            rows={4}
-            value={draft.prompt}
-            placeholder="Describe what this operator does to an idea…"
-            onChange={(e) => setDraft({ ...draft, prompt: e.target.value })}
-          />
-          <small className="muted">The idea you drop it on is attached automatically.</small>
-        </label>
-
-        <div className="modal-actions">
-          {onDelete && (
-            <button
-              className="btn danger ghost"
-              onClick={() => {
-                onDelete(symbol.id);
-                onClose();
-              }}
-            >
-              Delete
-            </button>
-          )}
-          <div className="spacer" />
-          <button className="btn ghost" onClick={onClose}>
-            Cancel
-          </button>
-          <button
-            className="btn primary"
-            disabled={!valid}
-            onClick={() => {
-              const { __isNew, ...clean } = draft;
-              onSave(clean);
-            }}
-          >
-            Save
-          </button>
-        </div>
+      <div className="seed-foot">
+        <button className="ghost-btn" onClick={onDelete} title="Dissolve">
+          dissolve
+        </button>
+        <button className="ghost-btn" onClick={onClose}>
+          close
+        </button>
       </div>
     </div>
   );
