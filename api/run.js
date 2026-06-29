@@ -9,8 +9,8 @@ export default async function handler(req, res) {
   try {
     const body =
       typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
-    const { prompt, text } = body;
-    const data = await runPrompt({ prompt, text });
+    const { prompt, text, count } = body;
+    const data = await runPrompt({ prompt, text, count });
     res.status(200).json(data);
   } catch (err) {
     console.error("[lens] /api/run failed:", err?.message || err);

@@ -25,8 +25,8 @@ app.get("/api/health", (_req, res) => {
 
 app.post("/api/run", async (req, res) => {
   try {
-    const { prompt, text } = req.body ?? {};
-    const data = await runPrompt({ prompt, text });
+    const { prompt, text, count } = req.body ?? {};
+    const data = await runPrompt({ prompt, text, count });
     res.json(data);
   } catch (err) {
     console.error("[lens] /api/run failed:", err?.message || err);

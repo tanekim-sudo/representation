@@ -14,8 +14,20 @@ export function hasKey() {
   return Boolean(process.env.ANTHROPIC_API_KEY);
 }
 
-// Run a saved prompt ("symbol") against some text and return the result.
-export async function runPrompt({ prompt, text }) {
+export const MAX_RESPONSES = 6;
+
+function extractText(message) {
+  return message.content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n")
+    .trim();
+}
+
+// Run a saved prompt ("symbol") against some text.
+// `count` controls how many independent variations Claude generates (1..MAX_RESPONSES);
+// they are produced in parallel and returned as `outputs`.
+export async function runPrompt({ prompt, text, count = 1 }) {
   const anthropic = getClient();
   if (!anthropic) {
     const err = new Error(
@@ -31,22 +43,35 @@ export async function runPrompt({ prompt, text }) {
     throw err;
   }
 
+  const n = Math.min(Math.max(parseInt(count, 10) || 1, 1), MAX_RESPONSES);
+
   const content = text && String(text).trim().length > 0 ? String(text) : "";
   const userMessage = content
     ? `${prompt}\n\n---\nHere is the text to work on:\n"""\n${content}\n"""`
     : prompt;
 
-  const message = await anthropic.messages.create({
-    model: MODEL,
-    max_tokens: 4096,
-    messages: [{ role: "user", content: userMessage }],
-  });
+  const makeOne = () =>
+    anthropic.messages
+      .create({
+        model: MODEL,
+        max_tokens: 4096,
+        // Higher temperature when asking for several options, so they differ.
+        temperature: n > 1 ? 1 : 0.7,
+        messages: [{ role: "user", content: userMessage }],
+      })
+      .then(extractText);
 
-  const result = message.content
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
-    .join("\n")
-    .trim();
+  const settled = await Promise.allSettled(Array.from({ length: n }, makeOne));
+  const outputs = settled
+    .filter((s) => s.status === "fulfilled" && s.value)
+    .map((s) => s.value);
 
-  return { result, model: MODEL };
+  if (outputs.length === 0) {
+    const reason = settled.find((s) => s.status === "rejected")?.reason;
+    const err = new Error(reason?.message || "Claude returned no output.");
+    err.status = reason?.status || 500;
+    throw err;
+  }
+
+  return { outputs, model: MODEL };
 }

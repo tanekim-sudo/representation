@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 const STORAGE_KEY = "lens.symbols.v1";
+const MAX_RESPONSES = 6;
 
 const EMOJI_CHOICES = [
   "✨", "📝", "🔍", "🌍", "🎯", "💡", "🧹", "📌", "🔥", "🧠",
@@ -66,9 +67,11 @@ export default function App() {
     "Paste or type any text here.\n\nThen drag a symbol from the left onto this box to transform it with Claude. Tip: select part of the text first to only transform that part."
   );
   const [results, setResults] = useState([]);
+  const [responseCount, setResponseCount] = useState(1);
   const [busy, setBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [editing, setEditing] = useState(null); // symbol being edited or "new"
+  const [theme, setTheme] = useState(() => localStorage.getItem("lens.theme") || "light");
 
   const textRef = useRef(null);
   const selectionRef = useRef({ start: 0, end: 0 });
@@ -76,6 +79,11 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(symbols));
   }, [symbols]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("lens.theme", theme);
+  }, [theme]);
 
   const captureSelection = () => {
     const el = textRef.current;
@@ -98,6 +106,7 @@ export default function App() {
       return;
     }
     const runId = uid();
+    const count = responseCount;
     setBusy(true);
     pushResult({
       id: runId,
@@ -105,6 +114,7 @@ export default function App() {
       input: target.value,
       isSelection: target.isSelection,
       selection: { start: target.start, end: target.end },
+      count,
       loading: true,
     });
 
@@ -112,11 +122,11 @@ export default function App() {
       const res = await fetch("/api/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: symbol.prompt, text: target.value }),
+        body: JSON.stringify({ prompt: symbol.prompt, text: target.value, count }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Request failed");
-      updateResult(runId, { loading: false, output: data.result });
+      updateResult(runId, { loading: false, outputs: data.outputs || [] });
     } catch (err) {
       updateResult(runId, { loading: false, error: err.message });
     } finally {
@@ -131,13 +141,13 @@ export default function App() {
     setResults((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   }
 
-  function applyResult(r) {
-    if (!r.output) return;
+  function applyResult(r, output) {
+    if (!output) return;
     if (r.isSelection && r.selection) {
       const { start, end } = r.selection;
-      setText((t) => t.slice(0, start) + r.output + t.slice(end));
+      setText((t) => t.slice(0, start) + output + t.slice(end));
     } else {
-      setText(r.output);
+      setText(output);
     }
   }
 
@@ -172,9 +182,18 @@ export default function App() {
             <p>Drag a prompt symbol onto your text.</p>
           </div>
         </div>
-        <button className="btn primary" onClick={() => setEditing(makeBlankSymbol())}>
-          + New symbol
-        </button>
+        <div className="topbar-actions">
+          <button
+            className="btn ghost theme-toggle"
+            onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
+            title={theme === "light" ? "Switch to dark" : "Switch to light"}
+          >
+            {theme === "light" ? "☾" : "☀"}
+          </button>
+          <button className="btn primary" onClick={() => setEditing(makeBlankSymbol())}>
+            + New symbol
+          </button>
+        </div>
       </header>
 
       <main className="layout">
@@ -205,7 +224,27 @@ export default function App() {
           >
             <div className="card-head">
               <span>Your text</span>
-              <span className="muted">{text.length} chars</span>
+              <div className="head-right">
+                <div className="stepper" title="How many options Claude generates per run">
+                  <span className="stepper-label">Responses</span>
+                  <button
+                    className="stepper-btn"
+                    onClick={() => setResponseCount((c) => Math.max(1, c - 1))}
+                    disabled={responseCount <= 1}
+                  >
+                    −
+                  </button>
+                  <span className="stepper-value">{responseCount}</span>
+                  <button
+                    className="stepper-btn"
+                    onClick={() => setResponseCount((c) => Math.min(MAX_RESPONSES, c + 1))}
+                    disabled={responseCount >= MAX_RESPONSES}
+                  >
+                    +
+                  </button>
+                </div>
+                <span className="muted">{text.length} chars</span>
+              </div>
             </div>
             <textarea
               ref={textRef}
@@ -233,7 +272,7 @@ export default function App() {
               <div className="empty">Results from dropped symbols show up here.</div>
             )}
             {results.map((r) => (
-              <ResultCard key={r.id} result={r} onApply={() => applyResult(r)} />
+              <ResultCard key={r.id} result={r} onApply={(output) => applyResult(r, output)} />
             ))}
           </div>
         </section>
@@ -327,7 +366,11 @@ function SymbolChip({ symbol, onEdit, onRun }) {
 
 function ResultCard({ result, onApply }) {
   const { symbol } = result;
-  const [copied, setCopied] = useState(false);
+  const outputs = result.outputs || [];
+  const multi = outputs.length > 1;
+  const [chosen, setChosen] = useState(null);
+  const count = result.count || 1;
+
   return (
     <div className="result-card" style={{ "--accent": symbol.color }}>
       <div className="result-head">
@@ -336,41 +379,87 @@ function ResultCard({ result, onApply }) {
         </span>
         <span className="muted small">
           {result.isSelection ? "on selection" : "on full text"}
+          {multi ? ` · ${outputs.length} options` : ""}
         </span>
       </div>
-      {result.loading && <div className="result-body loading">Thinking…</div>}
+
+      {result.loading && (
+        <div className="result-body loading">
+          Thinking…{count > 1 ? ` generating ${count} options` : ""}
+        </div>
+      )}
       {result.error && <div className="result-body error">{result.error}</div>}
-      {result.output && (
-        <>
-          <div className="result-body">{result.output}</div>
-          <div className="result-actions">
-            <button className="btn small" onClick={onApply}>
-              Replace text
-            </button>
-            <button
-              className="btn ghost small"
-              onClick={() => {
-                navigator.clipboard.writeText(result.output);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1200);
+
+      {outputs.length > 0 && (
+        <div className={"options" + (multi ? " grid" : "")}>
+          {outputs.map((out, i) => (
+            <OptionCard
+              key={i}
+              index={i}
+              total={outputs.length}
+              text={out}
+              selected={chosen === i}
+              onChoose={() => setChosen(i)}
+              onApply={() => {
+                setChosen(i);
+                onApply(out);
               }}
-            >
-              {copied ? "Copied!" : "Copy"}
-            </button>
-          </div>
-        </>
+            />
+          ))}
+        </div>
       )}
     </div>
   );
 }
 
-const PEN_COLORS = ["#ffffff", "#000000", "#6366f1", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444"];
+function OptionCard({ index, total, text, selected, onApply, onChoose }) {
+  const [copied, setCopied] = useState(false);
+  const multi = total > 1;
+  return (
+    <div
+      className={"option" + (selected ? " selected" : "")}
+      onClick={multi ? onChoose : undefined}
+    >
+      {multi && (
+        <div className="option-head">
+          <span className="option-num">Option {index + 1}</span>
+          {selected && <span className="option-chosen">✓ chosen</span>}
+        </div>
+      )}
+      <div className="result-body">{text}</div>
+      <div className="result-actions">
+        <button
+          className="btn small"
+          onClick={(e) => {
+            e.stopPropagation();
+            onApply();
+          }}
+        >
+          {multi ? "Use this" : "Replace text"}
+        </button>
+        <button
+          className="btn ghost small"
+          onClick={(e) => {
+            e.stopPropagation();
+            navigator.clipboard.writeText(text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+          }}
+        >
+          {copied ? "Copied!" : "Copy"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const PEN_COLORS = ["#000000", "#ffffff", "#6366f1", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444"];
 const CANVAS_SIZE = 256;
 
 function DrawPad({ initialStrokes = [], accent = "#6366f1", onChange }) {
   const canvasRef = useRef(null);
   const [strokes, setStrokes] = useState(() => initialStrokes || []);
-  const [color, setColor] = useState(PEN_COLORS[0]);
+  const [color, setColor] = useState("#000000");
   const [size, setSize] = useState(8);
   const [erasing, setErasing] = useState(false);
   const drawingRef = useRef(null); // active stroke while pointer is down
