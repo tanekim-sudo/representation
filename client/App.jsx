@@ -866,7 +866,8 @@ function Seed({ seed, scale, selected, combineFrom, combineMode, busy, onActivat
 function SeedPanel({ seed, pos, flip, busy, onChange, onEvolve, onBranch, onSplit, onCombine, onDelete, onReplay, onClose }) {
   const ref = useRef(null);
   const isSketch = seed.type === "sketch";
-  const stages = (seed.history || []).length;
+  const ops = ["evolve", "branch", "split", "combine", "operator"];
+  const hasFormation = (seed.history || []).some((s) => ops.includes(s.kind));
   useEffect(() => {
     const el = ref.current;
     if (el) {
@@ -918,7 +919,12 @@ function SeedPanel({ seed, pos, flip, busy, onChange, onEvolve, onBranch, onSpli
       )}
 
       <div className="seed-foot">
-        <button className="ghost-btn replay" onClick={onReplay} disabled={stages < 2} title={stages < 2 ? "no formation yet" : "replay formation"}>
+        <button
+          className="ghost-btn replay"
+          onClick={onReplay}
+          disabled={!hasFormation}
+          title={hasFormation ? "replay formation" : "no operations yet — branch, evolve, split, combine, or apply an operator"}
+        >
           ▷ replay
         </button>
         <div className="spacer" />
