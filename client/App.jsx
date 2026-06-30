@@ -18,10 +18,18 @@ const PEN_W = 2.4; // world units
 const MARKER_W = 16;
 
 const DEFAULT_OPERATORS = [
-  { id: "op-sharpen", name: "sharpen", prompt: "Rewrite this more sharply and precisely, preserving the meaning. Return only the rewritten text." },
-  { id: "op-expand", name: "expand", prompt: "Expand this idea with depth, specifics and a fresh angle. Return only the expanded text." },
-  { id: "op-counter", name: "counter", prompt: "Give the single strongest counter-argument or opposing view to this. Return only that argument." },
-  { id: "op-simplify", name: "simplify", prompt: "Explain this as simply and concretely as possible, like to a smart friend. Return only the explanation." },
+  { id: "op-combine", name: "combine", kind: "prompt", primitive: true,
+    prompt: "Combine the following material into one unified object. Preserve the essence of each part. Return ONLY the combined result." },
+  { id: "op-split", name: "split", kind: "prompt", primitive: true, multi: true,
+    prompt: "Break the material into its distinct underlying sub-ideas or components. Return each as a separate paragraph, one idea per block, no numbering." },
+  { id: "op-sharpen", name: "sharpen", kind: "prompt", primitive: true,
+    prompt: "Rewrite this more sharply and precisely, preserving the meaning. Return only the rewritten text." },
+  { id: "op-expand", name: "expand", kind: "prompt", primitive: true,
+    prompt: "Expand this idea with depth, specifics and a fresh angle. Return only the expanded text." },
+  { id: "op-counter", name: "counter", kind: "prompt", primitive: true,
+    prompt: "Give the single strongest counter-argument or opposing view to this. Return only that argument." },
+  { id: "op-simplify", name: "simplify", kind: "prompt", primitive: true,
+    prompt: "Explain this as simply and concretely as possible, like to a smart friend. Return only the explanation." },
 ];
 
 const ONBOARDED_KEY = "lens.onboarded.v1";
@@ -44,10 +52,19 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
 function parseJSON(raw) {
   let s = (raw || "").trim();
-  const a = s.indexOf("{");
-  const b = s.lastIndexOf("}");
-  if (a !== -1 && b !== -1) s = s.slice(a, b + 1);
-  return JSON.parse(s);
+  s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "");
+  const objStart = s.indexOf("{");
+  const objEnd = s.lastIndexOf("}");
+  const arrStart = s.indexOf("[");
+  const arrEnd = s.lastIndexOf("]");
+  if (objStart !== -1 && objEnd > objStart) s = s.slice(objStart, objEnd + 1);
+  else if (arrStart !== -1 && arrEnd > arrStart) s = s.slice(arrStart, arrEnd + 1);
+  s = s.replace(/,\s*([}\]])/g, "$1");
+  try {
+    return JSON.parse(s);
+  } catch (e) {
+    throw new Error(`Could not parse AI response (${e.message}). Try again.`);
+  }
 }
 
 // The master system prompt — teaches Claude exactly what lens is and how to architect operators.
@@ -659,7 +676,13 @@ async function runClaude(prompt, text, opts = {}) {
       body: JSON.stringify({ prompt, text, count: 1, image, system, maxTokens, research }),
       signal: controller.signal,
     });
-    const data = await res.json();
+    const raw = await res.text();
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error("Server returned invalid response. Try again.");
+    }
     if (!res.ok) throw new Error(data.error || "Claude did not answer.");
     return (data.outputs || [])[0] || "";
   } catch (err) {
@@ -717,7 +740,10 @@ export default function App() {
   const [camera, setCamera] = useState(() => load(CAMERA_KEY, { x: 0, y: 0, scale: 1 }));
   const [operators, setOperators] = useState(() => {
     const s = load(OPERATORS_KEY, null);
-    return Array.isArray(s) ? s : DEFAULT_OPERATORS;
+    if (!Array.isArray(s)) return DEFAULT_OPERATORS;
+    const names = new Set(s.map((o) => o.name));
+    const missing = DEFAULT_OPERATORS.filter((o) => o.primitive && !names.has(o.name));
+    return missing.length ? [...s, ...missing] : s;
   });
   const [structures, setStructures] = useState(() => {
     const saved = load(STRUCTURES_KEY, null);
@@ -730,7 +756,7 @@ export default function App() {
   const [editing, setEditing] = useState(null);
   const [draft, setDraft] = useState(null);
   const [lasso, setLasso] = useState(null);
-  const [aiBusy, setAiBusy] = useState(false);
+  const [jobs, setJobs] = useState([]); // background operations
   const [toast, setToast] = useState(null);
   const [opEditor, setOpEditor] = useState(null);
   const [spaceDown, setSpaceDown] = useState(false);
@@ -763,6 +789,19 @@ export default function App() {
   function showToast(msg) {
     setToast(msg);
     setTimeout(() => setToast((t) => (t === msg ? null : t)), 3200);
+  }
+
+  function pushJob(job) {
+    const id = job.id || uid();
+    setJobs((arr) => [{ ...job, id }, ...arr].slice(0, 12));
+    return id;
+  }
+  function patchJob(id, patch) {
+    setJobs((arr) => arr.map((j) => (j.id === id ? { ...j, ...patch } : j)));
+  }
+  function finishJob(id, status, message) {
+    patchJob(id, { status, step: message, progress: status === "done" ? 1 : undefined });
+    setTimeout(() => setJobs((arr) => arr.filter((j) => j.id !== id)), status === "error" ? 8000 : 4000);
   }
 
   // ---- camera math: all world coords are relative to the viewport (not the window) ----
@@ -1064,13 +1103,18 @@ export default function App() {
     if (op.kind === "pipeline" && op.steps?.length) {
       let cur = material;
       let img = image;
-      for (const sid of op.steps) {
-        cur = await applyOpTree(opMap[sid], cur, img, { originalMaterial, pipelineResearch });
+      const total = op.steps.length;
+      for (let i = 0; i < op.steps.length; i++) {
+        const sid = op.steps[i];
+        const sub = opMap[sid];
+        ctx.onStep?.(sub?.name || `step ${i + 1}`, i, total);
+        cur = await applyOpTree(sub, cur, img, { ...ctx, originalMaterial, pipelineResearch });
         img = null;
       }
       return cur;
     }
 
+    ctx.onStep?.(op.name, 0, 1);
     const leafPrompt = (op.prompt || "").trim() || `Produce the "${op.name}" deliverable for the input subject. Return only the result.`;
     const input = formatPipelineInput(originalMaterial, material);
     const stepResearch = !!op.research || pipelineResearch;
@@ -1082,39 +1126,107 @@ export default function App() {
     });
   }
 
-  async function runOperator(op, targetIds, opts = {}) {
+  function spawnMultipleObjects(texts, sourceIds, atWorld) {
+    const idSet = new Set(sourceIds || []);
+    const sel = itemsRef.current.filter((it) => idSet.has(it.id));
+    const boxes = sel.map(itemWorldBBox).filter(Boolean);
+    let x = atWorld?.x ?? (boxes.length ? Math.max(...boxes.map((b) => b.maxx)) + 48 : viewportCenterWorld().x);
+    let y = atWorld?.y ?? (boxes.length ? Math.min(...boxes.map((b) => b.miny)) : viewportCenterWorld().y);
+    const newIds = [];
+    const newItems = [];
+    for (const t of texts) {
+      const clean = stripMd(t).trim();
+      if (!clean) continue;
+      const id = uid();
+      newIds.push(id);
+      const w = Math.min(520, Math.max(260, Math.round(clean.length * 0.5 + 180)));
+      newItems.push(normalizeItem({ id, type: "text", x, y, text: clean, w, bornFrom: sourceIds || [] }));
+      y += Math.max(80, Math.min(200, clean.length * 0.3 + 60));
+    }
+    if (newItems.length) {
+      setItems((arr) => [...arr, ...newItems]);
+      setSelection(newIds);
+    }
+    return newIds;
+  }
+
+  async function executeOperatorJob(jobId, op, targetIds, atClient) {
+    const idSet = new Set(targetIds);
+    const itemList = itemsRef.current.filter((it) => idSet.has(it.id));
+    patchJob(jobId, { step: "reading material…", progress: 0.05 });
+    const { text, image } = await gatherMaterialFromItems(itemList);
+    if (!text?.trim() && !image) throw new Error("no readable content");
+
+    const researching = shouldEnableResearch(op, opMap, text);
+    patchJob(jobId, { step: researching ? "researching…" : `running · ${op.name}`, progress: 0.15 });
+
+    const onStep = (stepName, i, total) => {
+      patchJob(jobId, {
+        step: total > 1 ? `${stepName} (${i + 1}/${total})` : stepName,
+        progress: 0.15 + ((i + 1) / Math.max(total, 1)) * 0.75,
+      });
+    };
+
+    // primitive: split → multiple objects
+    if (op.multi || op.name === "split") {
+      const out = await runClaude(op.prompt, text, {
+        image,
+        system: executionSystem(operators, opMap, op, text, researching),
+        maxTokens: 4096,
+        research: researching,
+      });
+      const parts = out
+        .split(/\n{2,}/)
+        .map((p) => p.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim())
+        .filter((p) => p.length > 3);
+      if (parts.length < 2) {
+        const lines = out.split(/\n+/).map((l) => l.trim()).filter((l) => l.length > 3);
+        if (lines.length >= 2) {
+          const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
+          spawnMultipleObjects(lines, targetIds, atWorld);
+          return;
+        }
+        throw new Error("split produced only one part");
+      }
+      const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
+      spawnMultipleObjects(parts, targetIds, atWorld);
+      return;
+    }
+
+    const out = await applyOpTree(op, text, image, { originalMaterial: text, pipelineResearch: researching, onStep });
+    if (!out?.trim()) throw new Error("empty output");
+    patchJob(jobId, { step: "spawning object…", progress: 0.95 });
+    const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
+    applyTransformResult(out, targetIds, atWorld);
+  }
+
+  function runOperator(op, targetIds, opts = {}) {
     const atClient = opts.atClient;
     let ids = targetIds?.length ? targetIds : resolveTargetIds(atClient);
     if (!ids.length) {
-      showToast("drop function onto an idea");
+      showToast("drop onto an idea");
       return;
     }
-    const idSet = new Set(ids);
-    const itemList = itemsRef.current.filter((it) => idSet.has(it.id));
-    const { text, image, preview } = await gatherMaterialFromItems(itemList);
-    if (!text?.trim() && !image) {
-      showToast("that object has no readable content");
+    if (op.name === "combine" && ids.length < 2) {
+      showToast("combine: drag one idea onto another, or lasso-select 2+");
       return;
     }
     setSelection(ids);
-    const researching = shouldEnableResearch(op, opMap, text);
-    setAiBusy(true);
-    showToast(researching ? `researching · ${op.name}…` : `working · ${op.name}…`);
-    try {
-      const out = await applyOpTree(op, text, image, { originalMaterial: text, pipelineResearch: researching });
-      if (!out?.trim()) {
-        showToast("no output — try again");
-        return;
-      }
-      const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
-      applyTransformResult(out, ids, atWorld);
-      showToast(`new object · ${op.name}`);
-    } catch (err) {
-      showToast(err.message || "Claude did not answer");
-    } finally {
-      setAiBusy(false);
-      setDropTargetId(null);
-    }
+    const jobId = pushJob({
+      id: uid(),
+      label: op.name,
+      type: "operator",
+      status: "running",
+      step: "starting…",
+      progress: 0,
+      startedAt: Date.now(),
+    });
+    executeOperatorJob(jobId, op, ids, atClient)
+      .then(() => finishJob(jobId, "done", `done · ${op.name}`))
+      .catch((err) => {
+        finishJob(jobId, "error", err.message || "failed");
+        showToast(err.message || "failed");
+      });
   }
 
   function applyOpDrop(opId, atClient) {
@@ -1126,65 +1238,32 @@ export default function App() {
       showToast("drop onto text, image, or drawing");
       return;
     }
+    setDropTargetId(null);
     runOperator(op, ids, { atClient });
   }
 
-  function nestOperatorInto(parentId, childId) {
-    if (parentId === childId) return;
-    setOperators((arr) => {
-      const parent = arr.find((o) => o.id === parentId);
-      if (!parent) return arr;
-      if (parent.kind === "pipeline") {
-        if (parent.steps?.includes(childId)) return arr;
-        return arr.map((o) =>
-          o.id === parentId ? { ...o, kind: "pipeline", steps: [...(o.steps || []), childId] } : o
-        );
-      }
-      return arr.map((o) =>
-        o.id === parentId
-          ? { ...o, kind: "pipeline", steps: [parentId, childId], prompt: undefined }
-          : o
-      );
-    });
-    setExpanded((e) => ({ ...e, [parentId]: true }));
-    showToast("function composed");
-  }
-
-  async function applyOpToStructure(opId, structId) {
-    const struct = structures.find((s) => s.id === structId);
-    const op = opMap[opId];
-    if (!struct || !op) return;
-    setAiBusy(true);
+  async function expandFunction(op) {
+    const jobId = pushJob({ id: uid(), label: `expand · ${op.name}`, type: "expand", status: "running", step: "expanding…", progress: 0.2, startedAt: Date.now() });
     try {
-      const { text, image, preview } = await gatherMaterialFromItems(struct.items || []);
-      if (!text?.trim() && !image) {
-        showToast("structure has no material");
-        return;
-      }
-      const out = await applyOpTree(op, text, image, preview);
-      if (!out?.trim()) {
-        showToast("no output");
-        return;
-      }
-      const maxY = (struct.items || []).reduce((m, it) => {
-        const bb = itemWorldBBox(it);
-        return bb ? Math.max(m, bb.maxy) : m;
-      }, 0);
-      const newItem = normalizeItem({
-        type: "text",
-        x: 0,
-        y: maxY + 40,
-        text: stripMd(out),
-        w: 420,
+      const tree = await expandOperatorSubtree(op, opMap, operators);
+      const { rootId, ops } = treeToOperators(tree, { role: op.role || null, top: !!op.top });
+      setOperators((arr) => {
+        const map = Object.fromEntries(arr.map((o) => [o.id, o]));
+        const removeIds = collectSubtreeIds(op.id, map);
+        let next = arr.filter((o) => !removeIds.has(o.id));
+        next = next.map((o) => {
+          if (o.kind === "pipeline" && o.steps?.includes(op.id)) {
+            return { ...o, steps: o.steps.map((sid) => (sid === op.id ? rootId : sid)) };
+          }
+          return o;
+        });
+        return [...next, ...ops];
       });
-      setStructures((arr) =>
-        arr.map((s) => (s.id === structId ? { ...s, items: [...(s.items || []), newItem] } : s))
-      );
-      showToast(`applied · ${op.name} → structure`);
+      setExpanded((e) => ({ ...e, [rootId]: true }));
+      finishJob(jobId, "done", "expanded");
     } catch (err) {
-      showToast(err.message || "failed");
-    } finally {
-      setAiBusy(false);
+      finishJob(jobId, "error", err.message || "failed");
+      showToast(err.message || "could not expand");
     }
   }
 
@@ -1284,32 +1363,6 @@ export default function App() {
     showToast("function deleted");
   }
 
-  async function expandFunction(op) {
-    setAiBusy(true);
-    try {
-      const tree = await expandOperatorSubtree(op, opMap, operators);
-      const { rootId, ops } = treeToOperators(tree, { role: op.role || null, top: !!op.top });
-      setOperators((arr) => {
-        const map = Object.fromEntries(arr.map((o) => [o.id, o]));
-        const removeIds = collectSubtreeIds(op.id, map);
-        let next = arr.filter((o) => !removeIds.has(o.id));
-        next = next.map((o) => {
-          if (o.kind === "pipeline" && o.steps?.includes(op.id)) {
-            return { ...o, steps: o.steps.map((sid) => (sid === op.id ? rootId : sid)) };
-          }
-          return o;
-        });
-        return [...next, ...ops];
-      });
-      setExpanded((e) => ({ ...e, [rootId]: true, [op.id]: undefined }));
-      showToast(`expanded · ${op.name}`);
-    } catch (err) {
-      showToast(err.message || "could not expand");
-    } finally {
-      setAiBusy(false);
-    }
-  }
-
   // ---- saved idea structures ----
   function captureSelectionAsStructure(extra = {}) {
     const ids = new Set(selRef.current);
@@ -1388,8 +1441,9 @@ export default function App() {
     const labels = nodes.map((n) =>
       n.type === "text" ? n.text.trim() : "[image]"
     );
-    setAiBusy(true);
+    const jobId = pushJob({ label: "discover sameness", kind: "sameness", total: 1 });
     try {
+      patchJob(jobId, { status: "running", step: "finding shared structure" });
       const out = await runClaude(samenessPrompt(labels), "", { system: boardSystem(operators, opMap), maxTokens: 2000 });
       const parsed = parseSameness(out);
       const num = nextStructNumber();
@@ -1407,16 +1461,17 @@ export default function App() {
       };
       setStructures((arr) => [struct, ...arr]);
       setRailTab("structures");
+      finishJob(jobId, "done");
       showToast(`discovered · ${title}`);
     } catch (err) {
+      finishJob(jobId, "error", err.message || "discovery failed");
       showToast(err.message || "discovery failed");
-    } finally {
-      setAiBusy(false);
     }
   }
 
   const topFunctions = operators.filter((o) => o.top);
-  const basics = operators.filter((o) => !o.role && !o.top);
+  const primitives = operators.filter((o) => !o.role && !o.top && (o.primitive || ["combine", "split"].includes(o.name)));
+  const basics = operators.filter((o) => !o.role && !o.top && !o.primitive && !["combine", "split"].includes(o.name));
 
   function itemScreenBBox(it) {
     if (it.type === "stroke") {
@@ -1650,33 +1705,8 @@ export default function App() {
 
   async function combineItemsByDrag(draggedIds, targetIds) {
     const ids = [...new Set([...draggedIds, ...targetIds])];
-    const itemList = itemsRef.current.filter((it) => ids.includes(it.id));
-    const { text, image, preview } = await gatherMaterialFromItems(itemList);
-    if (!text?.trim() && !image) {
-      showToast("nothing to combine");
-      return;
-    }
-    const groupId = uid();
-    setItems((arr) => arr.map((it) => (ids.includes(it.id) ? { ...it, groupId } : it)));
-    setSelection(ids);
-    setAiBusy(true);
-    try {
-      const prompt =
-        "Combine the following into one unified object. Preserve the meaning of each part. Return ONLY the combined result.";
-      const sys = boardSystem(operators, opMap) + (preview ? `\n\nSOURCE MATERIAL:\n"""${preview.slice(0, 1200)}"""` : "");
-      const out = await runClaude(prompt, text, { image, system: sys });
-      if (!out?.trim()) {
-        showToast("combine failed");
-        return;
-      }
-      const bb = itemWorldBBox(itemList[0]) || { maxx: 0, miny: 0 };
-      spawnNewObject(out, ids, { x: bb.maxx + 48, y: bb.miny });
-      showToast("combined · new object");
-    } catch (err) {
-      showToast(err.message || "combine failed");
-    } finally {
-      setAiBusy(false);
-    }
+    const combineOp = operators.find((o) => o.name === "combine" && !o.role) || DEFAULT_OPERATORS[0];
+    runOperator(combineOp, ids, {});
   }
   combineRef.current = combineItemsByDrag;
 
@@ -1844,8 +1874,23 @@ export default function App() {
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
                       onExpand={expandFunction}
-                      onNest={nestOperatorInto}
-                      busy={aiBusy}
+                    />
+                  ))}
+                </>
+              )}
+              {primitives.length > 0 && (
+                <>
+                  <div className="rail-section">primitives</div>
+                  {primitives.map((op) => (
+                    <DraggableOpCard
+                      key={op.id}
+                      op={op}
+                      opMap={opMap}
+                      expanded={expanded}
+                      onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
+                      onEdit={openEditFunction}
+                      onExpand={expandFunction}
+                      flat
                     />
                   ))}
                 </>
@@ -1862,14 +1907,12 @@ export default function App() {
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
                       onExpand={expandFunction}
-                      onNest={nestOperatorInto}
-                      busy={aiBusy}
                       flat
                     />
                   ))}
                 </>
               )}
-              {basics.length === 0 && topFunctions.length === 0 && (
+              {basics.length === 0 && topFunctions.length === 0 && primitives.length === 0 && (
                 <p className="rail-empty">Tap ↻ to generate functions for your role.</p>
               )}
             </div>
@@ -1892,15 +1935,18 @@ export default function App() {
                     key={struct.id}
                     struct={struct}
                     onDelete={() => deleteStructure(struct.id)}
-                    onApplyOp={applyOpToStructure}
                   />
                 ))
               )}
             </div>
           </>
         )}
+        <JobPanel jobs={jobs} onDismiss={(id) => setJobs((j) => j.filter((x) => x.id !== id))} />
         {railTab === "functions" && (
-          <div className="rail-hint">drag function onto idea · ↻ rebuilds with web research</div>
+          <div className="rail-hint">drag onto canvas · combine by dragging ideas together</div>
+        )}
+        {railTab === "structures" && (
+          <div className="rail-hint">drag structure onto canvas to plant</div>
         )}
       </aside>
 
@@ -2081,7 +2127,6 @@ export default function App() {
       {aiMenuPos && (
         <ExportPalette
           pos={aiMenuPos}
-          busy={aiBusy}
           selectionCount={selection.length}
           onExport={exportSelection}
           onDelete={deleteSelection}
@@ -2255,33 +2300,44 @@ function startStructDrag(e, struct) {
   e.dataTransfer.effectAllowed = "copy";
 }
 
-function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onExpand, onNest, busy, flat }) {
+function JobPanel({ jobs, onDismiss }) {
+  if (!jobs.length) return null;
+  return (
+    <div className="job-panel">
+      <div className="job-panel-head">running</div>
+      {jobs.map((job) => (
+        <div key={job.id} className={"job-row" + (job.status === "error" ? " error" : job.status === "done" ? " done" : "")}>
+          <div className="job-row-top">
+            <span className="job-label">{job.label}</span>
+            {job.status === "error" && (
+              <button className="job-dismiss" onClick={() => onDismiss(job.id)} title="dismiss">
+                ×
+              </button>
+            )}
+          </div>
+          {job.step && <div className="job-step">{job.step}</div>}
+          {job.status === "running" && (
+            <div className="job-bar">
+              <div className="job-bar-fill" style={{ width: `${Math.round((job.progress ?? 0.1) * 100)}%` }} />
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onExpand, flat }) {
   if (!op) return null;
   const steps = op.kind === "pipeline" && op.steps ? op.steps.map((id) => opMap[id]).filter(Boolean) : [];
   const open = expanded[op.id];
-  const [dropOver, setDropOver] = useState(false);
   return (
     <div className="op-card-wrap">
       <div
-        className={"op-card" + (dropOver ? " drop-target" : "")}
-        draggable={!busy}
+        className="op-card"
+        draggable
         onDragStart={(e) => startOpDrag(e, op)}
-        title="drag onto canvas · drop function here to compose"
-        onDragOver={(e) => {
-          if (e.dataTransfer.types.includes(OP_MIME)) {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = "copy";
-            setDropOver(true);
-          }
-        }}
-        onDragLeave={() => setDropOver(false)}
-        onDrop={(e) => {
-          setDropOver(false);
-          e.preventDefault();
-          e.stopPropagation();
-          const childId = e.dataTransfer.getData(OP_MIME);
-          if (childId && childId !== op.id && onNest) onNest(op.id, childId);
-        }}
+        title="drag onto canvas"
       >
         <div className="op-card-row">
           <span className="op-drag-grip" title="drag onto canvas">
@@ -2297,7 +2353,7 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onExpand, onNe
             </button>
           )}
           {onExpand && !flat && (
-            <button className="op-card-expand" onClick={() => onExpand(op)} disabled={busy} title="expand layers">
+            <button className="op-card-expand" onClick={() => onExpand(op)} title="expand layers">
               +
             </button>
           )}
@@ -2309,7 +2365,7 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onExpand, onNe
       {open && steps.length > 0 && (
         <div className="op-card-steps">
           {steps.map((step) => (
-            <DraggableStep key={step.id} step={step} opMap={opMap} expanded={expanded} onToggle={onToggle} onEdit={onEdit} onExpand={onExpand} busy={busy} depth={1} />
+            <DraggableStep key={step.id} step={step} opMap={opMap} expanded={expanded} onToggle={onToggle} onEdit={onEdit} onExpand={onExpand} depth={1} />
           ))}
         </div>
       )}
@@ -2317,7 +2373,7 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onExpand, onNe
   );
 }
 
-function DraggableStep({ step, opMap, expanded, onToggle, onEdit, onExpand, busy, depth }) {
+function DraggableStep({ step, opMap, expanded, onToggle, onEdit, onExpand, depth }) {
   const sub = step.kind === "pipeline" && step.steps ? step.steps.map((id) => opMap[id]).filter(Boolean) : [];
   const open = expanded[step.id];
   const isLeaf = !sub.length;
@@ -2325,7 +2381,7 @@ function DraggableStep({ step, opMap, expanded, onToggle, onEdit, onExpand, busy
     <div className="op-step" style={{ paddingLeft: depth * 8 }}>
       <div
         className={"op-step-chip" + (isLeaf ? " leaf" : "")}
-        draggable={!busy}
+        draggable
         onDragStart={(e) => startOpDrag(e, step)}
         title="drag onto canvas"
       >
@@ -2340,7 +2396,7 @@ function DraggableStep({ step, opMap, expanded, onToggle, onEdit, onExpand, busy
           </button>
         )}
         {onExpand && !isLeaf && (
-          <button className="op-step-expand" onClick={() => onExpand(step)} disabled={busy} title="expand">
+          <button className="op-step-expand" onClick={() => onExpand(step)} title="expand">
             +
           </button>
         )}
@@ -2348,38 +2404,22 @@ function DraggableStep({ step, opMap, expanded, onToggle, onEdit, onExpand, busy
       </div>
       {open &&
         sub.map((child) => (
-          <DraggableStep key={child.id} step={child} opMap={opMap} expanded={expanded} onToggle={onToggle} onEdit={onEdit} onExpand={onExpand} busy={busy} depth={depth + 1} />
+          <DraggableStep key={child.id} step={child} opMap={opMap} expanded={expanded} onToggle={onToggle} onEdit={onEdit} onExpand={onExpand} depth={depth + 1} />
         ))}
     </div>
   );
 }
 
-function StructureCard({ struct, onDelete, onApplyOp }) {
+function StructureCard({ struct, onDelete }) {
   const preview = structurePreview(struct);
   const label = struct.structNum ? `#${struct.structNum}` : struct.kind || "idea";
-  const [dropOver, setDropOver] = useState(false);
   return (
     <div className="struct-card-wrap">
       <div
-        className={"struct-card" + (dropOver ? " drop-target" : "")}
+        className="struct-card"
         draggable
         onDragStart={(e) => startStructDrag(e, struct)}
-        title="drag onto canvas · drop function to transform"
-        onDragOver={(e) => {
-          if (e.dataTransfer.types.includes(OP_MIME)) {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = "copy";
-            setDropOver(true);
-          }
-        }}
-        onDragLeave={() => setDropOver(false)}
-        onDrop={(e) => {
-          setDropOver(false);
-          e.preventDefault();
-          e.stopPropagation();
-          const opId = e.dataTransfer.getData(OP_MIME);
-          if (opId && onApplyOp) onApplyOp(opId, struct.id);
-        }}
+        title="drag onto canvas to plant"
       >
         <div className="struct-card-row">
           <span className="op-drag-grip" title="drag onto canvas">
@@ -2407,18 +2447,10 @@ function escapeHtml(s) {
     .replace(/\n/g, "<br>");
 }
 
-function ExportPalette({ pos, busy, selectionCount, onExport, onDelete, onSaveStructure }) {
+function ExportPalette({ pos, selectionCount, onExport, onDelete, onSaveStructure }) {
   const [open, setOpen] = useState(false);
   const transform = pos.below ? "translate(-50%, 0)" : "translate(-50%, -100%)";
   const style = { left: pos.x, top: pos.y, transform };
-
-  if (busy) {
-    return (
-      <div className="palette busy" style={style}>
-        <span className="spinner" /> researching…
-      </div>
-    );
-  }
 
   if (open) {
     return (

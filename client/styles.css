@@ -155,6 +155,76 @@ body {
   border-top: 1px solid var(--line);
 }
 
+.job-panel {
+  flex-shrink: 0;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--ink) 4%, var(--paper));
+  max-height: 180px;
+  overflow-y: auto;
+}
+.job-panel-head {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+  padding: 8px 14px 4px;
+}
+.job-row {
+  padding: 6px 14px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.job-row:last-child {
+  border-bottom: none;
+}
+.job-row.error .job-step {
+  color: #b44;
+}
+.job-row.done .job-step {
+  color: var(--faint);
+}
+.job-row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.job-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.job-step {
+  font-size: 11px;
+  color: var(--ink-2);
+  margin-top: 2px;
+  line-height: 1.35;
+}
+.job-bar {
+  margin-top: 6px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+.job-bar-fill {
+  height: 100%;
+  background: var(--ink);
+  border-radius: 2px;
+  transition: width 0.25s ease;
+}
+.job-dismiss {
+  border: none;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.job-dismiss:hover {
+  color: var(--ink);
+}
+
 /* draggable transformation cards */
 .op-card-wrap {
   margin: 0 8px 6px;
