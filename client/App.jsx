@@ -11,6 +11,7 @@ const OLD_SEEDS_KEY = "lens.seeds.v2";
 const OP_MIME = "application/lens-op";
 const STRUCT_MIME = "application/lens-structure";
 const RAIL_W = 280;
+const COMBINE_THRESHOLD = 14; // px moved before drop-on-item triggers combine
 
 const INK = "#20201d";
 const PEN_W = 2.4; // world units
@@ -139,16 +140,19 @@ THE USER'S PERSONAL LIBRARY — tailor every function, decomposition, and leaf p
 ${summary}`;
 }
 
-function executionSystem(operators, opMap, activeOp) {
+function executionSystem(operators, opMap, activeOp, materialPreview = "") {
   const compact = summarizeLibrary(operators, opMap, { compact: true });
   let sys =
-    "You execute a transformation on the user's thinking whiteboard. Return ONLY the transformed result — no preamble, labels, headings, or commentary. Work with whatever material is given: brief fragments, keywords, rough notes, single phrases, partial sentences. NEVER refuse, NEVER say insufficient data, NEVER ask for more information, NEVER output meta-analysis about what's missing. Always produce the best possible transform on what's provided.";
+    "You execute a transformation on the user's thinking whiteboard. Return ONLY the transformed result — no preamble, labels, headings, or commentary. You MUST transform the EXACT material provided — if it is a poem, stay with that poem; if it is an image or sketch, describe and transform what you actually see. NEVER generate unrelated generic philosophy or content disconnected from the material. NEVER refuse, NEVER say insufficient data, NEVER ask for more information.";
   if (activeOp?.name) {
     sys += `\n\nActive transform: "${activeOp.name}"`;
     if (activeOp.description) sys += ` — ${activeOp.description}`;
   }
+  if (materialPreview?.trim()) {
+    sys += `\n\nSOURCE MATERIAL (transform THIS — nothing else):\n"""${materialPreview.slice(0, 1200)}${materialPreview.length > 1200 ? "…" : ""}"""`;
+  }
   if (compact) {
-    sys += `\n\nThis user's personal library (match their style, vocabulary, and transformation patterns):\n${compact}`;
+    sys += `\n\nThis user's personal library (match their style):\n${compact}`;
   }
   return sys;
 }
@@ -364,6 +368,114 @@ function migrateFromArtifact() {
   return items;
 }
 
+function itemWorldBBox(it) {
+  if (it.type === "stroke") {
+    if (!it.points?.length) return null;
+    const xs = it.points.map((p) => p.x);
+    const ys = it.points.map((p) => p.y);
+    return { minx: Math.min(...xs), miny: Math.min(...ys), maxx: Math.max(...xs), maxy: Math.max(...ys) };
+  }
+  if (it.type === "image") {
+    const w = it.w || 200;
+    const h = it.h || Math.round(w * 0.75);
+    return { minx: it.x, miny: it.y, maxx: it.x + w, maxy: it.y + h };
+  }
+  if (it.type === "text") {
+    const w = it.w || 360;
+    const h = itemHeight(it);
+    return { minx: it.x, miny: it.y, maxx: it.x + w, maxy: it.y + h };
+  }
+  return null;
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+// rasterize strokes + images in a selection for Claude vision
+async function compositeItemsToImage(items) {
+  const visuals = items.filter((it) => it.type === "stroke" || it.type === "image");
+  if (!visuals.length) return null;
+
+  const boxes = visuals.map(itemWorldBBox).filter(Boolean);
+  if (!boxes.length) return null;
+
+  const pad = 24;
+  const minx = Math.min(...boxes.map((b) => b.minx)) - pad;
+  const miny = Math.min(...boxes.map((b) => b.miny)) - pad;
+  const maxx = Math.max(...boxes.map((b) => b.maxx)) + pad;
+  const maxy = Math.max(...boxes.map((b) => b.maxy)) + pad;
+  const w = Math.max(64, Math.ceil(maxx - minx));
+  const h = Math.max(64, Math.ceil(maxy - miny));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.min(w * 2, 2048);
+  canvas.height = Math.min(h * 2, 2048);
+  const scale = canvas.width / w;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#f4f1e8";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.scale(scale, scale);
+  ctx.translate(-minx, -miny);
+
+  for (const it of visuals) {
+    if (it.type === "stroke" && it.points?.length > 1) {
+      ctx.beginPath();
+      ctx.moveTo(it.points[0].x, it.points[0].y);
+      for (let i = 1; i < it.points.length; i++) ctx.lineTo(it.points[i].x, it.points[i].y);
+      ctx.strokeStyle = it.color || INK;
+      ctx.lineWidth = it.width || PEN_W;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.globalAlpha = it.marker ? 0.35 : 0.95;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    } else if (it.type === "image" && it.src) {
+      try {
+        const img = await loadImage(it.src);
+        ctx.drawImage(img, it.x, it.y, it.w || img.width, it.h || img.height);
+      } catch {
+        /* skip broken image */
+      }
+    }
+  }
+
+  return canvas.toDataURL("image/jpeg", 0.88);
+}
+
+// gather all material from board items (text + vision for images/drawings)
+async function gatherMaterialFromItems(itemList) {
+  const texts = itemList
+    .filter((it) => it.type === "text" && it.text?.trim())
+    .map((it) => it.text.trim());
+  const text = texts.length > 1 ? texts.map((t, i) => `[part ${i + 1}]\n${t}`).join("\n\n———\n\n") : texts.join("\n\n———\n\n");
+
+  const images = itemList.filter((it) => it.type === "image" && it.src);
+  const strokes = itemList.filter((it) => it.type === "stroke");
+  let image = null;
+
+  if (images.length === 1 && !strokes.length) {
+    image = images[0].src;
+  } else if (images.length || strokes.length) {
+    image = await compositeItemsToImage(itemList);
+  }
+
+  if (!text && image && strokes.length && !images.length) {
+    return { text: "[hand-drawn sketch on the whiteboard — interpret the attached image]", image, preview: "sketch" };
+  }
+  if (!text && image) {
+    return { text: "[image on the whiteboard — interpret the attached image]", image, preview: "image" };
+  }
+
+  const preview = text.slice(0, 1200) || (image ? "visual material" : "");
+  return { text, image, preview };
+}
+
 function itemWidth(it) {
   if (it.type === "image") return it.w || 200;
   if (it.type === "text") return it.w || 360;
@@ -492,14 +604,24 @@ function structurePreview(struct) {
 
 async function runClaude(prompt, text, opts = {}) {
   const { image = null, system = null, maxTokens = null } = opts;
-  const res = await fetch("/api/run", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, text, count: 1, image, system, maxTokens }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Claude did not answer.");
-  return (data.outputs || [])[0] || "";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120000);
+  try {
+    const res = await fetch("/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, text, count: 1, image, system, maxTokens }),
+      signal: controller.signal,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Claude did not answer.");
+    return (data.outputs || [])[0] || "";
+  } catch (err) {
+    if (err.name === "AbortError") throw new Error("Request timed out — try again.");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function fileToImage(file, max = 1100) {
@@ -568,6 +690,7 @@ export default function App() {
   const [spaceDown, setSpaceDown] = useState(false);
   const [expanded, setExpanded] = useState({});
   const [dropReady, setDropReady] = useState(false);
+  const [dropTargetId, setDropTargetId] = useState(null);
   const [railTab, setRailTab] = useState("functions"); // functions | structures
   const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
 
@@ -579,6 +702,7 @@ export default function App() {
   const selRef = useRef(selection);
   const spaceRef = useRef(false);
   const editingRef = useRef(editing);
+  const combineRef = useRef(null);
   camRef.current = camera;
   itemsRef.current = items;
   toolRef.current = tool;
@@ -666,6 +790,8 @@ export default function App() {
         const hit = itemAtPoint(cx, cy);
         if (hit) setItems((arr) => arr.filter((it) => it.id !== hit.id));
       } else if (g.mode === "move") {
+        g.lastCx = cx;
+        g.lastCy = cy;
         const dx = (cx - g.cx) / camRef.current.scale;
         const dy = (cy - g.cy) / camRef.current.scale;
         g.cx = cx;
@@ -684,6 +810,8 @@ export default function App() {
         if (dist > 4) {
           g.mode = "move";
           g.moved = 0;
+          g.lastCx = cx;
+          g.lastCy = cy;
         }
       } else if (g.mode === "lasso") {
         const lp = vpLocal(cx, cy);
@@ -750,6 +878,12 @@ export default function App() {
         }
       } else if (g.mode === "pending") {
         /* click only — selection already set */
+      } else if (g.mode === "move") {
+        if (g.ids?.length === 1 && (g.moved || 0) > COMBINE_THRESHOLD) {
+          const exclude = new Set(g.ids);
+          const target = itemAtPoint(g.lastCx ?? g.cx, g.lastCy ?? g.cy, exclude);
+          if (target) combineRef.current?.(g.ids, [target.id]);
+        }
       }
     }
 
@@ -876,67 +1010,128 @@ export default function App() {
   const opMap = useMemo(() => Object.fromEntries(operators.map((o) => [o.id, o])), [operators]);
 
   // run a function: pipelines chain their sub-functions (output -> next input)
-  async function applyOpTree(op, material, image) {
+  async function applyOpTree(op, material, image, materialPreview = "") {
     if (!op) return material;
     if (op.kind === "pipeline" && op.steps?.length) {
       let cur = material;
       let img = image;
+      let preview = materialPreview;
       for (const sid of op.steps) {
-        cur = await applyOpTree(opMap[sid], cur, img);
-        img = null; // an image only feeds the first step
+        cur = await applyOpTree(opMap[sid], cur, img, preview);
+        preview = cur.slice(0, 1200);
+        img = null; // image only feeds the first step
       }
       return cur;
     }
-    return await runClaude(op.prompt || "", material, {
+    const leafPrompt = (op.prompt || "").trim() || `Apply "${op.name}" to the input material and return only the result.`;
+    return await runClaude(leafPrompt, material, {
       image,
-      system: executionSystem(operators, opMap, op),
+      system: executionSystem(operators, opMap, op, materialPreview || material),
     });
   }
 
-  async function runOperator(op, targetIds) {
-    let ids = targetIds || selRef.current;
+  async function runOperator(op, targetIds, opts = {}) {
+    const atClient = opts.atClient;
+    let ids = targetIds?.length ? targetIds : resolveTargetIds(atClient);
     if (!ids.length) {
-      const candidates = itemsRef.current.filter(
-        (it) => (it.type === "text" && it.text?.trim()) || it.type === "image"
-      );
-      if (candidates.length === 1) ids = [candidates[0].id];
+      showToast("drop function onto an idea");
+      return;
     }
     const idSet = new Set(ids);
-    const texts = itemsRef.current
-      .filter((it) => idSet.has(it.id) && it.type === "text" && it.text?.trim())
-      .map((it) => it.text.trim());
-    const image = itemsRef.current.find((it) => idSet.has(it.id) && it.type === "image")?.src || null;
-    const material = texts.join("\n\n———\n\n");
-    if (!material && !image) {
-      showToast("click material on the board to select it, then apply a transform");
+    const itemList = itemsRef.current.filter((it) => idSet.has(it.id));
+    const { text, image, preview } = await gatherMaterialFromItems(itemList);
+    if (!text?.trim() && !image) {
+      showToast("that object has no readable content");
       return;
     }
     setSelection(ids);
     setAiBusy(true);
     try {
-      const out = await applyOpTree(op, material, image);
-      applyTransformResult(out, ids);
-      showToast(`applied · ${op.name}`);
+      const out = await applyOpTree(op, text, image, preview);
+      if (!out?.trim()) {
+        showToast("no output — try again");
+        return;
+      }
+      const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
+      applyTransformResult(out, ids, atWorld);
+      showToast(`new object · ${op.name}`);
     } catch (err) {
       showToast(err.message || "Claude did not answer");
     } finally {
       setAiBusy(false);
+      setDropTargetId(null);
     }
   }
 
   function applyOpDrop(opId, atClient) {
+    if (!atClient) return;
     const op = opMap[opId];
     if (!op) return;
-    let ids = selRef.current;
-    if (!ids.length && atClient) {
-      const hit = itemAtPoint(atClient.x, atClient.y);
-      if (hit && (hit.type === "text" || hit.type === "image")) ids = [hit.id];
-    }
+    const ids = resolveTargetIds(atClient);
     if (!ids.length) {
-      showToast("drop onto selected material");
+      showToast("drop onto text, image, or drawing");
       return;
     }
-    runOperator(op, ids);
+    runOperator(op, ids, { atClient });
+  }
+
+  function nestOperatorInto(parentId, childId) {
+    if (parentId === childId) return;
+    setOperators((arr) => {
+      const parent = arr.find((o) => o.id === parentId);
+      if (!parent) return arr;
+      if (parent.kind === "pipeline") {
+        if (parent.steps?.includes(childId)) return arr;
+        return arr.map((o) =>
+          o.id === parentId ? { ...o, kind: "pipeline", steps: [...(o.steps || []), childId] } : o
+        );
+      }
+      return arr.map((o) =>
+        o.id === parentId
+          ? { ...o, kind: "pipeline", steps: [parentId, childId], prompt: undefined }
+          : o
+      );
+    });
+    setExpanded((e) => ({ ...e, [parentId]: true }));
+    showToast("function composed");
+  }
+
+  async function applyOpToStructure(opId, structId) {
+    const struct = structures.find((s) => s.id === structId);
+    const op = opMap[opId];
+    if (!struct || !op) return;
+    setAiBusy(true);
+    try {
+      const { text, image, preview } = await gatherMaterialFromItems(struct.items || []);
+      if (!text?.trim() && !image) {
+        showToast("structure has no material");
+        return;
+      }
+      const out = await applyOpTree(op, text, image, preview);
+      if (!out?.trim()) {
+        showToast("no output");
+        return;
+      }
+      const maxY = (struct.items || []).reduce((m, it) => {
+        const bb = itemWorldBBox(it);
+        return bb ? Math.max(m, bb.maxy) : m;
+      }, 0);
+      const newItem = normalizeItem({
+        type: "text",
+        x: 0,
+        y: maxY + 40,
+        text: stripMd(out),
+        w: 420,
+      });
+      setStructures((arr) =>
+        arr.map((s) => (s.id === structId ? { ...s, items: [...(s.items || []), newItem] } : s))
+      );
+      showToast(`applied · ${op.name} → structure`);
+    } catch (err) {
+      showToast(err.message || "failed");
+    } finally {
+      setAiBusy(false);
+    }
   }
 
   // ---- onboarding: build a whole toolbox for a role ----
@@ -1146,13 +1341,8 @@ export default function App() {
       const num = nextStructNumber();
       const title = `#${num} · ${parsed.name}`;
       const center = viewportCenterWorld();
-      const textId = uid();
       const body = `${parsed.name.toUpperCase()}\n\n${parsed.body}`;
-      setItems((arr) => [
-        ...arr,
-        normalizeItem({ id: textId, type: "text", x: center.x, y: center.y, text: body, w: 420 }),
-      ]);
-      setSelection([textId]);
+      spawnNewObject(body, nodes.map((n) => n.id), center);
       const struct = {
         id: uid(),
         title,
@@ -1173,7 +1363,6 @@ export default function App() {
 
   const topFunctions = operators.filter((o) => o.top);
   const basics = operators.filter((o) => !o.role && !o.top);
-  const paletteOps = operators.filter((o) => o.top || !o.role);
 
   function itemScreenBBox(it) {
     if (it.type === "stroke") {
@@ -1190,10 +1379,11 @@ export default function App() {
     return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
   }
 
-  function itemAtPoint(cx, cy) {
+  function itemAtPoint(cx, cy, excludeIds = null) {
     const list = itemsRef.current;
     for (let i = list.length - 1; i >= 0; i--) {
       const it = list[i];
+      if (excludeIds?.has(it.id)) continue;
       if (it.type === "stroke") {
         for (let k = 1; k < it.points.length; k++) {
           const a = worldToClient(it.points[k - 1].x, it.points[k - 1].y);
@@ -1206,6 +1396,23 @@ export default function App() {
       }
     }
     return null;
+  }
+
+  function resolveTargetIds(atClient) {
+    const sel = selRef.current;
+    if (sel.length > 1 && atClient) {
+      const hit = itemAtPoint(atClient.x, atClient.y);
+      if (hit && sel.includes(hit.id)) return sel;
+      return sel;
+    }
+    if (!atClient) return sel.length ? sel : [];
+    const hit = itemAtPoint(atClient.x, atClient.y);
+    if (!hit) return [];
+    const it = itemsRef.current.find((i) => i.id === hit.id);
+    if (it?.groupId) {
+      return itemsRef.current.filter((i) => i.groupId === it.groupId).map((i) => i.id);
+    }
+    return [hit.id];
   }
 
   function selectionWorldBBox() {
@@ -1355,87 +1562,143 @@ export default function App() {
     setEditing(id);
   }
 
-  // ---- the laboratory: AI on the selection ----
-  function selectedTextMaterial() {
-    const ids = new Set(selRef.current);
-    return itemsRef.current
-      .filter((it) => ids.has(it.id) && it.type === "text" && it.text.trim())
-      .map((it) => it.text.trim());
-  }
-  function selectedImage() {
-    const ids = new Set(selRef.current);
-    return itemsRef.current.find((it) => ids.has(it.id) && it.type === "image")?.src || null;
-  }
-
-  function placeResults(texts) {
-    const bb = selectionWorldBBox();
-    const center = viewportCenterWorld();
-    const startX = bb ? bb.minx : center.x;
-    let y = bb ? bb.maxy + 60 : center.y;
-    const newIds = [];
-    const newItems = texts.map((t) => {
-      const id = uid();
-      newIds.push(id);
-      const text = stripMd(t);
-      const w = Math.min(520, Math.max(280, Math.round(text.length * 0.55 + 180)));
-      return normalizeItem({ id, type: "text", x: startX, y, text, w });
-    });
-    setItems((arr) => [...arr, ...newItems]);
-    setSelection(newIds);
-  }
-
-  function applyTransformResult(out, ids) {
-    const clean = stripMd(out || "").trim();
-    if (!clean) return;
-    const idSet = new Set(ids);
+  // ---- export / object helpers ----
+  function spawnNewObject(text, sourceIds, atWorld) {
+    const clean = stripMd(text || "").trim();
+    if (!clean) return null;
+    const idSet = new Set(sourceIds || []);
     const sel = itemsRef.current.filter((it) => idSet.has(it.id));
-    const textOnly = sel.length === 1 && sel[0].type === "text" && !sel.some((it) => it.type === "image");
-    if (textOnly) {
-      updateItem(sel[0].id, { text: clean });
-      setSelection([sel[0].id]);
-      return;
+    const boxes = sel.map(itemWorldBBox).filter(Boolean);
+    let x;
+    let y;
+    if (atWorld) {
+      x = atWorld.x;
+      y = atWorld.y;
+    } else if (boxes.length) {
+      x = Math.max(...boxes.map((b) => b.maxx)) + 48;
+      y = Math.min(...boxes.map((b) => b.miny));
+    } else {
+      const c = viewportCenterWorld();
+      x = c.x;
+      y = c.y;
     }
-    placeResults([clean]);
+    const id = uid();
+    const w = Math.min(560, Math.max(280, Math.round(clean.length * 0.5 + 200)));
+    const item = normalizeItem({ id, type: "text", x, y, text: clean, w, bornFrom: sourceIds || [] });
+    setItems((arr) => [...arr, item]);
+    setSelection([id]);
+    return id;
   }
 
-  async function runAI(prompt, { multi = false } = {}) {
-    const texts = selectedTextMaterial();
-    const image = selectedImage();
-    const material = texts.join("\n\n———\n\n");
-    if (!material && !image) {
-      showToast("select some text or an image first");
+  function applyTransformResult(out, sourceIds, atWorld) {
+    spawnNewObject(out, sourceIds, atWorld);
+  }
+
+  async function combineItemsByDrag(draggedIds, targetIds) {
+    const ids = [...new Set([...draggedIds, ...targetIds])];
+    const itemList = itemsRef.current.filter((it) => ids.includes(it.id));
+    const { text, image, preview } = await gatherMaterialFromItems(itemList);
+    if (!text?.trim() && !image) {
+      showToast("nothing to combine");
       return;
     }
+    const groupId = uid();
+    setItems((arr) => arr.map((it) => (ids.includes(it.id) ? { ...it, groupId } : it)));
+    setSelection(ids);
     setAiBusy(true);
     try {
-      const out = await runClaude(prompt, material, { image, system: boardSystem(operators, opMap) });
-      if (multi) {
-        const parts = out
-          .split(/\n+/)
-          .map((l) => l.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim())
-          .filter((l) => l.length > 1);
-        placeResults(parts.length ? parts : [out]);
-      } else {
-        applyTransformResult(out, selRef.current);
+      const prompt =
+        "Combine the following into one unified object. Preserve the meaning of each part. Return ONLY the combined result.";
+      const sys = boardSystem(operators, opMap) + (preview ? `\n\nSOURCE MATERIAL:\n"""${preview.slice(0, 1200)}"""` : "");
+      const out = await runClaude(prompt, text, { image, system: sys });
+      if (!out?.trim()) {
+        showToast("combine failed");
+        return;
       }
+      const bb = itemWorldBBox(itemList[0]) || { maxx: 0, miny: 0 };
+      spawnNewObject(out, ids, { x: bb.maxx + 48, y: bb.miny });
+      showToast("combined · new object");
     } catch (err) {
-      showToast(err.message || "Claude did not answer");
+      showToast(err.message || "combine failed");
     } finally {
       setAiBusy(false);
     }
   }
+  combineRef.current = combineItemsByDrag;
 
-  const AI = {
-    operator: (op) => runOperator(op),
-    custom: (instruction) => runAI(`${instruction}\n\nApply this to the material. Return only the result.`),
-    combine: () =>
-      runAI("Synthesize the following fragments into one tight, original idea that captures what they share and where they point. Return only that idea."),
-    split: () =>
-      runAI("Break the material into its distinct underlying sub-ideas. Return a short list, one idea per line, no numbering.", { multi: true }),
-    ask: (q) => runAI(`Using only the material provided, answer this question clearly and concretely.\n\nQuestion: ${q}`),
-    sameness: () => runSamenessDiscovery(),
-    saveStructure: () => captureSelectionAsStructure(),
-  };
+  function materialFromItemsForExport(itemList) {
+    const parts = [];
+    for (const it of itemList) {
+      if (it.type === "text" && it.text?.trim()) parts.push({ kind: "text", content: it.text.trim() });
+      else if (it.type === "image" && it.src) parts.push({ kind: "image", content: it.src, alt: "image" });
+      else if (it.type === "stroke") parts.push({ kind: "stroke", content: "[drawing on canvas]" });
+    }
+    return parts;
+  }
+
+  function exportSelection(format) {
+    const ids = selRef.current;
+    const itemList = ids.length
+      ? itemsRef.current.filter((it) => ids.includes(it.id))
+      : itemsRef.current.filter((it) => (it.type === "text" && it.text?.trim()) || it.type === "image" || it.type === "stroke");
+    if (!itemList.length) {
+      showToast("nothing to export");
+      return;
+    }
+    const parts = materialFromItemsForExport(itemList);
+    const plain = parts.map((p) => (p.kind === "text" ? p.content : p.content)).join("\n\n---\n\n");
+    const title = `lens-export-${new Date().toISOString().slice(0, 10)}`;
+    const download = (name, blob, mime) => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([blob], { type: mime }));
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
+
+    if (format === "txt") {
+      download(`${title}.txt`, plain, "text/plain;charset=utf-8");
+    } else if (format === "md") {
+      const md = parts
+        .map((p) => {
+          if (p.kind === "text") return p.content;
+          if (p.kind === "image") return `![image](${p.content})`;
+          return p.content;
+        })
+        .join("\n\n---\n\n");
+      download(`${title}.md`, md, "text/markdown;charset=utf-8");
+    } else if (format === "doc") {
+      const html = buildExportHtml(parts, title);
+      download(`${title}.doc`, html, "application/msword");
+    } else if (format === "pdf") {
+      openPrintExport(parts, title);
+    }
+    showToast(`exported · ${format}`);
+  }
+
+  function buildExportHtml(parts, title) {
+    const body = parts
+      .map((p) => {
+        if (p.kind === "text") return `<p style="white-space:pre-wrap;font-family:Georgia,serif;line-height:1.5">${escapeHtml(p.content).replace(/\n/g, "<br>")}</p>`;
+        if (p.kind === "image") return `<p><img src="${p.content}" style="max-width:100%;height:auto" alt="image"/></p>`;
+        return `<p><em>${p.content}</em></p>`;
+      })
+      .join("<hr/>");
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head><body style="max-width:720px;margin:40px auto;padding:0 24px;color:#20201d">${body}</body></html>`;
+  }
+
+  function openPrintExport(parts, title) {
+    const html = buildExportHtml(parts, title);
+    const w = window.open("", "_blank");
+    if (!w) {
+      showToast("allow popups to export PDF");
+      return;
+    }
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => w.print(), 400);
+  }
 
   // ---- render ----
   const selBBox = selection.length ? selectionWorldBBox() : null;
@@ -1484,16 +1747,15 @@ export default function App() {
         className="board-rail"
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes(OP_MIME) || e.dataTransfer.types.includes(STRUCT_MIME)) e.preventDefault();
+          if (e.dataTransfer.types.includes(OP_MIME)) {
+            e.dataTransfer.dropEffect = "copy";
+          }
         }}
         onDrop={(e) => {
           e.preventDefault();
-          const opId = e.dataTransfer.getData(OP_MIME);
-          if (opId) {
-            applyOpDrop(opId);
-            return;
-          }
           const structId = e.dataTransfer.getData(STRUCT_MIME);
           if (structId) applyStructureDrop(structId);
+          // functions compose on cards only — transforms happen on canvas
         }}
       >
         <div className="rail-head">
@@ -1526,9 +1788,9 @@ export default function App() {
                       opMap={opMap}
                       expanded={expanded}
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
-                      onApply={(o) => runOperator(o)}
                       onEdit={openEditFunction}
                       onExpand={expandFunction}
+                      onNest={nestOperatorInto}
                       busy={aiBusy}
                     />
                   ))}
@@ -1544,9 +1806,9 @@ export default function App() {
                       opMap={opMap}
                       expanded={expanded}
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
-                      onApply={(o) => runOperator(o)}
                       onEdit={openEditFunction}
                       onExpand={expandFunction}
+                      onNest={nestOperatorInto}
                       busy={aiBusy}
                       flat
                     />
@@ -1575,16 +1837,16 @@ export default function App() {
                   <StructureCard
                     key={struct.id}
                     struct={struct}
-                    onPlant={() => plantStructure(struct)}
                     onDelete={() => deleteStructure(struct.id)}
+                    onApplyOp={applyOpToStructure}
                   />
                 ))
               )}
             </div>
           </>
         )}
-        {selection.length > 0 && railTab === "functions" && (
-          <div className="rail-hint">{selection.length} selected · drag ⠿ onto canvas</div>
+        {railTab === "functions" && (
+          <div className="rail-hint">drag ⠿ onto canvas · drop ideas together to combine</div>
         )}
       </aside>
 
@@ -1602,11 +1864,20 @@ export default function App() {
           ) {
             e.preventDefault();
             setDropReady(true);
+            if (e.dataTransfer.types.includes(OP_MIME)) {
+              e.dataTransfer.dropEffect = "copy";
+              const hit = itemAtPoint(e.clientX, e.clientY);
+              setDropTargetId(hit?.id || null);
+            }
           }
         }}
-        onDragLeave={() => setDropReady(false)}
+        onDragLeave={() => {
+          setDropReady(false);
+          setDropTargetId(null);
+        }}
         onDrop={(e) => {
           setDropReady(false);
+          setDropTargetId(null);
           e.preventDefault();
           const opId = e.dataTransfer.getData(OP_MIME);
           if (opId) {
@@ -1667,7 +1938,7 @@ export default function App() {
                 <img
                   key={it.id}
                   data-item={it.id}
-                  className={"board-img" + (selection.includes(it.id) ? " sel" : "")}
+                  className={"board-img" + (selection.includes(it.id) ? " sel" : "") + (dropTargetId === it.id ? " drop-target" : "")}
                   src={it.src}
                   style={{ ...itemStyle(it), width: it.w, height: it.h }}
                   draggable={false}
@@ -1678,6 +1949,7 @@ export default function App() {
                   key={it.id}
                   item={it}
                   selected={selection.includes(it.id)}
+                  dropTarget={dropTargetId === it.id}
                   editing={editing === it.id}
                   onCommit={(text) => commitEdit(it.id, text)}
                 />
@@ -1747,23 +2019,19 @@ export default function App() {
       {/* empty hint */}
       {items.length === 0 && (
         <div className="empty-hint">
-          double-click to write · drag functions ⠿ or structures onto canvas
+          double-click to write · drag functions onto ideas · drag ideas together to combine
         </div>
       )}
 
       {/* AI palette over the selection */}
       {aiMenuPos && (
-        <AIPalette
+        <ExportPalette
           pos={aiMenuPos}
           busy={aiBusy}
-          operators={paletteOps}
-          opMap={opMap}
-          textCount={selectedTextMaterial().length}
           selectionCount={selection.length}
-          onAction={AI}
+          onExport={exportSelection}
           onDelete={deleteSelection}
-          onNewOperator={openCreateFunction}
-          onEditOperator={openEditFunction}
+          onSaveStructure={() => captureSelectionAsStructure()}
         />
       )}
 
@@ -1823,7 +2091,7 @@ export default function App() {
   );
 }
 
-function BoardText({ item, selected, editing, onCommit }) {
+function BoardText({ item, selected, dropTarget, editing, onCommit }) {
   const ref = useRef(null);
   const seeded = useRef(false);
 
@@ -1872,7 +2140,7 @@ function BoardText({ item, selected, editing, onCommit }) {
   }
   return (
     <div
-      className={"board-text" + (selected ? " sel" : "")}
+      className={"board-text" + (selected ? " sel" : "") + (dropTarget ? " drop-target" : "")}
       data-item={item.id}
       style={style}
     >
@@ -1933,26 +2201,42 @@ function startStructDrag(e, struct) {
   e.dataTransfer.effectAllowed = "copy";
 }
 
-function DraggableOpCard({ op, opMap, expanded, onToggle, onApply, onEdit, onExpand, busy, flat }) {
+function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onExpand, onNest, busy, flat }) {
   if (!op) return null;
   const steps = op.kind === "pipeline" && op.steps ? op.steps.map((id) => opMap[id]).filter(Boolean) : [];
   const open = expanded[op.id];
+  const [dropOver, setDropOver] = useState(false);
   return (
     <div className="op-card-wrap">
-      <div className="op-card" title="click apply · drag ⠿ onto canvas">
+      <div
+        className={"op-card" + (dropOver ? " drop-target" : "")}
+        draggable={!busy}
+        onDragStart={(e) => startOpDrag(e, op)}
+        title="drag onto canvas · drop function here to compose"
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes(OP_MIME)) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+            setDropOver(true);
+          }
+        }}
+        onDragLeave={() => setDropOver(false)}
+        onDrop={(e) => {
+          setDropOver(false);
+          e.preventDefault();
+          e.stopPropagation();
+          const childId = e.dataTransfer.getData(OP_MIME);
+          if (childId && childId !== op.id && onNest) onNest(op.id, childId);
+        }}
+      >
         <div className="op-card-row">
-          <span
-            className="op-drag-grip"
-            draggable={!busy}
-            onDragStart={(e) => startOpDrag(e, op)}
-            title="drag onto canvas"
-          >
+          <span className="op-drag-grip" title="drag onto canvas">
             ⠿
           </span>
-          <button className="op-card-apply" disabled={busy} onClick={() => onApply(op)}>
+          <div className="op-card-label">
             <span className="op-card-name">{op.name}</span>
             {open && op.description && <span className="op-card-desc">{op.description}</span>}
-          </button>
+          </div>
           {!flat && steps.length > 0 && (
             <button className="op-card-toggle" onClick={() => onToggle(op.id)} title={`${steps.length} steps`}>
               {open ? "▾" : "▸"}
@@ -1971,7 +2255,7 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onApply, onEdit, onExp
       {open && steps.length > 0 && (
         <div className="op-card-steps">
           {steps.map((step) => (
-            <DraggableStep key={step.id} step={step} opMap={opMap} expanded={expanded} onToggle={onToggle} onApply={onApply} onEdit={onEdit} onExpand={onExpand} busy={busy} depth={1} />
+            <DraggableStep key={step.id} step={step} opMap={opMap} expanded={expanded} onToggle={onToggle} onEdit={onEdit} onExpand={onExpand} busy={busy} depth={1} />
           ))}
         </div>
       )}
@@ -1979,25 +2263,23 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onApply, onEdit, onExp
   );
 }
 
-function DraggableStep({ step, opMap, expanded, onToggle, onApply, onEdit, onExpand, busy, depth }) {
+function DraggableStep({ step, opMap, expanded, onToggle, onEdit, onExpand, busy, depth }) {
   const sub = step.kind === "pipeline" && step.steps ? step.steps.map((id) => opMap[id]).filter(Boolean) : [];
   const open = expanded[step.id];
   const isLeaf = !sub.length;
   return (
     <div className="op-step" style={{ paddingLeft: depth * 8 }}>
-      <div className={"op-step-chip" + (isLeaf ? " leaf" : "")} title="click apply · drag ⠿">
-        <span
-          className="op-drag-grip"
-          draggable={!busy}
-          onDragStart={(e) => startOpDrag(e, step)}
-          title="drag onto canvas"
-        >
-          ⠿
-        </span>
-        <button className="op-step-apply" disabled={busy} onClick={() => onApply(step)}>
+      <div
+        className={"op-step-chip" + (isLeaf ? " leaf" : "")}
+        draggable={!busy}
+        onDragStart={(e) => startOpDrag(e, step)}
+        title="drag onto canvas"
+      >
+        <span className="op-drag-grip">⠿</span>
+        <div className="op-step-label">
           <span className="op-step-name">{step.name}</span>
           {open && step.description && <span className="op-step-desc">{step.description}</span>}
-        </button>
+        </div>
         {!isLeaf && (
           <button className="op-step-toggle" onClick={() => onToggle(step.id)}>
             {open ? "▾" : "▸"}
@@ -2012,32 +2294,48 @@ function DraggableStep({ step, opMap, expanded, onToggle, onApply, onEdit, onExp
       </div>
       {open &&
         sub.map((child) => (
-          <DraggableStep key={child.id} step={child} opMap={opMap} expanded={expanded} onToggle={onToggle} onApply={onApply} onEdit={onEdit} onExpand={onExpand} busy={busy} depth={depth + 1} />
+          <DraggableStep key={child.id} step={child} opMap={opMap} expanded={expanded} onToggle={onToggle} onEdit={onEdit} onExpand={onExpand} busy={busy} depth={depth + 1} />
         ))}
     </div>
   );
 }
 
-function StructureCard({ struct, onPlant, onDelete }) {
+function StructureCard({ struct, onDelete, onApplyOp }) {
   const preview = structurePreview(struct);
   const label = struct.structNum ? `#${struct.structNum}` : struct.kind || "idea";
+  const [dropOver, setDropOver] = useState(false);
   return (
     <div className="struct-card-wrap">
-      <div className="struct-card" title="click to plant · drag ⠿ onto canvas">
+      <div
+        className={"struct-card" + (dropOver ? " drop-target" : "")}
+        draggable
+        onDragStart={(e) => startStructDrag(e, struct)}
+        title="drag onto canvas · drop function to transform"
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes(OP_MIME)) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+            setDropOver(true);
+          }
+        }}
+        onDragLeave={() => setDropOver(false)}
+        onDrop={(e) => {
+          setDropOver(false);
+          e.preventDefault();
+          e.stopPropagation();
+          const opId = e.dataTransfer.getData(OP_MIME);
+          if (opId && onApplyOp) onApplyOp(opId, struct.id);
+        }}
+      >
         <div className="struct-card-row">
-          <span
-            className="op-drag-grip"
-            draggable
-            onDragStart={(e) => startStructDrag(e, struct)}
-            title="drag onto canvas"
-          >
+          <span className="op-drag-grip" title="drag onto canvas">
             ⠿
           </span>
-          <button className="struct-card-plant" onClick={onPlant}>
+          <div className="struct-card-body">
             <span className="struct-kind">{label}</span>
             <span className="struct-title">{struct.title || preview}</span>
             <span className="struct-preview">{preview}</span>
-          </button>
+          </div>
           <button className="struct-card-del" onClick={onDelete} title="delete">
             ×
           </button>
@@ -2055,9 +2353,8 @@ function escapeHtml(s) {
     .replace(/\n/g, "<br>");
 }
 
-function AIPalette({ pos, busy, operators, opMap, textCount, selectionCount, onAction, onDelete, onNewOperator, onEditOperator }) {
-  const [mode, setMode] = useState(null); // null | 'transform' | 'ask' | 'custom'
-  const [q, setQ] = useState("");
+function ExportPalette({ pos, busy, selectionCount, onExport, onDelete, onSaveStructure }) {
+  const [open, setOpen] = useState(false);
   const transform = pos.below ? "translate(-50%, 0)" : "translate(-50%, -100%)";
   const style = { left: pos.x, top: pos.y, transform };
 
@@ -2069,87 +2366,30 @@ function AIPalette({ pos, busy, operators, opMap, textCount, selectionCount, onA
     );
   }
 
-  if (mode === "ask" || mode === "custom") {
-    const placeholder = mode === "ask" ? "ask a question about this…" : "describe a transformation…";
+  if (open) {
     return (
-      <div className="palette" style={style}>
-        <input
-          autoFocus
-          className="palette-input"
-          placeholder={placeholder}
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && q.trim()) {
-              mode === "ask" ? onAction.ask(q.trim()) : onAction.custom(q.trim());
-              setMode(null);
-              setQ("");
-            }
-            if (e.key === "Escape") setMode(null);
-          }}
-        />
-        <button className="p-btn" onClick={() => setMode(null)}>
-          ←
-        </button>
-      </div>
-    );
-  }
-
-  if (mode === "transform") {
-    return (
-      <div className="palette col" style={style}>
+      <div className="palette col export-palette" style={style}>
         <div className="palette-row head">
-          <button className="p-btn ghost" onClick={() => setMode(null)}>
+          <button className="p-btn ghost" onClick={() => setOpen(false)}>
             ←
           </button>
-          <span className="palette-title">transform</span>
+          <span className="palette-title">export</span>
         </div>
-        <div className="op-grid">
-          {operators.map((op) => (
-            <button
-              key={op.id}
-              className="op-chip"
-              draggable
-              onDragStart={(e) => startOpDrag(e, op)}
-              onClick={() => onAction.operator(op)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                onEditOperator(op);
-              }}
-              title="drag or click · right-click to edit"
-            >
-              {op.name}
-            </button>
-          ))}
-          <button className="op-chip add" onClick={onNewOperator}>
-            + new
+        {["txt", "md", "doc", "pdf"].map((fmt) => (
+          <button key={fmt} className="p-btn wide" onClick={() => { onExport(fmt); setOpen(false); }}>
+            {fmt === "doc" ? "Word (.doc)" : fmt === "pdf" ? "PDF (print)" : `.${fmt}`}
           </button>
-        </div>
-        <button className="p-btn wide" onClick={() => setMode("custom")}>
-          custom instruction…
-        </button>
+        ))}
       </div>
     );
   }
 
   return (
     <div className="palette" style={style}>
-      <button className="p-btn" onClick={() => setMode("transform")}>
-        transform
+      <button className="p-btn" onClick={() => setOpen(true)}>
+        export
       </button>
-      <button className="p-btn" onClick={onAction.combine} disabled={textCount < 2}>
-        combine
-      </button>
-      <button className="p-btn" onClick={onAction.split}>
-        split
-      </button>
-      <button className="p-btn" onClick={() => setMode("ask")}>
-        ask
-      </button>
-      <button className="p-btn" onClick={onAction.sameness} disabled={textCount < 2}>
-        sameness
-      </button>
-      <button className="p-btn" onClick={onAction.saveStructure} disabled={!selectionCount} title="save to structures">
+      <button className="p-btn" onClick={onSaveStructure} disabled={!selectionCount} title="save to structures">
         save
       </button>
       <span className="p-sep" />
@@ -2224,7 +2464,7 @@ function Onboarding({ state, onStart, onSkip, onClose }) {
           <div className="onboard-mark">lens</div>
           <h2>Your toolbox is ready</h2>
           <p className="onboard-sub">
-            {state.count} functions built for a {state.role}. Expand one in the left rail to see its steps, drag transforms onto selected material, or click to apply.
+            {state.count} functions built for a {state.role}. Drag functions onto ideas on the canvas, or drag ideas together to combine.
           </p>
           <button className="onboard-go" onClick={onClose}>
             start thinking

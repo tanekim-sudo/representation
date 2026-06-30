@@ -55,10 +55,13 @@ export async function runPrompt({ prompt, text, count = 1, image = null, system 
 
   const content = text && String(text).trim().length > 0 ? String(text) : "";
   const img = imageBlock(image);
-  const userText = content
-    ? `${prompt}\n\n---\nHere is the material to work on:\n"""\n${content}\n"""`
+  const materialBlock = content
+    ? `MATERIAL TO TRANSFORM (you must transform THIS specific content — stay faithful to it, do not invent unrelated material):\n"""\n${content}\n"""`
     : img
-    ? `${prompt}\n\n---\nWork on the image above.`
+    ? "MATERIAL TO TRANSFORM: the attached image/sketch from the user's whiteboard. Interpret and transform what you actually see."
+    : "";
+  const userText = materialBlock
+    ? `${prompt}\n\n---\n${materialBlock}`
     : prompt;
 
   const blocks = [];
