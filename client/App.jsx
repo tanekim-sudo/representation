@@ -486,6 +486,111 @@ export default function App() {
     return { x: wx * c.scale + c.x, y: wy * c.scale + c.y };
   };
 
+  // global pointer move/up so gestures work across canvas items
+  useEffect(() => {
+    function onMove(e) {
+      const g = gesture.current;
+      if (!g) return;
+      const cx = e.clientX;
+      const cy = e.clientY;
+
+      if (g.mode === "pan") {
+        setCamera({ ...g.cam, x: g.cam.x + (cx - g.cx), y: g.cam.y + (cy - g.cy) });
+      } else if (g.mode === "draw") {
+        const w = screenToWorld(cx, cy);
+        g.points.push(w);
+        setDraft({ points: g.points.slice(), marker: g.marker });
+      } else if (g.mode === "erase") {
+        const hit = itemAtPoint(cx, cy);
+        if (hit) setItems((arr) => arr.filter((it) => it.id !== hit.id));
+      } else if (g.mode === "move") {
+        const dx = (cx - g.cx) / camRef.current.scale;
+        const dy = (cy - g.cy) / camRef.current.scale;
+        g.cx = cx;
+        g.cy = cy;
+        g.moved += Math.abs(dx) + Math.abs(dy);
+        const ids = new Set(g.ids);
+        setItems((arr) =>
+          arr.map((it) => {
+            if (!ids.has(it.id)) return it;
+            if (it.type === "stroke") return { ...it, points: it.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+            return { ...it, x: it.x + dx, y: it.y + dy };
+          })
+        );
+      } else if (g.mode === "lasso") {
+        g.x1 = cx;
+        g.y1 = cy;
+        setLasso({ x0: g.x0, y0: g.y0, x1: cx, y1: cy });
+      } else if (g.mode === "rotate") {
+        const it = itemsRef.current.find((i) => i.id === g.id);
+        if (!it) return;
+        const c = worldToScreen(g.cx0, g.cy0);
+        const a1 = Math.atan2(cy - c.y, cx - c.x);
+        const deg = g.startRot + ((a1 - g.startAngle) * 180) / Math.PI;
+        updateItem(g.id, { rotation: deg });
+      } else if (g.mode === "resize") {
+        const it = itemsRef.current.find((i) => i.id === g.id);
+        if (!it) return;
+        const dw = (cx - g.cx) / camRef.current.scale;
+        const dh = (cy - g.cy) / camRef.current.scale;
+        if (it.type === "image") {
+          let nw = Math.max(40, g.startW + dw);
+          let nh = Math.max(30, g.startH + (g.corner.includes("n") ? -dh : dh));
+          if (g.aspect) nh = Math.round(nw * (g.startH / g.startW));
+          updateItem(g.id, { w: Math.round(nw), h: Math.round(nh) });
+        } else if (it.type === "text") {
+          updateItem(g.id, { w: Math.max(120, Math.round(g.startW + dw)) });
+        }
+      } else if (g.mode === "scale") {
+        const it = itemsRef.current.find((i) => i.id === g.id);
+        if (!it) return;
+        const dw = (cx - g.cx) / camRef.current.scale;
+        const factor = Math.max(0.25, g.startScale + dw / 200);
+        updateItem(g.id, { scale: factor });
+      }
+    }
+
+    function onUp() {
+      const g = gesture.current;
+      gesture.current = null;
+      if (!g) return;
+
+      if (g.mode === "draw") {
+        if (g.points.length > 1) {
+          setItems((arr) => [
+            ...arr,
+            { id: uid(), type: "stroke", points: g.points, color: INK, width: g.marker ? MARKER_W : PEN_W, marker: g.marker },
+          ]);
+        }
+        setDraft(null);
+      } else if (g.mode === "lasso") {
+        setLasso(null);
+        const L = Math.min(g.x0, g.x1), R = Math.max(g.x0, g.x1);
+        const T = Math.min(g.y0, g.y1), B = Math.max(g.y0, g.y1);
+        if (Math.abs(R - L) >= 4 || Math.abs(B - T) >= 4) {
+          const picked = itemsRef.current
+            .filter((it) => {
+              const bb = itemScreenBBox(it);
+              return bb.left < R && bb.right > L && bb.top < B && bb.bottom > T;
+            })
+            .map((it) => it.id);
+          setSelection(picked);
+        } else {
+          setLasso(null);
+        }
+      }
+    }
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, []);
+
   // wheel: pan; cmd/ctrl+wheel: zoom toward cursor
   useEffect(() => {
     const el = viewportRef.current;
@@ -851,101 +956,21 @@ export default function App() {
       gesture.current = { mode: "lasso", x0: cx, y0: cy, x1: cx, y1: cy };
       setLasso({ x0: cx, y0: cy, x1: cx, y1: cy });
     }
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
   }
 
   function startHandleGesture(e, mode, payload) {
     e.stopPropagation();
     e.preventDefault();
     gesture.current = { mode, cx: e.clientX, cy: e.clientY, ...payload };
-  }
-
-  function onPointerMove(e) {
-    const g = gesture.current;
-    if (!g) return;
-    const cx = e.clientX;
-    const cy = e.clientY;
-
-    if (g.mode === "pan") {
-      setCamera({ ...g.cam, x: g.cam.x + (cx - g.cx), y: g.cam.y + (cy - g.cy) });
-    } else if (g.mode === "draw") {
-      const w = screenToWorld(cx, cy);
-      g.points.push(w);
-      setDraft({ points: g.points.slice(), marker: g.marker });
-    } else if (g.mode === "erase") {
-      const hit = itemAtPoint(cx, cy);
-      if (hit) setItems((arr) => arr.filter((it) => it.id !== hit.id));
-    } else if (g.mode === "move") {
-      const dx = (cx - g.cx) / camRef.current.scale;
-      const dy = (cy - g.cy) / camRef.current.scale;
-      g.cx = cx;
-      g.cy = cy;
-      g.moved += Math.abs(cx) + Math.abs(cy);
-      const ids = new Set(g.ids);
-      setItems((arr) =>
-        arr.map((it) => {
-          if (!ids.has(it.id)) return it;
-          if (it.type === "stroke") return { ...it, points: it.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
-          return { ...it, x: it.x + dx, y: it.y + dy };
-        })
-      );
-    } else if (g.mode === "lasso") {
-      g.x1 = cx;
-      g.y1 = cy;
-      setLasso({ x0: g.x0, y0: g.y0, x1: cx, y1: cy });
-    } else if (g.mode === "rotate") {
-      const it = itemsRef.current.find((i) => i.id === g.id);
-      if (!it) return;
-      const c = worldToScreen(g.cx0, g.cy0);
-      const a1 = Math.atan2(cy - c.y, cx - c.x);
-      const deg = g.startRot + ((a1 - g.startAngle) * 180) / Math.PI;
-      updateItem(g.id, { rotation: deg });
-    } else if (g.mode === "resize") {
-      const it = itemsRef.current.find((i) => i.id === g.id);
-      if (!it) return;
-      const dw = (cx - g.cx) / camRef.current.scale;
-      const dh = (cy - g.cy) / camRef.current.scale;
-      if (it.type === "image") {
-        let nw = Math.max(40, g.startW + dw);
-        let nh = Math.max(30, g.startH + (g.corner.includes("n") ? -dh : dh));
-        if (g.aspect) nh = Math.round(nw * (g.startH / g.startW));
-        updateItem(g.id, { w: Math.round(nw), h: Math.round(nh) });
-      } else if (it.type === "text") {
-        updateItem(g.id, { w: Math.max(120, Math.round(g.startW + dw)) });
-      }
-    } else if (g.mode === "scale") {
-      const it = itemsRef.current.find((i) => i.id === g.id);
-      if (!it) return;
-      const dw = (cx - g.cx) / camRef.current.scale;
-      const factor = Math.max(0.25, g.startScale + dw / 200);
-      updateItem(g.id, { scale: factor });
-    }
-  }
-
-  function onPointerUp() {
-    const g = gesture.current;
-    gesture.current = null;
-    if (!g) return;
-
-    if (g.mode === "draw") {
-      if (g.points.length > 1) {
-        setItems((arr) => [
-          ...arr,
-          { id: uid(), type: "stroke", points: g.points, color: INK, width: g.marker ? MARKER_W : PEN_W, marker: g.marker },
-        ]);
-      }
-      setDraft(null);
-    } else if (g.mode === "lasso") {
-      setLasso(null);
-      const L = Math.min(g.x0, g.x1), R = Math.max(g.x0, g.x1);
-      const T = Math.min(g.y0, g.y1), B = Math.max(g.y0, g.y1);
-      if (Math.abs(R - L) < 4 && Math.abs(B - T) < 4) return;
-      const picked = itemsRef.current
-        .filter((it) => {
-          const bb = itemScreenBBox(it);
-          return bb.left < R && bb.right > L && bb.top < B && bb.bottom > T;
-        })
-        .map((it) => it.id);
-      setSelection(picked);
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
     }
   }
 
@@ -1163,8 +1188,6 @@ export default function App() {
         ref={viewportRef}
         className={"viewport " + cursorClass}
         onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
         onDoubleClick={onDoubleClick}
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes(OP_MIME) || e.dataTransfer.types.includes("Files")) {

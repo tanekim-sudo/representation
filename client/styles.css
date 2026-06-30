@@ -238,6 +238,7 @@ body {
 /* transform handles */
 .xform-frame {
   z-index: 5;
+  pointer-events: none;
 }
 .xform-outline {
   position: absolute;
@@ -296,6 +297,17 @@ body {
   left: 0;
   transform-origin: 0 0;
   will-change: transform;
+  pointer-events: none;
+}
+
+.world .board-text,
+.world .board-img {
+  pointer-events: none;
+}
+.world .board-text.editing {
+  pointer-events: auto;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .ink-layer {
@@ -363,7 +375,7 @@ body {
 
 /* ---- brand + hints ---- */
 .brand {
-  position: fixed;
+  position: absolute;
   top: 18px;
   left: 22px;
   font-family: var(--serif);
@@ -371,9 +383,10 @@ body {
   letter-spacing: 0.02em;
   color: var(--ink);
   pointer-events: none;
+  z-index: 2;
 }
 .empty-hint {
-  position: fixed;
+  position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
@@ -381,6 +394,7 @@ body {
   font-size: 14px;
   letter-spacing: 0.02em;
   pointer-events: none;
+  z-index: 1;
 }
 
 /* ---- bottom tool dock ---- */
