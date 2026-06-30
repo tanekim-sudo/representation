@@ -27,7 +27,15 @@ function extractText(message) {
 // Run a saved prompt ("symbol") against some text.
 // `count` controls how many independent variations Claude generates (1..MAX_RESPONSES);
 // they are produced in parallel and returned as `outputs`.
-export async function runPrompt({ prompt, text, count = 1 }) {
+function imageBlock(image) {
+  if (!image || typeof image !== "string") return null;
+  const m = image.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]*)$/);
+  if (!m) return null;
+  return { type: "image", source: { type: "base64", media_type: m[1], data: m[2] } };
+}
+
+// Run a saved prompt against text and/or an image (Claude vision).
+export async function runPrompt({ prompt, text, count = 1, image = null }) {
   const anthropic = getClient();
   if (!anthropic) {
     const err = new Error(
@@ -46,9 +54,16 @@ export async function runPrompt({ prompt, text, count = 1 }) {
   const n = Math.min(Math.max(parseInt(count, 10) || 1, 1), MAX_RESPONSES);
 
   const content = text && String(text).trim().length > 0 ? String(text) : "";
-  const userMessage = content
-    ? `${prompt}\n\n---\nHere is the text to work on:\n"""\n${content}\n"""`
+  const img = imageBlock(image);
+  const userText = content
+    ? `${prompt}\n\n---\nHere is the material to work on:\n"""\n${content}\n"""`
+    : img
+    ? `${prompt}\n\n---\nWork on the image above.`
     : prompt;
+
+  const blocks = [];
+  if (img) blocks.push(img);
+  blocks.push({ type: "text", text: userText });
 
   const makeOne = () =>
     anthropic.messages
@@ -57,7 +72,7 @@ export async function runPrompt({ prompt, text, count = 1 }) {
         max_tokens: 4096,
         // Higher temperature when asking for several options, so they differ.
         temperature: n > 1 ? 1 : 0.7,
-        messages: [{ role: "user", content: userMessage }],
+        messages: [{ role: "user", content: blocks }],
       })
       .then(extractText);
 

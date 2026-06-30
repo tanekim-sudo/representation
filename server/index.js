@@ -17,7 +17,7 @@ if (!hasKey()) {
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "16mb" }));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, hasKey: hasKey(), model: MODEL });
@@ -25,8 +25,8 @@ app.get("/api/health", (_req, res) => {
 
 app.post("/api/run", async (req, res) => {
   try {
-    const { prompt, text, count } = req.body ?? {};
-    const data = await runPrompt({ prompt, text, count });
+    const { prompt, text, count, image } = req.body ?? {};
+    const data = await runPrompt({ prompt, text, count, image });
     res.json(data);
   } catch (err) {
     console.error("[lens] /api/run failed:", err?.message || err);

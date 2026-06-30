@@ -4,11 +4,13 @@ const SEEDS_KEY = "lens.seeds.v2";
 const EDGES_KEY = "lens.edges.v2";
 const CAMERA_KEY = "lens.camera.v2";
 const SYMBOLS_KEY = "lens.operators.v2";
+const NODES_KEY = "lens.savednodes.v1";
+const STRUCTSEQ_KEY = "lens.structseq.v1";
 
 const MAX_RESPONSES = 6;
 const CANVAS_SIZE = 256;
 
-const STAR_COLORS = ["#8ab4ff", "#a78bfa", "#22d3ee", "#f0abfc", "#fcd34d", "#7dd3fc", "#5eead4"];
+const STAR_COLORS = ["#2f5d8a", "#7a4f9c", "#2f7d7a", "#a85a86", "#b07d2a", "#2f7d5a", "#6a5bb0"];
 
 const EMOJI_CHOICES = [
   "✨", "📝", "🔍", "🌍", "🎯", "💡", "🧹", "📌", "🔥", "🧠",
@@ -18,7 +20,7 @@ const COLOR_CHOICES = [
   "#8ab4ff", "#a78bfa", "#22d3ee", "#f0abfc", "#fcd34d",
   "#5eead4", "#fb7185", "#34d399", "#60a5fa", "#c084fc",
 ];
-const PEN_COLORS = ["#ffffff", "#8ab4ff", "#a78bfa", "#22d3ee", "#f0abfc", "#fcd34d", "#5eead4", "#fb7185"];
+const PEN_COLORS = ["#20201d", "#c2603e", "#2f5d8a", "#2f7d5a", "#7a4f9c", "#b07d2a", "#a85a86", "#2f7d7a"];
 
 // The primitive grammar of idea-operations. Arities:
 //   1            unary — transforms the selected idea into one child
@@ -62,15 +64,49 @@ const OPS = {
     prompt: "Find the central tension inside this idea and fork it there into 2-3 divergent ideas, each fully committing to one side of that tension. Return each on its own line, no numbering, no bullets, no preamble." },
   resonate: { sym: "∿", name: "resonate", arity: 1, group: "interaction", color: "#f0abfc",
     prompt: "Take the deep structure of this idea and re-embody it in a COMPLETELY different domain (e.g. recast a social idea as biology, music, or geology). Start by naming the target domain, then state the resonant idea in one or two sentences. Return only that, no preamble." },
-  stabilize: { sym: "⊙", name: "stabilize", arity: "many-select", group: "interaction", color: "#9fb4ff",
+  stabilize: { sym: "⊙", name: "stabilize", arity: "many-select", group: "interaction", color: "#5e6b80",
     prompt: "Collapse these branches into the shared structure they hold in common — the stable invariant underneath all of them. Return only that shared structure, as a single idea, no preamble." },
+
+  // ── discovery (the discovery engine) ──
+  sameness: { sym: "⟁", name: "find hidden sameness", arity: "many-select", group: "discovery", color: "#b5832b",
+    prompt: "" },
 };
 
 const OP_GROUPS = [
   { key: "primitive", label: "primitives" },
   { key: "interaction", label: "interactions" },
   { key: "map", label: "maps" },
+  { key: "discovery", label: "discovery" },
 ];
+
+// Prompt for the discovery engine: find the deep isomorphism across N disparate things.
+function samenessPrompt(items) {
+  const body = items
+    .map((t, i) => `(${i + 1}) ${t}`)
+    .join("\n");
+  return `You are a discovery engine that finds HIDDEN SAMENESS — the deep structural isomorphism shared by seemingly unrelated things.
+
+Here are ${items.length} things:
+${body}
+
+Find the single deepest structure they all share — the abstract pattern that is secretly the same across all of them. Ignore surface similarity; reach for the invariant mechanism.
+
+Return EXACTLY this format, no preamble:
+NAME: <a vivid 2-5 word name for the discovered structure>
+STRUCTURE: <one or two sentences stating the shared deep structure precisely>
+MAPPING:
+${items.map((_, i) => `- (${i + 1}) → <how this thing instantiates the structure, one line>`).join("\n")}
+WHY IT MATTERS: <one sentence on what this isomorphism unlocks or predicts>`;
+}
+
+function parseSameness(out) {
+  const grab = (re) => {
+    const m = out.match(re);
+    return m ? m[1].trim() : "";
+  };
+  const name = grab(/NAME:\s*(.+)/i);
+  return { name: name || "Hidden Structure", body: out.trim() };
+}
 
 function opsIn(group) {
   return Object.entries(OPS)
@@ -80,7 +116,7 @@ function opsIn(group) {
 
 // Provenance / formation metadata for replay (invisible until a node is replayed)
 const VERB_META = {
-  plant: { label: "planted", color: "#9fb4ff", symbol: "✦" },
+  plant: { label: "planted", color: "#5e6b80", symbol: "✦" },
   write: { label: "written", color: "#cbd5ff", symbol: "✎" },
   operator: { label: "operator", color: "#8ab4ff", symbol: "◈" },
   // legacy kinds from earlier versions
@@ -95,7 +131,7 @@ Object.entries(OPS).forEach(([k, o]) => {
 // ── Highlighter grammar: operations on extracted thought-particles ──
 // kind: extract (instant, no AI) | one | fan | binary | analysis-binary
 const FRAG_OPS = {
-  isolate: { sym: "⟐", name: "isolate", kind: "extract", color: "#9fb4ff",
+  isolate: { sym: "⟐", name: "isolate", kind: "extract", color: "#5e6b80",
     hint: "pull this fragment out as its own particle" },
   collide: { sym: "⚡", name: "collide", kind: "binary", color: "#fcd34d",
     hint: "crash this into another fragment",
@@ -114,6 +150,30 @@ const FRAG_ORDER = ["isolate", "collide", "synthesize", "mutate", "compare"];
 Object.entries(FRAG_OPS).forEach(([k, o]) => {
   VERB_META[k] = { label: o.name, color: o.color, symbol: o.sym };
 });
+
+// What a floating thing can be. Everything is matter in the field.
+const KINDS = {
+  idea: { glyph: "✦", color: "#2f5d8a", label: "idea" },
+  question: { glyph: "❓", color: "#b07d2a", label: "question" },
+  experiment: { glyph: "⚗", color: "#2f7d5a", label: "experiment" },
+  fragment: { glyph: "❖", color: "#7a4f9c", label: "fragment" },
+  structure: { glyph: "⬡", color: "#b5832b", label: "structure" },
+  observation: { glyph: "◉", color: "#2f7d7a", label: "observation" },
+  memory: { glyph: "❁", color: "#a85a86", label: "memory" },
+  book: { glyph: "▤", color: "#9a6b2f", label: "book" },
+  person: { glyph: "☻", color: "#b0503f", label: "person" },
+  experience: { glyph: "✷", color: "#6a5bb0", label: "experience" },
+};
+const KIND_ORDER = Object.keys(KINDS);
+
+// Rotating prompts for the entry portal.
+const ENTRY_EXAMPLES = [
+  "discipleship",
+  "marriage",
+  "exercise",
+  "startup building",
+  "learning piano",
+];
 
 const BINARY_ARITIES = new Set([2]);
 
@@ -184,15 +244,40 @@ function makeSeed(x, y, text = "", extra = {}) {
   };
 }
 
-async function runClaude(prompt, text, count = 1) {
+async function runClaude(prompt, text, count = 1, image = null) {
   const res = await fetch("/api/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, text, count }),
+    body: JSON.stringify({ prompt, text, count, image }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "The void did not answer.");
   return data.outputs || [];
+}
+
+// Read a File/Blob into a downscaled data URL (keeps payloads small for vision)
+function fileToImage(file, max = 1024) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        const type = file.type === "image/png" ? "image/png" : "image/jpeg";
+        resolve(canvas.toDataURL(type, 0.86));
+      };
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }
 
 async function ask(prompt, text) {
@@ -269,6 +354,16 @@ export default function App() {
   const [highlight, setHighlight] = useState(null);
   // a two-fragment op waiting for its second fragment -> { opKey, fragA, sourceA }
   const [pendingFrag, setPendingFrag] = useState(null);
+  // entry portal + palette
+  const [entryText, setEntryText] = useState("");
+  const [entryKind, setEntryKind] = useState("idea");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [exIdx, setExIdx] = useState(0);
+  // toolbox: two object types live here — nodes and operators
+  const [savedNodes, setSavedNodes] = useState(() => load(NODES_KEY, []));
+  const [toolboxTab, setToolboxTab] = useState("operators");
+  // discovery engine working state -> { items: [...labels], started }
+  const [discovering, setDiscovering] = useState(null);
 
   const viewportRef = useRef(null);
   const panRef = useRef(null);
@@ -280,6 +375,7 @@ export default function App() {
   useEffect(() => localStorage.setItem(EDGES_KEY, JSON.stringify(edges)), [edges]);
   useEffect(() => localStorage.setItem(CAMERA_KEY, JSON.stringify(camera)), [camera]);
   useEffect(() => localStorage.setItem(SYMBOLS_KEY, JSON.stringify(symbols)), [symbols]);
+  useEffect(() => localStorage.setItem(NODES_KEY, JSON.stringify(savedNodes)), [savedNodes]);
 
   useEffect(() => {
     function onKey(e) {
@@ -329,6 +425,31 @@ export default function App() {
       document.removeEventListener("mouseup", onUp);
       document.removeEventListener("touchend", onUp);
     };
+  }, []);
+
+  // paste an image from the clipboard anywhere -> a node in the field
+  useEffect(() => {
+    function onPaste(e) {
+      const items = e.clipboardData?.items || [];
+      for (const it of items) {
+        if (it.type && it.type.startsWith("image/")) {
+          const f = it.getAsFile();
+          if (f) {
+            addImageFiles([f]);
+            e.preventDefault();
+            return;
+          }
+        }
+      }
+    }
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, [camera]);
+
+  // rotate the entry-portal placeholder examples
+  useEffect(() => {
+    const id = setInterval(() => setExIdx((i) => (i + 1) % ENTRY_EXAMPLES.length), 2800);
+    return () => clearInterval(id);
   }, []);
 
   function showToast(msg) {
@@ -391,17 +512,54 @@ export default function App() {
   }
 
   // ---- seed ops ----
-  function plantText(x, y) {
+  function plantText(x, y, kind = "idea", text = "") {
     const c = x == null ? viewCenterWorld() : { x, y };
-    const seed = makeSeed(c.x, c.y, "");
+    const k = KINDS[kind] || KINDS.idea;
+    const seed = makeSeed(c.x, c.y, text, { kind, color: k.color });
     setSeeds((p) => [...p, seed]);
     setSelected(seed.id);
+    return seed;
   }
   function plantSketch() {
     const c = viewCenterWorld();
-    const seed = makeSeed(c.x, c.y, "", { type: "sketch", image: null, strokes: [] });
+    const seed = makeSeed(c.x, c.y, "", { type: "sketch", kind: "fragment", image: null, strokes: [] });
     setSeeds((p) => [...p, seed]);
     setSelected(seed.id);
+  }
+  function plantImage(dataUrl, x, y) {
+    const c = x == null ? viewCenterWorld() : { x, y };
+    const seed = makeSeed(c.x, c.y, "", {
+      type: "image",
+      kind: "observation",
+      color: "#5e6b80",
+      image: dataUrl,
+    });
+    setSeeds((p) => [...p, seed]);
+    setSelected(seed.id);
+  }
+  async function addImageFiles(files, x, y) {
+    const list = [...files].filter((f) => f.type.startsWith("image/"));
+    for (let i = 0; i < list.length; i++) {
+      try {
+        const data = await fileToImage(list[i]);
+        plantImage(data, x == null ? null : x + i * 30, y == null ? null : y + i * 30);
+      } catch {
+        showToast("Could not read that image.");
+      }
+    }
+  }
+  function pickImageFile() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.multiple = true;
+    input.onchange = () => input.files && addImageFiles(input.files);
+    input.click();
+  }
+  function enterThought(text, kind = "idea") {
+    const t = text.trim();
+    if (!t) return;
+    plantText(null, null, kind, t);
   }
   function updateSeed(id, patch) {
     setSeeds((p) => p.map((s) => (s.id === id ? { ...s, ...patch } : s)));
@@ -453,12 +611,14 @@ export default function App() {
     const others = extra.map((id) => seeds.find((s) => s.id === id)).filter(Boolean);
     const meta = { name: op.name, sym: op.sym, color: op.color };
 
+    const hasContent = (seed.text || "").trim() || seed.type === "sketch" || seed.type === "image";
     if (op.arity === 2 && others.length < 1) return;
     if (op.arity === "many-select" && others.length < 1)
       return showToast("Pick at least one more idea to stabilize.");
-    if (op.arity !== "many-select" && op.arity !== 2 && !(seed.text || "").trim() && seed.type !== "sketch")
+    if (op.arity !== "many-select" && op.arity !== 2 && !hasContent)
       return showToast("This seed is still empty.");
 
+    const img = seed.type === "image" ? seed.image : null;
     const involved = [seed, ...others];
     involved.forEach((n) => setBusy(n.id, true));
 
@@ -487,7 +647,7 @@ export default function App() {
         pulse(child.id);
       } else if (op.arity === "many") {
         const baseH = withWrite(seed);
-        const out = (await runClaude(op.prompt, seed.text, 1))[0] || "";
+        const out = (await runClaude(op.prompt, seed.text, 1, img))[0] || "";
         const list = parseLines(out);
         const children = list.map((t, i) => {
           const pos = placeNear(seed, i, list.length);
@@ -501,7 +661,7 @@ export default function App() {
       } else {
         // unary (1) and analysis
         const baseH = withWrite(seed);
-        const out = (await runClaude(op.prompt, seed.text, 1))[0] || "";
+        const out = (await runClaude(op.prompt, seed.text, 1, img))[0] || "";
         const pos = placeNear(seed);
         const child = makeSeed(pos.x, pos.y, out, {
           color: op.color,
@@ -531,6 +691,10 @@ export default function App() {
   // Begin / advance / run a multi-node operation from the panel.
   function startOp(opKey, seed) {
     const op = OPS[opKey];
+    if (opKey === "sameness") {
+      startDiscovery(seed);
+      return;
+    }
     if (op.arity === 2) {
       setPending({ opKey, fromId: seed.id, picks: [] });
       showToast(`pick another idea to ${op.name}`);
@@ -544,9 +708,155 @@ export default function App() {
 
   function runPending() {
     if (!pending) return;
+    if (pending.discover) return runDiscovery();
     const seed = seeds.find((s) => s.id === pending.fromId);
     if (seed) applyOp(pending.opKey, seed, pending.picks);
     setPending(null);
+  }
+
+  // ---- the discovery engine: find hidden sameness across many nodes ----
+  function startDiscovery(seed = null) {
+    setSelected(null);
+    setPending({ discover: true, opKey: "sameness", fromId: seed?.id ?? null, picks: [] });
+    showToast("select things, then find their hidden sameness");
+  }
+
+  function nextStructNumber() {
+    const cur = parseInt(localStorage.getItem(STRUCTSEQ_KEY) || "283", 10) || 283;
+    const n = cur + 1;
+    localStorage.setItem(STRUCTSEQ_KEY, String(n));
+    return n;
+  }
+
+  async function runDiscovery() {
+    if (!pending || !pending.discover) return;
+    const ids = [...(pending.fromId ? [pending.fromId] : []), ...pending.picks];
+    const nodes = ids.map((id) => seeds.find((s) => s.id === id)).filter(Boolean);
+    if (nodes.length < 2) return showToast("select at least two things to compare");
+    const labels = nodes.map((n) =>
+      (n.text || "").trim() || (n.type === "image" ? "[an image]" : "[a sketch]")
+    );
+    setPending(null);
+    setDiscovering({ count: nodes.length, started: Date.now() });
+    nodes.forEach((n) => setBusy(n.id, true));
+    try {
+      const out = (await runClaude(samenessPrompt(labels), "", 1))[0] || "";
+      const parsed = parseSameness(out);
+      const num = nextStructNumber();
+      const title = `STRUCTURE #${num} — ${parsed.name}`;
+      const mid = midOf(nodes);
+      const child = makeSeed(mid.x, mid.y - 30, parsed.body, {
+        kind: "structure",
+        color: "#b5832b",
+        struct: num,
+        title,
+        discovery: true,
+        history: [
+          {
+            kind: "sameness",
+            op: { name: "find hidden sameness", sym: "⟁", color: "#b5832b" },
+            to: parsed.body,
+            parents: nodes.map((n) => ({ text: n.text, history: n.history })),
+          },
+        ],
+      });
+      setSeeds((p) => [...p, child]);
+      setEdges((p) => [...p, ...nodes.map((n) => ({ id: uid(), a: n.id, b: child.id }))]);
+      setSelected(child.id);
+      pulse(child.id);
+      showToast(title);
+    } catch (e) {
+      showToast(e.message);
+    } finally {
+      nodes.forEach((n) => setBusy(n.id, false));
+      setDiscovering(null);
+    }
+  }
+
+  // ---- saved nodes (idea structures stored in the toolbox) ----
+  function saveNodeToToolbox(seed) {
+    const snap = {
+      id: uid(),
+      kind: seed.kind || "idea",
+      color: seed.color,
+      type: seed.type || "text",
+      text: seed.text || "",
+      image: seed.image || null,
+      strokes: seed.strokes || [],
+      title: seed.title || (seed.text || "").trim().split("\n")[0].slice(0, 48) || "untitled",
+      savedAt: Date.now(),
+    };
+    setSavedNodes((p) => [snap, ...p]);
+    setToolboxTab("nodes");
+    showToast("saved to toolbox");
+  }
+  function deleteSavedNode(id) {
+    setSavedNodes((p) => p.filter((n) => n.id !== id));
+  }
+  function plantSavedNode(node) {
+    const c = viewCenterWorld();
+    const seed = makeSeed(c.x, c.y, node.text || "", {
+      kind: node.kind,
+      color: node.color,
+      type: node.type,
+      image: node.image,
+      strokes: node.strokes,
+      title: node.title,
+      struct: node.struct,
+    });
+    setSeeds((p) => [...p, seed]);
+    setSelected(seed.id);
+  }
+
+  // ---- composed operators: a saved SEQUENCE of functions ----
+  function savePathAsOperator(seed) {
+    const steps = (seed.history || [])
+      .filter((h) => OPS[h.kind] && OPS[h.kind].prompt)
+      .map((h) => ({ kind: h.kind, name: OPS[h.kind].name, prompt: OPS[h.kind].prompt }));
+    if (!steps.length)
+      return showToast("no reusable function-path on this node yet");
+    const names = steps.map((s) => OPS[s.kind].sym).join(" ");
+    const op = {
+      id: uid(),
+      name: `path · ${steps.map((s) => s.name).join(" → ").slice(0, 40)}`,
+      emoji: "⛓",
+      color: seed.color || "#b5832b",
+      image: null,
+      strokes: [],
+      kind: "composed",
+      steps,
+      glyphs: names,
+      count: 1,
+    };
+    setSymbols((p) => [...p, op]);
+    setToolboxTab("operators");
+    showToast(`operator saved · ${names}`);
+  }
+
+  async function applyComposedOperator(op, seed) {
+    const start = (seed.text || "").trim();
+    if (!start && seed.type !== "image" && seed.type !== "sketch")
+      return showToast("This seed is still empty.");
+    setBusy(seed.id, true);
+    let cur = start;
+    const hist = [...withWrite(seed)];
+    try {
+      for (const step of op.steps) {
+        const out = (await runClaude(step.prompt, cur, 1))[0] || "";
+        cur = out.split("\n").map((l) => l.trim()).filter(Boolean)[0] || out;
+        hist.push({ kind: step.kind, op: { name: step.name, sym: OPS[step.kind]?.sym, color: op.color }, to: cur });
+      }
+      const pos = placeNear(seed);
+      const child = makeSeed(pos.x, pos.y, cur, { color: op.color, history: hist });
+      setSeeds((p) => [...p, child]);
+      connect(seed.id, child.id);
+      setSelected(child.id);
+      pulse(child.id);
+    } catch (e) {
+      showToast(e.message);
+    } finally {
+      setBusy(seed.id, false);
+    }
   }
 
   // ---- the highlighter engine: operate on extracted thought-particles ----
@@ -667,6 +977,7 @@ export default function App() {
   async function applyOperator(opId, seed) {
     const op = symbols.find((s) => s.id === opId);
     if (!op) return;
+    if (op.kind === "composed") return applyComposedOperator(op, seed);
     const text = (seed.text || "").trim();
     if (!text && seed.type !== "sketch") return showToast("This seed is still empty.");
     const n = Math.min(Math.max(op.count || 1, 1), MAX_RESPONSES);
@@ -714,6 +1025,14 @@ export default function App() {
   function onSeedActivate(id) {
     if (pending) {
       const op = OPS[pending.opKey];
+      if (pending.discover) {
+        if (id === pending.fromId) return;
+        setPending((p) => ({
+          ...p,
+          picks: p.picks.includes(id) ? p.picks.filter((x) => x !== id) : [...p.picks, id],
+        }));
+        return;
+      }
       if (id === pending.fromId) return; // ignore source
       if (op.arity === 2) {
         const seed = seeds.find((s) => s.id === pending.fromId);
@@ -752,8 +1071,7 @@ export default function App() {
 
   return (
     <div className="void-app">
-      <Starfield camera={camera} />
-      <div className="nebula" />
+      <div className="grid-bg" />
 
       <div
         className="viewport"
@@ -764,6 +1082,17 @@ export default function App() {
         onPointerLeave={onPointerUp}
         onWheel={onWheel}
         onDoubleClick={onDoubleClick}
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes("Files")) e.preventDefault();
+        }}
+        onDrop={(e) => {
+          if (e.dataTransfer.files && e.dataTransfer.files.length) {
+            e.preventDefault();
+            const r = viewportRef.current.getBoundingClientRect();
+            const w = screenToWorld(e.clientX - r.left, e.clientY - r.top);
+            addImageFiles(e.dataTransfer.files, w.x, w.y);
+          }
+        }}
       >
         <div
           className="world"
@@ -776,8 +1105,11 @@ export default function App() {
               seed={s}
               scale={camera.scale}
               selected={selected === s.id}
-              pendingFrom={pending?.fromId === s.id}
-              picked={pending?.picks.includes(s.id)}
+              pendingFrom={!pending?.discover && pending?.fromId === s.id}
+              picked={
+                pending?.picks.includes(s.id) ||
+                (pending?.discover && pending?.fromId === s.id)
+              }
               pickMode={Boolean(pending)}
               busy={busyIds.includes(s.id)}
               onActivate={() => onSeedActivate(s.id)}
@@ -793,17 +1125,40 @@ export default function App() {
         <span>lens</span>
       </header>
 
-      {/* Toolbox of operators */}
+      {/* the discovery engine trigger */}
+      <button
+        className={"discover-btn" + (pending?.discover ? " armed" : "")}
+        onClick={() => (pending?.discover ? setPending(null) : startDiscovery())}
+        title="select several things, then find their hidden sameness"
+      >
+        <span className="disc-glyph">⟁</span>
+        {pending?.discover ? "cancel discovery" : "find hidden sameness"}
+      </button>
+
+      {/* Toolbox: two object types — nodes and operators */}
       <aside className={"toolbox" + (toolboxOpen ? "" : " collapsed")}>
         <div className="toolbox-head">
-          <h2>operators</h2>
+          <div className="toolbox-tabs">
+            <button
+              className={"tb-tab" + (toolboxTab === "operators" ? " on" : "")}
+              onClick={() => setToolboxTab("operators")}
+            >
+              operators
+            </button>
+            <button
+              className={"tb-tab" + (toolboxTab === "nodes" ? " on" : "")}
+              onClick={() => setToolboxTab("nodes")}
+            >
+              nodes
+            </button>
+          </div>
           <button className="toolbox-toggle" onClick={() => setToolboxOpen((v) => !v)}>
             {toolboxOpen ? "‹" : "›"}
           </button>
         </div>
-        {toolboxOpen && (
+        {toolboxOpen && toolboxTab === "operators" && (
           <>
-            <p className="toolbox-hint">drag a glyph onto a seed</p>
+            <p className="toolbox-hint">drag a glyph onto a node</p>
             <div className="operator-list">
               {symbols.map((op) => (
                 <OperatorChip key={op.id} operator={op} onEdit={() => setEditing(op)} />
@@ -815,26 +1170,143 @@ export default function App() {
             </button>
           </>
         )}
+        {toolboxOpen && toolboxTab === "nodes" && (
+          <>
+            <p className="toolbox-hint">click a structure to drop it into the field</p>
+            <div className="node-list">
+              {savedNodes.map((n) => (
+                <SavedNodeChip
+                  key={n.id}
+                  node={n}
+                  onPlant={() => plantSavedNode(n)}
+                  onDelete={() => deleteSavedNode(n.id)}
+                />
+              ))}
+              {savedNodes.length === 0 && (
+                <p className="toolbox-empty">no saved nodes yet — save a structure from its panel</p>
+              )}
+            </div>
+          </>
+        )}
       </aside>
 
       {/* plant controls */}
-      <div className="plant-bar">
-        <button className="plant-btn" onClick={() => plantText()}>
-          ✦ seed
-        </button>
-        <button className="plant-btn" onClick={plantSketch}>
-          ✎ sketch
-        </button>
+      <div className="entry-dock">
+        {paletteOpen && (
+          <div className="palette">
+            <div className="palette-row">
+              {KIND_ORDER.map((k) => (
+                <button
+                  key={k}
+                  className="palette-chip"
+                  style={{ "--c": KINDS[k].color }}
+                  onClick={() => {
+                    setEntryKind(k);
+                    if (entryText.trim()) {
+                      enterThought(entryText, k);
+                      setEntryText("");
+                    } else {
+                      plantText(null, null, k);
+                    }
+                    setPaletteOpen(false);
+                  }}
+                  title={`new ${KINDS[k].label}`}
+                >
+                  <span className="palette-glyph">{KINDS[k].glyph}</span>
+                  <span className="palette-name">{KINDS[k].label}</span>
+                </button>
+              ))}
+            </div>
+            <div className="palette-row media">
+              <button
+                className="palette-chip media"
+                onClick={() => {
+                  plantSketch();
+                  setPaletteOpen(false);
+                }}
+              >
+                <span className="palette-glyph">✎</span>
+                <span className="palette-name">drawing</span>
+              </button>
+              <button
+                className="palette-chip media"
+                onClick={() => {
+                  pickImageFile();
+                  setPaletteOpen(false);
+                }}
+              >
+                <span className="palette-glyph">▦</span>
+                <span className="palette-name">image</span>
+              </button>
+            </div>
+            <div className="palette-tip">…or drop / paste an image anywhere</div>
+          </div>
+        )}
+
+        <div className="entry-bar">
+          <button
+            className={"entry-add" + (paletteOpen ? " open" : "")}
+            onClick={() => setPaletteOpen((v) => !v)}
+            title="choose a kind or medium"
+          >
+            +
+          </button>
+          <span className="entry-kind" style={{ color: KINDS[entryKind].color }} title={KINDS[entryKind].label}>
+            {KINDS[entryKind].glyph}
+          </span>
+          <input
+            className="entry-input"
+            value={entryText}
+            placeholder={`you enter: ${ENTRY_EXAMPLES[exIdx]}…`}
+            onChange={(e) => setEntryText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && entryText.trim()) {
+                enterThought(entryText, entryKind);
+                setEntryText("");
+              }
+            }}
+          />
+          <button
+            className="entry-go"
+            disabled={!entryText.trim()}
+            onClick={() => {
+              if (entryText.trim()) {
+                enterThought(entryText, entryKind);
+                setEntryText("");
+              }
+            }}
+          >
+            enter
+          </button>
+        </div>
       </div>
 
       {seeds.length === 0 && (
         <div className="void-hint">
           <p>emptiness, full of potential</p>
-          <span>double&#8209;click anywhere to plant a seed of light</span>
+          <span>
+            you enter a thought below — or drop an image, sketch, or double&#8209;click
+            anywhere
+          </span>
         </div>
       )}
 
-      {pending && (
+      {pending && pending.discover && (
+        <div className="combine-banner discover">
+          <span className="banner-sym">⟁</span> discovery engine ·{" "}
+          {pending.picks.length + (pending.fromId ? 1 : 0)} selected · click any nodes to include ·{" "}
+          <button
+            className="banner-go"
+            disabled={pending.picks.length + (pending.fromId ? 1 : 0) < 2}
+            onClick={runDiscovery}
+          >
+            find hidden sameness
+          </button>{" "}
+          · <em>esc to cancel</em>
+        </div>
+      )}
+
+      {pending && !pending.discover && (
         <div className="combine-banner">
           {OPS[pending.opKey].arity === "many-select" ? (
             <>
@@ -864,11 +1336,15 @@ export default function App() {
           onOp={(opKey) => startOp(opKey, selectedSeed)}
           onDelete={() => deleteSeed(selectedSeed.id)}
           onReplay={() => setReplaySeed(selectedSeed)}
+          onSave={() => saveNodeToToolbox(selectedSeed)}
+          onSavePath={() => savePathAsOperator(selectedSeed)}
           onClose={() => setSelected(null)}
         />
       )}
 
       {replaySeed && <Replay seed={replaySeed} onClose={() => setReplaySeed(null)} />}
+
+      {discovering && <DiscoveryOverlay count={discovering.count} />}
 
       {editing && (
         <SymbolEditor
@@ -907,6 +1383,62 @@ export default function App() {
       <LayersIndicator active={activeLayer} />
 
       {toast && <div className="void-toast">{toast}</div>}
+    </div>
+  );
+}
+
+function SavedNodeChip({ node, onPlant, onDelete }) {
+  const k = KINDS[node.kind] || KINDS.idea;
+  const preview =
+    node.title || (node.text || "").trim().split("\n")[0].slice(0, 40) || "untitled";
+  return (
+    <div className="node-chip" style={{ "--c": node.color || k.color }} onClick={onPlant}>
+      {node.type === "image" && node.image ? (
+        <span className="node-thumb" style={{ backgroundImage: `url(${node.image})` }} />
+      ) : (
+        <span className="node-glyph">{k.glyph}</span>
+      )}
+      <span className="node-title">{preview}</span>
+      <button
+        className="node-del"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        title="remove"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
+const DISCOVERY_PHASES = [
+  "scanning each thing for its deep structure…",
+  "stripping away surface difference…",
+  "searching for the shared invariant…",
+  "testing the isomorphism across all of them…",
+  "crystallizing the hidden structure…",
+];
+
+function DiscoveryOverlay({ count }) {
+  const [secs, setSecs] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setSecs((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const phase = DISCOVERY_PHASES[Math.min(Math.floor(secs / 4), DISCOVERY_PHASES.length - 1)];
+  return (
+    <div className="discovery-overlay">
+      <div className="disc-core">
+        <div className="disc-ring" />
+        <div className="disc-ring r2" />
+        <div className="disc-ring r3" />
+        <div className="disc-center">⟁</div>
+      </div>
+      <div className="disc-title">finding hidden sameness</div>
+      <div className="disc-sub">across {count} things · {secs}s</div>
+      <div className="disc-phase">{phase}</div>
     </div>
   );
 }
@@ -1226,8 +1758,10 @@ function Seed({ seed, scale, selected, pendingFrom, picked, pickMode, busy, onAc
   const drag = useRef(null);
   const [over, setOver] = useState(false);
   const isSketch = seed.type === "sketch";
-  const size = isSketch
-    ? 60
+  const isImage = seed.type === "image";
+  const kind = KINDS[seed.kind] || null;
+  const size = isSketch || isImage
+    ? 64
     : Math.round(20 + Math.min((seed.text || "").length / 12, 26));
 
   function down(e) {
@@ -1246,7 +1780,11 @@ function Seed({ seed, scale, selected, pendingFrom, picked, pickMode, busy, onAc
     if (d && d.moved < 4) onActivate();
   }
 
-  const preview = isSketch ? "" : (seed.text || "").trim().split("\n")[0].slice(0, 36);
+  const preview = seed.title
+    ? seed.title
+    : isSketch || isImage
+    ? ""
+    : (seed.text || "").trim().split("\n")[0].slice(0, 36);
 
   return (
     <div
@@ -1257,6 +1795,7 @@ function Seed({ seed, scale, selected, pendingFrom, picked, pickMode, busy, onAc
         (picked ? " picked" : "") +
         (pickMode ? " targetable" : "") +
         (seed.particle ? " particle" : "") +
+        (seed.discovery || seed.struct ? " structure" : "") +
         (seed.analysis ? " analysis" : "") +
         (seed.flash ? " flash" : "") +
         (busy || seed.loading ? " busy" : "") +
@@ -1280,26 +1819,33 @@ function Seed({ seed, scale, selected, pendingFrom, picked, pickMode, busy, onAc
         if (id) onDropOperator(id);
       }}
     >
-      {isSketch && seed.image ? (
+      {(isSketch || isImage) && seed.image ? (
         <div
-          className="seed-sketch"
+          className={isImage ? "seed-image" : "seed-sketch"}
           style={{ width: size, height: size, "--glow": seed.color, backgroundImage: `url(${seed.image})` }}
         />
       ) : (
         <div className="seed-core" style={{ width: size, height: size, "--glow": seed.color }} />
+      )}
+      {kind && (
+        <div className="seed-kind" style={{ color: seed.color }} title={kind.label}>
+          {kind.glyph}
+        </div>
       )}
       {preview && <div className="seed-label">{preview}</div>}
     </div>
   );
 }
 
-function SeedPanel({ seed, pos, flip, busy, onChange, onOp, onDelete, onReplay, onClose }) {
+function SeedPanel({ seed, pos, flip, busy, onChange, onOp, onDelete, onReplay, onSave, onSavePath, onClose }) {
   const ref = useRef(null);
   const isSketch = seed.type === "sketch";
+  const isImage = seed.type === "image";
   const legacy = ["evolve", "branch", "split", "combine", "operator"];
   const hasFormation = (seed.history || []).some(
     (s) => OPS[s.kind] || legacy.includes(s.kind)
   );
+  const hasPath = (seed.history || []).some((s) => OPS[s.kind] && OPS[s.kind].prompt);
   const [editing, setEditing] = useState(!(seed.text || "").trim());
   useEffect(() => {
     setEditing(!(seed.text || "").trim());
@@ -1320,7 +1866,33 @@ function SeedPanel({ seed, pos, flip, busy, onChange, onOp, onDelete, onReplay, 
     >
       <div className="seed-panel-glow" />
 
-      {isSketch ? (
+      {seed.title && <div className="seed-struct-title">{seed.title}</div>}
+
+      <div className="kind-picker">
+        {KIND_ORDER.map((k) => (
+          <button
+            key={k}
+            className={"kind-chip" + (seed.kind === k ? " on" : "")}
+            style={{ "--c": KINDS[k].color }}
+            title={KINDS[k].label}
+            onClick={() => onChange({ kind: k, color: KINDS[k].color })}
+          >
+            <span className="kind-glyph">{KINDS[k].glyph}</span>
+          </button>
+        ))}
+      </div>
+
+      {isImage ? (
+        <div className="seed-image-view">
+          <div className="img-frame" style={{ backgroundImage: `url(${seed.image})` }} />
+          <textarea
+            className="seed-input caption"
+            value={seed.text}
+            placeholder="add a note or question about this image… (Claude can see it)"
+            onChange={(e) => onChange({ text: e.target.value })}
+          />
+        </div>
+      ) : isSketch ? (
         <DrawPad
           initialStrokes={seed.strokes}
           accent={seed.color}
@@ -1394,6 +1966,17 @@ function SeedPanel({ seed, pos, flip, busy, onChange, onOp, onDelete, onReplay, 
           title={hasFormation ? "replay formation" : "no operations yet — apply a primitive, interaction, or operator first"}
         >
           ▷ replay
+        </button>
+        <button className="ghost-btn save" onClick={onSave} title="save this node to the toolbox">
+          ⊕ save
+        </button>
+        <button
+          className="ghost-btn save"
+          onClick={onSavePath}
+          disabled={!hasPath}
+          title={hasPath ? "save the sequence of functions as a reusable operator" : "no reusable function-path yet"}
+        >
+          ⛓ path → operator
         </button>
         <div className="spacer" />
         <button className="ghost-btn" onClick={onDelete}>
@@ -1498,7 +2081,7 @@ function Replay({ seed, onClose }) {
   if (phase === "loading") {
     return (
       <div className="replay-overlay" onClick={onClose}>
-        <div className="replay-stage loading" onClick={(e) => e.stopPropagation()} style={{ "--c": "#9fb4ff" }}>
+        <div className="replay-stage loading" onClick={(e) => e.stopPropagation()} style={{ "--c": "#5e6b80" }}>
           <div className="replay-orb-wrap">
             <span className="replay-shock" />
             <span className="replay-shock two" />
@@ -1541,7 +2124,7 @@ function Replay({ seed, onClose }) {
   const chapter = step ? journey.chapters[stepIdx] || {} : null;
   const meta = step ? VERB_META[step.kind] || VERB_META.operator : null;
   const color = isTitle
-    ? "#9fb4ff"
+    ? "#5e6b80"
     : isSynth
     ? "#a78bfa"
     : (step.op && step.op.color) || meta.color;
@@ -1661,10 +2244,10 @@ function Replay({ seed, onClose }) {
   );
 }
 
-function DrawPad({ initialStrokes = [], accent = "#8ab4ff", onChange }) {
+function DrawPad({ initialStrokes = [], accent = "#2f5d8a", onChange }) {
   const canvasRef = useRef(null);
   const [strokes, setStrokes] = useState(() => initialStrokes || []);
-  const [color, setColor] = useState("#ffffff");
+  const [color, setColor] = useState("#20201d");
   const [size, setSize] = useState(8);
   const [erasing, setErasing] = useState(false);
   const drawingRef = useRef(null);
