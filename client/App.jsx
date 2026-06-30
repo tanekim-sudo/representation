@@ -1173,7 +1173,6 @@ export default function App() {
 
   return (
     <div className="void-app">
-      <div className="grid-bg" />
 
       <div
         className={"viewport" + (markerOn ? " marker-mode" : "")}
@@ -1908,10 +1907,7 @@ function Seed({ seed, scale, selected, pendingFrom, picked, pickMode, marked, bu
   const [over, setOver] = useState(false);
   const isSketch = seed.type === "sketch";
   const isImage = seed.type === "image";
-  const kind = KINDS[seed.kind] || null;
-  const size = isSketch || isImage
-    ? 64
-    : Math.round(20 + Math.min((seed.text || "").length / 12, 26));
+  const size = isSketch || isImage ? 76 : 0;
 
   function down(e) {
     e.stopPropagation();
@@ -1929,11 +1925,8 @@ function Seed({ seed, scale, selected, pendingFrom, picked, pickMode, marked, bu
     if (d && d.moved < 4) onActivate();
   }
 
-  const preview = seed.title
-    ? seed.title
-    : isSketch || isImage
-    ? ""
-    : (seed.text || "").trim().split("\n")[0].slice(0, 36);
+  const note = seed.title || (seed.text || "").trim();
+  const empty = !isSketch && !isImage && !note;
 
   return (
     <div
@@ -1972,17 +1965,13 @@ function Seed({ seed, scale, selected, pendingFrom, picked, pickMode, marked, bu
       {(isSketch || isImage) && seed.image ? (
         <div
           className={isImage ? "seed-image" : "seed-sketch"}
-          style={{ width: size, height: size, "--glow": seed.color, backgroundImage: `url(${seed.image})` }}
+          style={{ width: size, height: size, backgroundImage: `url(${seed.image})` }}
         />
+      ) : empty ? (
+        <div className="seed-dot" />
       ) : (
-        <div className="seed-core" style={{ width: size, height: size, "--glow": seed.color }} />
+        <div className="seed-note">{note}</div>
       )}
-      {kind && (
-        <div className="seed-kind" style={{ color: seed.color }} title={kind.label}>
-          {kind.glyph}
-        </div>
-      )}
-      {preview && <div className="seed-label">{preview}</div>}
     </div>
   );
 }

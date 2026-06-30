@@ -79,17 +79,6 @@ body {
   background: var(--paper);
 }
 
-/* faint whiteboard dot-grid */
-.grid-bg {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background-image: radial-gradient(rgba(32, 32, 29, 0.07) 1.1px, transparent 1.2px);
-  background-size: 26px 26px;
-  background-position: -13px -13px;
-}
-
 /* legacy decorative layers, disabled in the clean theme */
 .starfield,
 .nebula {
@@ -131,58 +120,73 @@ body {
   stroke-linecap: round;
 }
 
-/* ---- Nodes (ink drawings on paper) ---- */
+/* ---- Ideas written on the board ---- */
 .seed {
   position: absolute;
   transform: translate(-50%, -50%);
   cursor: pointer;
-  animation: birth 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: fadein 0.3s ease both;
   z-index: 2;
 }
 
-@keyframes birth {
-  from {
-    opacity: 0;
-    transform: translate(-50%, -50%) scale(0.85);
-  }
-  to {
-    opacity: 1;
-    transform: translate(-50%, -50%) scale(1);
-  }
+/* an idea is just its text, written in ink */
+.seed-note {
+  max-width: 230px;
+  font-family: var(--serif);
+  font-size: 16px;
+  line-height: 1.4;
+  color: var(--ink);
+  text-align: center;
+  white-space: pre-wrap;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  padding: 2px 4px;
+  border-radius: 4px;
 }
 
-.seed-core {
-  position: relative;
+/* an empty idea is a small open circle to grab */
+.seed-dot {
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--glow) 14%, var(--card));
-  border: 1.6px solid color-mix(in srgb, var(--glow) 55%, var(--ink));
-  box-shadow: 0 1px 2px rgba(32, 32, 29, 0.12);
+  border: 1.5px solid var(--line-2);
 }
 
-.seed.selected .seed-core {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+/* selection: a quiet ink underline, not a bubble */
+.seed.selected .seed-note {
+  box-shadow: inset 0 -2px 0 0 var(--ink);
+}
+.seed.selected .seed-dot,
+.seed.combine-from .seed-dot {
+  border-color: var(--ink);
+}
+.seed.selected .seed-sketch,
+.seed.selected .seed-image {
+  outline: 1.5px solid var(--ink);
+  outline-offset: 3px;
 }
 
-.seed.selected::after,
-.seed.combine-from::after {
-  content: "";
-  position: absolute;
-  inset: -9px;
-  border-radius: 50%;
-  border: 1.4px solid var(--accent);
-  opacity: 0.55;
+/* marked by the highlighter — a marker swipe behind the words */
+.seed.marked .seed-note {
+  background: rgba(32, 32, 29, 0.13);
+}
+.seed.marked .seed-dot {
+  background: rgba(32, 32, 29, 0.13);
+  border-color: var(--ink);
+}
+.seed.marked .seed-sketch,
+.seed.marked .seed-image {
+  outline: 2px solid rgba(32, 32, 29, 0.45);
+  outline-offset: 3px;
 }
 
-.seed.targetable::after {
-  content: "";
-  position: absolute;
-  inset: -8px;
-  border-radius: 50%;
-  border: 1.4px dashed var(--line-2);
+.seed.targetable .seed-note {
+  box-shadow: inset 0 -1px 0 0 var(--line-2);
 }
 
-.seed.busy .seed-core {
+.seed.busy {
   animation: nudge 1s ease-in-out infinite;
 }
 @keyframes nudge {
@@ -190,110 +194,60 @@ body {
     opacity: 1;
   }
   50% {
-    opacity: 0.55;
+    opacity: 0.5;
   }
 }
-
-.seed.forming .seed-core {
+.seed.forming {
   opacity: 0.5;
 }
 
-.seed-label {
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  transform: translate(-50%, 8px);
-  white-space: nowrap;
-  font-family: var(--serif);
-  font-size: 12px;
-  letter-spacing: 0.2px;
-  color: var(--ink-2);
-  pointer-events: none;
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* kind glyph badge */
-.seed-kind {
-  position: absolute;
-  top: -7px;
-  right: -7px;
-  font-size: 11px;
-  line-height: 1;
-  pointer-events: none;
-}
-
-/* sketch + image nodes */
+/* sketch + image — drawn/pasted straight onto the board, unframed */
 .seed-sketch {
-  border-radius: 50%;
   background-size: contain;
   background-repeat: no-repeat;
   background-position: center;
-  background-color: var(--card);
-  border: 1.6px solid var(--line-2);
-  box-shadow: 0 1px 2px rgba(32, 32, 29, 0.12);
 }
 .seed-image {
-  border-radius: 10px;
   background-size: cover;
   background-repeat: no-repeat;
   background-position: center;
-  background-color: var(--card);
-  border: 1.6px solid var(--line-2);
-  box-shadow: 0 1px 3px rgba(32, 32, 29, 0.16);
+  border-radius: 2px;
+  box-shadow: 0 1px 4px rgba(32, 32, 29, 0.18);
 }
 
-.seed.op-over::after {
-  content: "";
-  position: absolute;
-  inset: -11px;
-  border-radius: 50%;
-  border: 1.5px dashed var(--accent);
+.seed.op-over .seed-note,
+.seed.op-over .seed-dot {
+  box-shadow: 0 0 0 2px var(--ink);
 }
 
-/* picked / analysis / flash */
-.seed.picked .seed-core,
-.seed.picked .seed-sketch {
-  outline: 2px solid var(--accent);
-  outline-offset: 4px;
+.seed.picked .seed-note {
+  box-shadow: inset 0 -2px 0 0 var(--ink);
+  background: rgba(32, 32, 29, 0.08);
 }
-.seed.analysis .seed-core {
-  border-style: double;
-  border-width: 3px;
-}
-.seed.flash .seed-core,
-.seed.flash .seed-sketch {
+
+.seed.flash .seed-note {
   animation: seedflash 0.7s ease-out;
 }
 @keyframes seedflash {
   0% {
-    box-shadow: 0 0 0 0 var(--accent-soft);
-  }
-  40% {
-    box-shadow: 0 0 0 10px var(--accent-soft);
+    background: rgba(32, 32, 29, 0.22);
   }
   100% {
-    box-shadow: 0 1px 2px rgba(32, 32, 29, 0.12);
+    background: transparent;
   }
 }
 
-/* structure nodes (discovered) */
-.seed.structure .seed-core {
-  background: color-mix(in srgb, var(--amber) 18%, var(--card));
-  border-color: var(--amber);
-}
-.seed.structure .seed-label {
-  color: color-mix(in srgb, var(--amber) 60%, var(--ink));
+/* discovered structures: written a touch heavier, underlined */
+.seed.structure .seed-note {
   font-weight: 600;
-}
-
-/* particle seeds (extracted fragments) */
-.seed.particle .seed-core {
-  clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+  border-bottom: 1.5px solid var(--ink);
   border-radius: 0;
 }
-.seed.particle .seed-label {
+
+/* extracted fragments: small, in italic */
+.seed.particle .seed-note {
+  font-style: italic;
+  font-size: 14px;
   color: var(--ink-2);
 }
 
@@ -1912,21 +1866,6 @@ body {
   stroke-width: 34;
   stroke-linecap: round;
   stroke-linejoin: round;
-}
-
-/* a node caught under the marker */
-.seed.marked .seed-core,
-.seed.marked .seed-sketch,
-.seed.marked .seed-image {
-  box-shadow: 0 0 0 3px rgba(32, 32, 29, 0.16);
-}
-.seed.marked::after {
-  content: "";
-  position: absolute;
-  inset: -9px;
-  border-radius: 50%;
-  border: 1.6px solid var(--ink);
-  opacity: 0.5;
 }
 
 /* top toolbar */
