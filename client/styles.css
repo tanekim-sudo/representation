@@ -15,14 +15,41 @@
   --faint: #8c887b;
   --line: rgba(32, 32, 29, 0.16);
   --line-2: rgba(32, 32, 29, 0.34);
-  --accent: #c2603e;
-  --accent-soft: rgba(194, 96, 62, 0.12);
-  --amber: #b5832b;
+  /* monochrome: the only "accent" is ink itself */
+  --accent: #20201d;
+  --accent-soft: rgba(32, 32, 29, 0.09);
+  --amber: #20201d;
 
   /* compatibility aliases used across components */
   --glass: var(--card);
   --glow: var(--ink);
+  /* every per-element data color collapses to ink in the clean theme */
+  --c: #20201d;
   font-synthesis: none;
+}
+
+/* Force monochrome: ignore any inline --c / --glow accent colors */
+* {
+  --c: #20201d !important;
+  --glow: #20201d !important;
+  --accent: #20201d !important;
+  --amber: #20201d !important;
+}
+
+/* elements that set an inline color get pinned to ink */
+.seed-kind,
+.entry-kind,
+.stage-symbol,
+.replay-move,
+.replay-label,
+.replay-final,
+.disc-center,
+.disc-glyph,
+.node-glyph,
+.palette-glyph,
+.op-sym,
+.sel-sym {
+  color: var(--ink) !important;
 }
 
 * {
@@ -283,7 +310,7 @@ body {
   background: var(--card);
   border: 1px solid var(--line);
   box-shadow: 0 14px 44px rgba(32, 32, 29, 0.16);
-  animation: panelin 0.16s ease both;
+  animation: fadein 0.16s ease both;
 }
 .seed-panel.left {
   transform: translate(calc(-100% - 26px), -50%);
@@ -291,15 +318,17 @@ body {
 @keyframes panelin {
   from {
     opacity: 0;
-    transform: translate(26px, -50%) translateY(6px);
+  }
+  to {
+    opacity: 1;
   }
 }
-.seed-panel.left {
-  animation: panelin-left 0.16s ease both;
-}
-@keyframes panelin-left {
+@keyframes fadein {
   from {
     opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }
 .seed-panel-glow {
@@ -1860,4 +1889,128 @@ body {
   font-size: 9px;
   letter-spacing: 0.2px;
   color: var(--faint);
+}
+
+/* ============================================================
+   The highlighter marker — the primary input device
+   ============================================================ */
+.viewport.marker-mode {
+  cursor: crosshair;
+}
+
+.marker-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+  z-index: 6;
+}
+.marker-layer polyline {
+  stroke: rgba(32, 32, 29, 0.16);
+  stroke-width: 34;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* a node caught under the marker */
+.seed.marked .seed-core,
+.seed.marked .seed-sketch,
+.seed.marked .seed-image {
+  box-shadow: 0 0 0 3px rgba(32, 32, 29, 0.16);
+}
+.seed.marked::after {
+  content: "";
+  position: absolute;
+  inset: -9px;
+  border-radius: 50%;
+  border: 1.6px solid var(--ink);
+  opacity: 0.5;
+}
+
+/* top toolbar */
+.field-tools {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 17;
+  display: flex;
+  gap: 8px;
+}
+.tool-pill {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  font-size: 13px;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(32, 32, 29, 0.08);
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+.tool-pill:hover {
+  border-color: var(--line-2);
+}
+.tool-pill.on {
+  background: var(--ink);
+  color: #f3efe6;
+  border-color: var(--ink);
+}
+.tool-mark {
+  font-size: 15px;
+  line-height: 1;
+}
+
+/* selection action bar (operate + bulk delete) */
+.sel-bar {
+  position: fixed;
+  bottom: 86px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 26;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 8px 16px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: #f3efe6;
+  box-shadow: 0 12px 32px rgba(32, 32, 29, 0.28);
+  animation: panelin 0.16s ease both;
+}
+.sel-count {
+  font-family: var(--serif);
+  font-size: 14px;
+  letter-spacing: 0.2px;
+  margin-right: 4px;
+}
+.sel-act {
+  border: 1px solid rgba(243, 239, 230, 0.3);
+  background: transparent;
+  color: #f3efe6;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.13s ease;
+}
+.sel-act:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+.sel-act:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.sel-act.danger {
+  border-color: rgba(243, 239, 230, 0.55);
+}
+.sel-act.ghost {
+  border-color: transparent;
+  color: rgba(243, 239, 230, 0.7);
 }

@@ -10,17 +10,14 @@ const STRUCTSEQ_KEY = "lens.structseq.v1";
 const MAX_RESPONSES = 6;
 const CANVAS_SIZE = 256;
 
-const STAR_COLORS = ["#2f5d8a", "#7a4f9c", "#2f7d7a", "#a85a86", "#b07d2a", "#2f7d5a", "#6a5bb0"];
+const STAR_COLORS = ["#20201d"];
 
 const EMOJI_CHOICES = [
   "✨", "📝", "🔍", "🌍", "🎯", "💡", "🧹", "📌", "🔥", "🧠",
   "⚡", "🪄", "📖", "✂️", "🎨", "🧪", "🗜️", "💬", "🔧", "⭐",
 ];
-const COLOR_CHOICES = [
-  "#8ab4ff", "#a78bfa", "#22d3ee", "#f0abfc", "#fcd34d",
-  "#5eead4", "#fb7185", "#34d399", "#60a5fa", "#c084fc",
-];
-const PEN_COLORS = ["#20201d", "#c2603e", "#2f5d8a", "#2f7d5a", "#7a4f9c", "#b07d2a", "#a85a86", "#2f7d7a"];
+const COLOR_CHOICES = ["#20201d"];
+const PEN_COLORS = ["#20201d", "#46443c", "#6b6760", "#928d80", "#b8b2a3"];
 
 // The primitive grammar of idea-operations. Arities:
 //   1            unary — transforms the selected idea into one child
@@ -152,17 +149,18 @@ Object.entries(FRAG_OPS).forEach(([k, o]) => {
 });
 
 // What a floating thing can be. Everything is matter in the field.
+const INK = "#20201d";
 const KINDS = {
-  idea: { glyph: "✦", color: "#2f5d8a", label: "idea" },
-  question: { glyph: "❓", color: "#b07d2a", label: "question" },
-  experiment: { glyph: "⚗", color: "#2f7d5a", label: "experiment" },
-  fragment: { glyph: "❖", color: "#7a4f9c", label: "fragment" },
-  structure: { glyph: "⬡", color: "#b5832b", label: "structure" },
-  observation: { glyph: "◉", color: "#2f7d7a", label: "observation" },
-  memory: { glyph: "❁", color: "#a85a86", label: "memory" },
-  book: { glyph: "▤", color: "#9a6b2f", label: "book" },
-  person: { glyph: "☻", color: "#b0503f", label: "person" },
-  experience: { glyph: "✷", color: "#6a5bb0", label: "experience" },
+  idea: { glyph: "✦", color: INK, label: "idea" },
+  question: { glyph: "❓", color: INK, label: "question" },
+  experiment: { glyph: "⚗", color: INK, label: "experiment" },
+  fragment: { glyph: "❖", color: INK, label: "fragment" },
+  structure: { glyph: "⬡", color: INK, label: "structure" },
+  observation: { glyph: "◉", color: INK, label: "observation" },
+  memory: { glyph: "❁", color: INK, label: "memory" },
+  book: { glyph: "▤", color: INK, label: "book" },
+  person: { glyph: "☻", color: INK, label: "person" },
+  experience: { glyph: "✷", color: INK, label: "experience" },
 };
 const KIND_ORDER = Object.keys(KINDS);
 
@@ -364,6 +362,11 @@ export default function App() {
   const [toolboxTab, setToolboxTab] = useState("operators");
   // discovery engine working state -> { items: [...labels], started }
   const [discovering, setDiscovering] = useState(null);
+  // the highlighter marker — the primary input device
+  const [markerOn, setMarkerOn] = useState(true);
+  const [markerPts, setMarkerPts] = useState(null); // live stroke (screen coords)
+  const [selection, setSelection] = useState([]); // node ids under the marker
+  const markerRef = useRef(null);
 
   const viewportRef = useRef(null);
   const panRef = useRef(null);
@@ -379,16 +382,22 @@ export default function App() {
 
   useEffect(() => {
     function onKey(e) {
+      const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || "");
       if (e.key === "Escape") {
         setSelected(null);
         setPending(null);
         setHighlight(null);
         setPendingFrag(null);
+        clearSelection();
+      }
+      if ((e.key === "Delete" || e.key === "Backspace") && !typing && selection.length) {
+        e.preventDefault();
+        deleteSelection();
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [selection]);
 
   // ---- the highlighter: capture any selection inside a [data-selectable] surface ----
   useEffect(() => {
@@ -470,12 +479,62 @@ export default function App() {
     return screenToWorld(r.width / 2, r.height / 2);
   }
 
+  // distance from point p to segment a-b (screen space)
+  function distToSeg(p, a, b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy;
+    let t = len2 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const cx = a.x + t * dx;
+    const cy = a.y + t * dy;
+    return Math.hypot(p.x - cx, p.y - cy);
+  }
+  // which nodes does this marker stroke cover?
+  function nodesUnderStroke(pts) {
+    if (!pts || pts.length === 0) return [];
+    const reach = 26; // marker half-thickness + node radius, in screen px
+    const hit = [];
+    for (const s of seeds) {
+      const sp = worldToScreen(s.x, s.y);
+      let near = false;
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[i];
+        const b = pts[i + 1] || pts[i];
+        if (distToSeg(sp, a, b) <= reach) {
+          near = true;
+          break;
+        }
+      }
+      if (near) hit.push(s.id);
+    }
+    return hit;
+  }
+
   function onPointerDown(e) {
     if (e.target.closest(".seed") || e.target.closest(".seed-panel")) return;
+    const r = viewportRef.current.getBoundingClientRect();
+    const pt = { x: e.clientX - r.left, y: e.clientY - r.top };
+    if (markerOn) {
+      markerRef.current = { pts: [pt] };
+      setMarkerPts([pt]);
+      setSelection([]);
+      viewportRef.current.setPointerCapture(e.pointerId);
+      return;
+    }
     panRef.current = { x: e.clientX, y: e.clientY, moved: 0 };
     viewportRef.current.setPointerCapture(e.pointerId);
   }
   function onPointerMove(e) {
+    if (markerRef.current) {
+      const r = viewportRef.current.getBoundingClientRect();
+      const pt = { x: e.clientX - r.left, y: e.clientY - r.top };
+      const pts = [...markerRef.current.pts, pt];
+      markerRef.current.pts = pts;
+      setMarkerPts(pts);
+      setSelection(nodesUnderStroke(pts));
+      return;
+    }
     if (!panRef.current) return;
     const dx = e.clientX - panRef.current.x;
     const dy = e.clientY - panRef.current.y;
@@ -485,12 +544,50 @@ export default function App() {
     setCamera((c) => ({ ...c, x: c.x + dx, y: c.y + dy }));
   }
   function onPointerUp() {
+    if (markerRef.current) {
+      const pts = markerRef.current.pts;
+      markerRef.current = null;
+      const hit = nodesUnderStroke(pts);
+      setSelection(hit);
+      setMarkerPts(null);
+      if (!hit.length) {
+        // a tap on empty space clears any current selection
+        setSelected(null);
+      }
+      return;
+    }
     const p = panRef.current;
     panRef.current = null;
     if (p && p.moved < 4) {
       setSelected(null);
       setPending(null);
+      setSelection([]);
     }
+  }
+  function clearSelection() {
+    setSelection([]);
+    setMarkerPts(null);
+    markerRef.current = null;
+  }
+  function deleteSelection() {
+    if (!selection.length) return;
+    const ids = new Set(selection);
+    setSeeds((p) => p.filter((s) => !ids.has(s.id)));
+    setEdges((p) => p.filter((e) => !ids.has(e.a) && !ids.has(e.b)));
+    if (ids.has(selected)) setSelected(null);
+    showToast(`cleared ${selection.length}`);
+    clearSelection();
+  }
+  function stabilizeSelection() {
+    if (selection.length < 2) return showToast("select at least two");
+    const first = seeds.find((s) => s.id === selection[0]);
+    if (first) applyOp("stabilize", first, selection.slice(1));
+    clearSelection();
+  }
+  function discoverSelection() {
+    if (selection.length < 2) return showToast("select at least two");
+    runDiscoveryOn([...selection]);
+    clearSelection();
   }
   function onWheel(e) {
     const r = viewportRef.current.getBoundingClientRect();
@@ -728,9 +825,14 @@ export default function App() {
     return n;
   }
 
-  async function runDiscovery() {
+  function runDiscovery() {
     if (!pending || !pending.discover) return;
     const ids = [...(pending.fromId ? [pending.fromId] : []), ...pending.picks];
+    setPending(null);
+    runDiscoveryOn(ids);
+  }
+
+  async function runDiscoveryOn(ids) {
     const nodes = ids.map((id) => seeds.find((s) => s.id === id)).filter(Boolean);
     if (nodes.length < 2) return showToast("select at least two things to compare");
     const labels = nodes.map((n) =>
@@ -747,14 +849,14 @@ export default function App() {
       const mid = midOf(nodes);
       const child = makeSeed(mid.x, mid.y - 30, parsed.body, {
         kind: "structure",
-        color: "#b5832b",
+        color: INK,
         struct: num,
         title,
         discovery: true,
         history: [
           {
             kind: "sameness",
-            op: { name: "find hidden sameness", sym: "⟁", color: "#b5832b" },
+            op: { name: "find hidden sameness", sym: "⟁", color: INK },
             to: parsed.body,
             parents: nodes.map((n) => ({ text: n.text, history: n.history })),
           },
@@ -820,7 +922,7 @@ export default function App() {
       id: uid(),
       name: `path · ${steps.map((s) => s.name).join(" → ").slice(0, 40)}`,
       emoji: "⛓",
-      color: seed.color || "#b5832b",
+      color: seed.color || INK,
       image: null,
       strokes: [],
       kind: "composed",
@@ -1074,7 +1176,7 @@ export default function App() {
       <div className="grid-bg" />
 
       <div
-        className="viewport"
+        className={"viewport" + (markerOn ? " marker-mode" : "")}
         ref={viewportRef}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -1111,6 +1213,7 @@ export default function App() {
                 (pending?.discover && pending?.fromId === s.id)
               }
               pickMode={Boolean(pending)}
+              marked={selection.includes(s.id)}
               busy={busyIds.includes(s.id)}
               onActivate={() => onSeedActivate(s.id)}
               onMoveBy={(dx, dy) => moveSeedBy(s.id, dx, dy)}
@@ -1118,6 +1221,15 @@ export default function App() {
             />
           ))}
         </div>
+
+        {markerPts && markerPts.length > 0 && (
+          <svg className="marker-layer">
+            <polyline
+              points={markerPts.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="none"
+            />
+          </svg>
+        )}
       </div>
 
       <header className="void-brand">
@@ -1125,15 +1237,28 @@ export default function App() {
         <span>lens</span>
       </header>
 
-      {/* the discovery engine trigger */}
-      <button
-        className={"discover-btn" + (pending?.discover ? " armed" : "")}
-        onClick={() => (pending?.discover ? setPending(null) : startDiscovery())}
-        title="select several things, then find their hidden sameness"
-      >
-        <span className="disc-glyph">⟁</span>
-        {pending?.discover ? "cancel discovery" : "find hidden sameness"}
-      </button>
+      {/* top toolbar: highlighter (primary) + discovery */}
+      <div className="field-tools">
+        <button
+          className={"tool-pill" + (markerOn ? " on" : "")}
+          onClick={() => {
+            setMarkerOn((v) => !v);
+            clearSelection();
+          }}
+          title="highlighter — drag across nodes to select them"
+        >
+          <span className="tool-mark">▔</span>
+          highlighter
+        </button>
+        <button
+          className={"tool-pill" + (pending?.discover ? " on" : "")}
+          onClick={() => (pending?.discover ? setPending(null) : startDiscovery())}
+          title="select several things, then find their hidden sameness"
+        >
+          <span className="tool-mark">⟁</span>
+          {pending?.discover ? "cancel" : "find sameness"}
+        </button>
+      </div>
 
       {/* Toolbox: two object types — nodes and operators */}
       <aside className={"toolbox" + (toolboxOpen ? "" : " collapsed")}>
@@ -1380,7 +1505,31 @@ export default function App() {
         />
       )}
 
-      <LayersIndicator active={activeLayer} />
+      {selection.length > 0 && !markerPts && (
+        <div className="sel-bar">
+          <span className="sel-count">{selection.length} selected</span>
+          <button className="sel-act danger" onClick={deleteSelection}>
+            delete
+          </button>
+          <button
+            className="sel-act"
+            onClick={discoverSelection}
+            disabled={selection.length < 2}
+          >
+            find sameness
+          </button>
+          <button
+            className="sel-act"
+            onClick={stabilizeSelection}
+            disabled={selection.length < 2}
+          >
+            stabilize
+          </button>
+          <button className="sel-act ghost" onClick={clearSelection}>
+            clear
+          </button>
+        </div>
+      )}
 
       {toast && <div className="void-toast">{toast}</div>}
     </div>
@@ -1754,7 +1903,7 @@ function Synapses({ seeds, edges }) {
   );
 }
 
-function Seed({ seed, scale, selected, pendingFrom, picked, pickMode, busy, onActivate, onMoveBy, onDropOperator }) {
+function Seed({ seed, scale, selected, pendingFrom, picked, pickMode, marked, busy, onActivate, onMoveBy, onDropOperator }) {
   const drag = useRef(null);
   const [over, setOver] = useState(false);
   const isSketch = seed.type === "sketch";
@@ -1793,6 +1942,7 @@ function Seed({ seed, scale, selected, pendingFrom, picked, pickMode, busy, onAc
         (selected ? " selected" : "") +
         (pendingFrom ? " combine-from" : "") +
         (picked ? " picked" : "") +
+        (marked ? " marked" : "") +
         (pickMode ? " targetable" : "") +
         (seed.particle ? " particle" : "") +
         (seed.discovery || seed.struct ? " structure" : "") +
@@ -2354,16 +2504,6 @@ function DrawPad({ initialStrokes = [], accent = "#2f5d8a", onChange }) {
               }}
             />
           ))}
-          <label className="pen-dot custom" title="Custom color">
-            <input
-              type="color"
-              value={color}
-              onChange={(e) => {
-                setColor(e.target.value);
-                setErasing(false);
-              }}
-            />
-          </label>
         </div>
         <div className="drawpad-row">
           <button className={"orb-btn tiny" + (erasing ? " on" : "")} onClick={() => setErasing((v) => !v)}>
