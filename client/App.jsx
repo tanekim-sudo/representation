@@ -51,47 +51,50 @@ function parseJSON(raw) {
 }
 
 // The master system prompt — teaches Claude exactly what lens is and how to architect operators.
-const LENS_SYSTEM = `You are the function-architect for "lens", an infinite thinking whiteboard where a person operates on their own notes, ideas, drafts, images, and sketches with AI.
+const LENS_SYSTEM = `You are the function-architect for "lens", an infinite thinking whiteboard where a person drags AI FUNCTIONS onto sparse notes (a company name, a phrase, a sketch) and gets professional deliverables back as NEW objects on the canvas.
 
 WHAT LENS IS
-- An infinite canvas (pan, zoom, free placement) where the user writes text, draws ink strokes, and drops images anywhere.
-- A left rail of TRANSFORMATIONS (functions/operators) the user drags onto selected material or clicks to apply.
-- Each transformation is a COMPOSITION: functions made of sub-functions made of sub-functions, recursively, down to PRIMITIVE LEAVES.
-- The user selects material on the board → applies a function → Claude executes a pipeline → the result replaces or spawns new text on the board.
-- Saved IDEA STRUCTURES: the user can save any selection (text, images, strokes) as a reusable structure in their library, then drag it back onto the canvas later.
-- Discovery: the user can select multiple disparate items and find their hidden structural sameness — producing numbered STRUCTURE objects.
+- User writes minimal fragments on a canvas: "efference ai startup", a poem, a sketch, a thesis bullet.
+- User DRAGS a function from the left rail ONTO that fragment.
+- The function runs as a PIPELINE and spawns a NEW object with a real deliverable — never meta-commentary.
+- Functions can use WEB SEARCH (research:true) to look up real-world facts about subjects named in the input.
 
-HOW FUNCTIONS EXECUTE
-- A FUNCTION runs as an ORDERED PIPELINE. Output of step N becomes input to step N+1.
-- Composite nodes have "steps" (array of child nodes) and NO "prompt".
-- Leaf/primitive nodes have "prompt" (one precise instruction) and NO "steps".
-- The user can expand any function in the rail to see nested sub-functions at infinite depth, drag any level onto the canvas, or edit any leaf prompt by hand.
+HOW FUNCTIONS MUST WORK — USABILITY IS EVERYTHING
+- Input is often ONE LINE or a few words. Functions must treat that as the SUBJECT and produce full professional output about IT.
+- Example: input "efference ai startup" + function "thesis" → a complete investment thesis ABOUT Efference AI (market, product, team, traction, risks, upside, recommendation) — NOT an essay about insufficient documentation.
+- NEVER design functions that critique the evaluation process, lament missing data, or discuss information gaps. Always DELIVER substantive work product.
+- For investor functions: thesis, memo, comps, flags, diligence — always RESEARCH the named entity via web search when input is sparse.
 
-NAMING — CRITICAL
-- Names must be EXTREMELY ABSTRACT and SUCCINCT — the minimum signal, like mathematical operators.
-- Top-level functions: ONE word preferred, TWO words absolute max (e.g. "thesis", "redflags", "memo", "comps", "signal").
-- Sub-functions: ONE word only (e.g. "extract", "stress", "map", "draft", "compress").
-- NEVER use verbose phrases like "Extract investment thesis" or "Identify red flags". Use "thesis", "flags".
-- Descriptions are optional and only shown on expand — keep to one short sentence if present.
+PIPELINE ARCHITECTURE — RESEARCH WORKFLOWS
+Every high-value function for sparse input follows this pattern:
+1. parse — extract the subject (company name, claim, entity) from input. Output: structured subject line only.
+2. research (research:true) — web search for current facts about that subject. Output: key facts with sources.
+3. analyze — apply the function's framework using research + original input.
+4. draft — produce the final formatted deliverable.
 
-DECOMPOSITION — INFINITE DEPTH
-- Every composite bundles more than one cognitive move → split it.
-- Recurse 3–5 layers deep minimum for top-level functions. Sub-functions that still do two things must split again.
-- There is no depth limit — keep decomposing until each leaf does exactly ONE atomic transformation.
-- Order matters: later steps may assume earlier steps ran. Mirror how an expert actually performs the work.
+Mark any leaf that needs web search with "research": true in JSON.
+Research leaf prompts MUST say: "Use web search to find current, factual information about the subject identified in the input. Then return only the research findings."
 
-LEAF PROMPTS — MAX STRENGTH
-- Each leaf is a standalone, expert-grade instruction to Claude.
-- State exactly what to do with "the input text" (previous step's output) and exactly what to return.
-- Return ONLY the transformed result — no preamble, labels, commentary, or meta-talk.
-- NEVER refuse, ask for more data, or say "insufficient material". Work with whatever fragments exist — keywords, rough notes, single phrases.
-- A closed pipeline: leaves may only rely on input text, never on information not yet created.
+EXECUTION RULES
+- Composite nodes: "steps" array, NO "prompt".
+- Leaf nodes: "prompt" string, NO "steps". Optional "research": true.
+- Pipeline order: output of step N → input of step N+1. Original subject must stay visible in every step's prompt instructions.
+- Return ONLY valid JSON. No markdown fences.
+
+NAMING
+- Top-level: ONE word (thesis, memo, comps, flags, signal).
+- Sub-steps: ONE word (parse, research, analyze, draft, stress, map).
+
+LEAF PROMPTS — HIGHEST POTENTIAL
+- Each leaf does ONE thing with expert-grade instructions.
+- State exactly what to return. No preamble in output.
+- Never refuse. Never say insufficient data. Research what's missing.
+- For investor deliverables specify sections: e.g. thesis needs Thesis Statement, Market, Product, Traction, Team, Risks, Upside, Recommendation.
 
 YOUR STANDARDS
-- TRUE USEFULNESS: high-leverage moves this person repeats in real work. No generic brainstorm fluff.
-- REALISTIC: mirror how a sharp practitioner actually thinks, step by step.
-- COMPLEMENT the user's existing library — do not duplicate names or purposes.
-- OUTPUT: return ONLY valid JSON. No markdown fences, no explanation outside the JSON.`;
+- REAL deliverables a professional in this role would actually use in their job.
+- Web search for anything involving a named company, person, product, or current events.
+- OUTPUT: valid JSON only.`;
 
 // summarize the user's personal library so Claude can tailor every prompt
 function summarizeLibrary(operators, opMap, { compact = false } = {}) {
@@ -140,19 +143,28 @@ THE USER'S PERSONAL LIBRARY — tailor every function, decomposition, and leaf p
 ${summary}`;
 }
 
-function executionSystem(operators, opMap, activeOp, materialPreview = "") {
+function executionSystem(operators, opMap, activeOp, originalMaterial = "", researching = false) {
   const compact = summarizeLibrary(operators, opMap, { compact: true });
-  let sys =
-    "You execute a transformation on the user's thinking whiteboard. Return ONLY the transformed result — no preamble, labels, headings, or commentary. You MUST transform the EXACT material provided — if it is a poem, stay with that poem; if it is an image or sketch, describe and transform what you actually see. NEVER generate unrelated generic philosophy or content disconnected from the material. NEVER refuse, NEVER say insufficient data, NEVER ask for more information.";
+  let sys = `You execute a professional workflow on the user's thinking whiteboard. Return ONLY the deliverable — no preamble or meta-commentary.
+
+CRITICAL RULES:
+1. ORIGINAL SUBJECT — the user dragged this function onto specific board material. Stay locked to that subject in every sentence.
+2. NEVER write about insufficient documentation, information gaps, evaluation process, or meta-risks in deal assessment. Always produce substantive content ABOUT the subject.
+3. If input is a company name or short phrase (e.g. "efference ai startup"), treat it as the entity to analyze — use web search to research it and deliver a complete professional output.
+4. For investment thesis: write an actual thesis ABOUT the named company — include Thesis, Market, Product, Traction, Team, Key Risks, Upside Scenario, Recommendation.`;
+
+  if (researching) {
+    sys += `\n\nWEB SEARCH ENABLED: Research the subject thoroughly using current web sources before writing your deliverable. Cite key facts you find.`;
+  }
   if (activeOp?.name) {
-    sys += `\n\nActive transform: "${activeOp.name}"`;
+    sys += `\n\nActive function: "${activeOp.name}"`;
     if (activeOp.description) sys += ` — ${activeOp.description}`;
   }
-  if (materialPreview?.trim()) {
-    sys += `\n\nSOURCE MATERIAL (transform THIS — nothing else):\n"""${materialPreview.slice(0, 1200)}${materialPreview.length > 1200 ? "…" : ""}"""`;
+  if (originalMaterial?.trim()) {
+    sys += `\n\nORIGINAL BOARD MATERIAL (this is the subject — transform THIS):\n"""${originalMaterial.slice(0, 1500)}${originalMaterial.length > 1500 ? "…" : ""}"""`;
   }
   if (compact) {
-    sys += `\n\nThis user's personal library (match their style):\n${compact}`;
+    sys += `\n\nUser's function library:\n${compact}`;
   }
   return sys;
 }
@@ -172,13 +184,16 @@ async function generateFunctionList(role, operators, opMap) {
   const hasLib = operators?.length > 0;
   const prompt = `The user is a: ${role}.
 
-Design the 10 single most valuable FUNCTIONS for their lens whiteboard — the repeated, high-leverage cognitive operations they perform on notes, ideas, drafts, data, or documents.
-${hasLib ? "\nThey already have a personal library (see system context). Design NEW functions that complement it — do not duplicate existing names.\n" : ""}
-For each function:
-- "name": ONE word preferred, TWO words absolute max. Extremely abstract and succinct (e.g. "thesis", "flags", "memo", "signal", "comps"). NOT verbose phrases.
-- "description": one short sentence (optional, for expand view only).
+Design the 10 most valuable FUNCTIONS for their lens whiteboard. Each function must work on SPARSE input (a company name, one-line note) and produce a FULL professional deliverable using web research.
 
-Return ONLY JSON: {"functions":[{"name":"...","description":"..."}]} with exactly 10 functions, ordered from most to least frequently used.`;
+${hasLib ? "Complement existing library — no duplicate names.\n" : ""}
+For each function:
+- "name": ONE word (thesis, memo, comps, flags, diligence, signal, etc.)
+- "description": what deliverable it produces when dropped onto e.g. "acme ai startup"
+
+Investor examples: thesis → full investment thesis with sections; memo → investment memo; comps → comparable companies analysis.
+
+Return ONLY JSON: {"functions":[{"name":"...","description":"..."}]} — exactly 10, ordered by frequency.`;
   const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 2000 });
   const j = parseJSON(out);
   return Array.isArray(j.functions) ? j.functions.slice(0, 10) : [];
@@ -188,21 +203,26 @@ Return ONLY JSON: {"functions":[{"name":"...","description":"..."}]} with exactl
 async function decomposeFunction(role, fn, operators, opMap) {
   const prompt = `The user is a: ${role}.
 
-Decompose this ONE function into a deep tree ending in primitive operators. Go 3–5 layers deep minimum. Each sub-layer should be ONE word. Tailor to the user's library in system context.
+Decompose this function into a RESEARCH-AWARE pipeline that works on SPARSE input (often just a company name or one-line note).
 
-FUNCTION
-name: ${fn.name}
-description: ${fn.description || fn.name}
+FUNCTION: ${fn.name}
+${fn.description ? `Description: ${fn.description}` : ""}
+
+REQUIRED PIPELINE PATTERN for ${role}:
+1. parse — extract subject/entities from input (one short output)
+2. research — "research": true — web search for current facts about the subject
+3. analyze — apply ${fn.name} framework using research findings
+4. draft — final professional deliverable with clear sections
 
 Requirements:
-- 2–5 ordered sub-functions at each level, mirroring how an expert ${role} performs this.
-- Recurse until every leaf is a PRIMITIVE doing exactly one thing.
-- Names: ONE word only at every level. Extremely abstract (e.g. "extract", "stress", "map", "compress", "draft").
-- Every LEAF has a max-strength "prompt". Composites have "steps" and NO "prompt".
-- Descriptions: optional, one short sentence max.
+- 3–5 top-level steps minimum following parse → research → analyze → draft pattern where applicable.
+- Every research step MUST have "research": true and a prompt that uses web search.
+- Leaf prompts must produce REAL deliverables, never meta-commentary about missing data.
+- For "thesis": output sections — Thesis Statement, Market, Product, Traction, Team, Risks, Upside, Recommendation.
+- ONE word names at every level.
 
 Return ONLY JSON:
-{"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}`;
+{"name":"...","description":"...","steps":[{"name":"parse","prompt":"..."},{"name":"research","research":true,"prompt":"..."},...]}`;
   const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 8000 });
   return parseJSON(out);
 }
@@ -230,10 +250,35 @@ function materializeTree(node, role, top, out) {
     const steps = node.steps.map((s) => materializeTree(s, role, false, out));
     out.push({ id, name, description, kind: "pipeline", steps, role, top });
   } else {
-    const prompt = (node.prompt || "").trim() || `Apply "${name}" to the input text and return only the result.`;
-    out.push({ id, name, description, kind: "prompt", prompt, role, top });
+    const prompt = (node.prompt || "").trim() || `Apply "${name}" to the input and return only the deliverable result.`;
+    const research = !!node.research;
+    out.push({ id, name, description, kind: "prompt", prompt, role, top, research });
   }
   return id;
+}
+
+function opTreeNeedsResearch(op, opMap) {
+  if (!op) return false;
+  if (op.research) return true;
+  if (op.kind === "pipeline" && op.steps?.length) {
+    return op.steps.some((sid) => opTreeNeedsResearch(opMap[sid], opMap));
+  }
+  return false;
+}
+
+function shouldEnableResearch(op, opMap, originalMaterial) {
+  if (opTreeNeedsResearch(op, opMap)) return true;
+  const sparse = (originalMaterial || "").trim().length < 500;
+  const named = /\b(startup|ai|inc|corp|llc|labs|tech|company|platform|app)\b/i.test(originalMaterial || "");
+  if (sparse && (op?.role || named)) return true;
+  return false;
+}
+
+function formatPipelineInput(originalMaterial, currentMaterial) {
+  const orig = (originalMaterial || "").trim();
+  const cur = (currentMaterial || "").trim();
+  if (!orig || orig === cur) return cur;
+  return `ORIGINAL SUBJECT (never lose track of this — all work is about THIS):\n"""\n${orig}\n"""\n\nPRIOR STEP OUTPUT:\n"""\n${cur}\n"""`;
 }
 
 // human-readable tree for Claude context when editing in prose
@@ -603,21 +648,22 @@ function structurePreview(struct) {
 }
 
 async function runClaude(prompt, text, opts = {}) {
-  const { image = null, system = null, maxTokens = null } = opts;
+  const { image = null, system = null, maxTokens = null, research = false } = opts;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 120000);
+  const timeoutMs = research ? 180000 : 120000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch("/api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, text, count: 1, image, system, maxTokens }),
+      body: JSON.stringify({ prompt, text, count: 1, image, system, maxTokens, research }),
       signal: controller.signal,
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Claude did not answer.");
     return (data.outputs || [])[0] || "";
   } catch (err) {
-    if (err.name === "AbortError") throw new Error("Request timed out — try again.");
+    if (err.name === "AbortError") throw new Error(research ? "Research timed out — try again." : "Request timed out — try again.");
     throw err;
   } finally {
     clearTimeout(timer);
@@ -1010,23 +1056,29 @@ export default function App() {
   const opMap = useMemo(() => Object.fromEntries(operators.map((o) => [o.id, o])), [operators]);
 
   // run a function: pipelines chain their sub-functions (output -> next input)
-  async function applyOpTree(op, material, image, materialPreview = "") {
+  async function applyOpTree(op, material, image, ctx = {}) {
     if (!op) return material;
+    const originalMaterial = ctx.originalMaterial ?? material;
+    const pipelineResearch = shouldEnableResearch(op, opMap, originalMaterial);
+
     if (op.kind === "pipeline" && op.steps?.length) {
       let cur = material;
       let img = image;
-      let preview = materialPreview;
       for (const sid of op.steps) {
-        cur = await applyOpTree(opMap[sid], cur, img, preview);
-        preview = cur.slice(0, 1200);
-        img = null; // image only feeds the first step
+        cur = await applyOpTree(opMap[sid], cur, img, { originalMaterial, pipelineResearch });
+        img = null;
       }
       return cur;
     }
-    const leafPrompt = (op.prompt || "").trim() || `Apply "${op.name}" to the input material and return only the result.`;
-    return await runClaude(leafPrompt, material, {
+
+    const leafPrompt = (op.prompt || "").trim() || `Produce the "${op.name}" deliverable for the input subject. Return only the result.`;
+    const input = formatPipelineInput(originalMaterial, material);
+    const stepResearch = !!op.research || pipelineResearch;
+    return await runClaude(leafPrompt, input, {
       image,
-      system: executionSystem(operators, opMap, op, materialPreview || material),
+      system: executionSystem(operators, opMap, op, originalMaterial, stepResearch),
+      maxTokens: stepResearch ? 8192 : 4096,
+      research: stepResearch,
     });
   }
 
@@ -1045,9 +1097,11 @@ export default function App() {
       return;
     }
     setSelection(ids);
+    const researching = shouldEnableResearch(op, opMap, text);
     setAiBusy(true);
+    showToast(researching ? `researching · ${op.name}…` : `working · ${op.name}…`);
     try {
-      const out = await applyOpTree(op, text, image, preview);
+      const out = await applyOpTree(op, text, image, { originalMaterial: text, pipelineResearch: researching });
       if (!out?.trim()) {
         showToast("no output — try again");
         return;
@@ -1846,7 +1900,7 @@ export default function App() {
           </>
         )}
         {railTab === "functions" && (
-          <div className="rail-hint">drag ⠿ onto canvas · drop ideas together to combine</div>
+          <div className="rail-hint">drag function onto idea · ↻ rebuilds with web research</div>
         )}
       </aside>
 
@@ -2361,7 +2415,7 @@ function ExportPalette({ pos, busy, selectionCount, onExport, onDelete, onSaveSt
   if (busy) {
     return (
       <div className="palette busy" style={style}>
-        <span className="spinner" /> working…
+        <span className="spinner" /> researching…
       </div>
     );
   }

@@ -2,6 +2,12 @@ import Anthropic from "@anthropic-ai/sdk";
 
 export const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-5-20250929";
 
+const WEB_SEARCH_TOOL = {
+  type: "web_search_20250305",
+  name: "web_search",
+  max_uses: 8,
+};
+
 let client = null;
 function getClient() {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -24,9 +30,6 @@ function extractText(message) {
     .trim();
 }
 
-// Run a saved prompt ("symbol") against some text.
-// `count` controls how many independent variations Claude generates (1..MAX_RESPONSES);
-// they are produced in parallel and returned as `outputs`.
 function imageBlock(image) {
   if (!image || typeof image !== "string") return null;
   const m = image.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]*)$/);
@@ -34,8 +37,24 @@ function imageBlock(image) {
   return { type: "image", source: { type: "base64", media_type: m[1], data: m[2] } };
 }
 
-// Run a saved prompt against text and/or an image (Claude vision).
-export async function runPrompt({ prompt, text, count = 1, image = null, system = null, maxTokens = null }) {
+function buildUserText(prompt, text) {
+  const content = text && String(text).trim().length > 0 ? String(text) : "";
+  const materialBlock = content
+    ? `MATERIAL TO TRANSFORM (transform THIS specific subject — produce a substantive deliverable, never meta-commentary about missing data):\n"""\n${content}\n"""`
+    : "MATERIAL TO TRANSFORM: the attached image/sketch from the user's whiteboard.";
+  return `${prompt}\n\n---\n${materialBlock}`;
+}
+
+// Run a saved prompt against text and/or an image. Optional web search for research workflows.
+export async function runPrompt({
+  prompt,
+  text,
+  count = 1,
+  image = null,
+  system = null,
+  maxTokens = null,
+  research = false,
+}) {
   const anthropic = getClient();
   if (!anthropic) {
     const err = new Error(
@@ -52,36 +71,29 @@ export async function runPrompt({ prompt, text, count = 1, image = null, system 
   }
 
   const n = Math.min(Math.max(parseInt(count, 10) || 1, 1), MAX_RESPONSES);
-
-  const content = text && String(text).trim().length > 0 ? String(text) : "";
   const img = imageBlock(image);
-  const materialBlock = content
-    ? `MATERIAL TO TRANSFORM (you must transform THIS specific content — stay faithful to it, do not invent unrelated material):\n"""\n${content}\n"""`
-    : img
-    ? "MATERIAL TO TRANSFORM: the attached image/sketch from the user's whiteboard. Interpret and transform what you actually see."
-    : "";
-  const userText = materialBlock
-    ? `${prompt}\n\n---\n${materialBlock}`
-    : prompt;
-
+  const userText = buildUserText(prompt, text);
   const blocks = [];
   if (img) blocks.push(img);
   blocks.push({ type: "text", text: userText });
 
-  const max_tokens = Math.min(Math.max(parseInt(maxTokens, 10) || 4096, 256), 8192);
+  const max_tokens = Math.min(Math.max(parseInt(maxTokens, 10) || (research ? 8192 : 4096), 256), 8192);
   const sys = system && typeof system === "string" ? system : undefined;
 
-  const makeOne = () =>
-    anthropic.messages
-      .create({
-        model: MODEL,
-        max_tokens,
-        ...(sys ? { system: sys } : {}),
-        // Higher temperature when asking for several options, so they differ.
-        temperature: n > 1 ? 1 : 0.7,
-        messages: [{ role: "user", content: blocks }],
-      })
-      .then(extractText);
+  const makeOne = async () => {
+    const params = {
+      model: MODEL,
+      max_tokens,
+      ...(sys ? { system: sys } : {}),
+      messages: [{ role: "user", content: blocks }],
+      temperature: n > 1 ? 1 : research ? 0.4 : 0.7,
+    };
+    if (research) {
+      params.tools = [WEB_SEARCH_TOOL];
+    }
+    const message = await anthropic.messages.create(params);
+    return extractText(message);
+  };
 
   const settled = await Promise.allSettled(Array.from({ length: n }, makeOne));
   const outputs = settled
@@ -95,5 +107,5 @@ export async function runPrompt({ prompt, text, count = 1, image = null, system 
     throw err;
   }
 
-  return { outputs, model: MODEL };
+  return { outputs, model: MODEL, research: !!research };
 }
