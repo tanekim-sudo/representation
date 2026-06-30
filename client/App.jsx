@@ -125,6 +125,55 @@ async function ask(prompt, text) {
   return outs[0] || "";
 }
 
+function parseJourney(raw) {
+  let s = (raw || "").trim();
+  const a = s.indexOf("{");
+  const b = s.lastIndexOf("}");
+  if (a !== -1 && b !== -1) s = s.slice(a, b + 1);
+  return JSON.parse(s);
+}
+
+// Ask Claude to reconstruct the genuine intellectual journey behind a node.
+async function narrateJourney(history) {
+  const lineage = history
+    .map((s, i) => {
+      const meta = VERB_META[s.kind] || VERB_META.operator;
+      const opName = (s.op && s.op.name) || meta.label;
+      let line = `[stage ${i + 1}] (${opName}) ${s.to ? s.to : "(an empty seed)"}`;
+      if (s.parents && s.parents.length) {
+        line += `\n    ↳ merged from: ${s.parents.map((p) => `"${(p.text || "").trim()}"`).join("  +  ")}`;
+      }
+      return line;
+    })
+    .join("\n");
+
+  const prompt = `You are a thought-historian narrating how a single idea was really developed on an infinite idea-canvas. Below is its true chronological lineage. Each stage is tagged with the operation that produced it:
+- planted = the very first spark, written by hand
+- written = a manual edit by the thinker
+- evolved = deepened by AI
+- branched = a new related direction spun off
+- split = broken into sub-ideas
+- combined = synthesized from two earlier ideas
+- a named operator = a custom transformation the thinker built and applied
+
+Reconstruct the genuine intellectual journey end to end: how the thinking actually moved from the first spark to the final form — the realizations, the pivots, the widening or sharpening of the idea. Be specific to THIS idea's content, not generic.
+
+Return ONLY valid JSON (no markdown fences) in exactly this shape:
+{
+  "title": "short evocative name for this line of thought (max 6 words)",
+  "chapters": [
+    { "move": "2-4 word name for the cognitive move at this stage", "narration": "1-2 vivid sentences in second person ('you...') describing what you were doing and what shifted in your understanding at this exact step" }
+  ],
+  "synthesis": "3-4 sentences capturing the whole arc: where it began, the pivotal turns, and where it arrived and why that matters"
+}
+There MUST be exactly one chapter object per stage, in the same order as the stages.`;
+
+  const out = await ask(prompt, lineage);
+  const j = parseJourney(out);
+  if (!j || !Array.isArray(j.chapters)) throw new Error("Could not trace the thought.");
+  return j;
+}
+
 export default function App() {
   const [seeds, setSeeds] = useState(() => load(SEEDS_KEY, []));
   const [edges, setEdges] = useState(() => load(EDGES_KEY, []));
@@ -947,80 +996,198 @@ function StepGlyph({ step, color }) {
   return <span className="stage-symbol" style={{ color }}>{meta.symbol}</span>;
 }
 
+// estimate a comfortable reading time for a scene
+function readMs(text) {
+  const words = (text || "").trim().split(/\s+/).filter(Boolean).length;
+  return Math.min(9000, Math.max(3600, 900 + words * 320));
+}
+
 function Replay({ seed, onClose }) {
-  const steps =
-    seed.history && seed.history.length ? seed.history : [{ kind: "plant", op: null, to: seed.text }];
-  const [i, setI] = useState(0);
+  const steps = useMemo(
+    () => (seed.history && seed.history.length ? seed.history : [{ kind: "plant", op: null, to: seed.text }]),
+    [seed]
+  );
+
+  const [phase, setPhase] = useState("loading"); // loading | play | error
+  const [journey, setJourney] = useState(null);
+  const [errMsg, setErrMsg] = useState("");
+  const [i, setI] = useState(0); // 0 = title, 1..N = stages, N+1 = synthesis
   const [playing, setPlaying] = useState(true);
 
+  const total = steps.length + 2; // title + stages + synthesis
+
+  async function trace() {
+    setPhase("loading");
+    setErrMsg("");
+    try {
+      const j = await narrateJourney(steps);
+      setJourney(j);
+      setI(0);
+      setPlaying(true);
+      setPhase("play");
+    } catch (e) {
+      setErrMsg(e.message || "Could not trace the thought.");
+      setPhase("error");
+    }
+  }
+
   useEffect(() => {
-    if (!playing) return;
-    if (i >= steps.length - 1) {
+    trace();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // scene content for timing
+  const sceneText = useMemo(() => {
+    if (phase !== "play" || !journey) return "";
+    if (i === 0) return journey.title || "";
+    if (i === total - 1) return journey.synthesis || "";
+    const ch = journey.chapters[i - 1] || {};
+    return (ch.narration || "") + " " + (steps[i - 1]?.to || "");
+  }, [phase, journey, i, total, steps]);
+
+  useEffect(() => {
+    if (phase !== "play" || !playing) return;
+    if (i >= total - 1) {
       setPlaying(false);
       return;
     }
-    const t = setTimeout(() => setI((v) => v + 1), 2100);
+    const t = setTimeout(() => setI((v) => v + 1), readMs(sceneText));
     return () => clearTimeout(t);
-  }, [i, playing, steps.length]);
+  }, [phase, playing, i, total, sceneText]);
 
   useEffect(() => {
     function onKey(e) {
       if (e.key === "Escape") onClose();
-      if (e.key === "ArrowRight") setI((v) => Math.min(steps.length - 1, v + 1));
-      if (e.key === "ArrowLeft") setI((v) => Math.max(0, v - 1));
+      if (phase !== "play") return;
+      if (e.key === "ArrowRight") {
+        setPlaying(false);
+        setI((v) => Math.min(total - 1, v + 1));
+      }
+      if (e.key === "ArrowLeft") {
+        setPlaying(false);
+        setI((v) => Math.max(0, v - 1));
+      }
+      if (e.key === " ") {
+        e.preventDefault();
+        setPlaying((v) => !v);
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [steps.length, onClose]);
+  }, [phase, total, onClose]);
 
-  const step = steps[i];
-  const meta = VERB_META[step.kind] || VERB_META.operator;
-  const color = (step.op && step.op.color) || meta.color;
-  const prev = i > 0 ? steps[i - 1] : null;
-  const opLabel = step.op && step.op.name ? step.op.name : meta.label;
+  if (phase === "loading") {
+    return (
+      <div className="replay-overlay" onClick={onClose}>
+        <div className="replay-stage loading" onClick={(e) => e.stopPropagation()} style={{ "--c": "#9fb4ff" }}>
+          <div className="replay-orb-wrap">
+            <span className="replay-shock" />
+            <span className="replay-shock two" />
+            <div className="replay-orb tracing" />
+          </div>
+          <div className="replay-tracing">tracing the thought…</div>
+          <div className="replay-sub">reconstructing how this idea came to be</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (phase === "error") {
+    return (
+      <div className="replay-overlay" onClick={onClose}>
+        <div className="replay-stage" onClick={(e) => e.stopPropagation()} style={{ "--c": "#fb7185" }}>
+          <div className="replay-label" style={{ color: "#fb7185" }}>
+            the thread went dark
+          </div>
+          <div className="replay-sub">{errMsg}</div>
+          <div className="replay-controls">
+            <button className="ghost-btn" onClick={trace}>
+              ⟲ try again
+            </button>
+            <div className="spacer" />
+            <button className="ghost-btn" onClick={onClose}>
+              close
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- play phase ----
+  const isTitle = i === 0;
+  const isSynth = i === total - 1;
+  const stepIdx = i - 1;
+  const step = !isTitle && !isSynth ? steps[stepIdx] : null;
+  const chapter = step ? journey.chapters[stepIdx] || {} : null;
+  const meta = step ? VERB_META[step.kind] || VERB_META.operator : null;
+  const color = isTitle
+    ? "#9fb4ff"
+    : isSynth
+    ? "#a78bfa"
+    : (step.op && step.op.color) || meta.color;
 
   return (
     <div className="replay-overlay" onClick={onClose}>
       <div className="replay-stage" onClick={(e) => e.stopPropagation()} style={{ "--c": color }}>
-        <div className="replay-head">
-          <span className="replay-count">
-            stage {i + 1} / {steps.length}
-          </span>
-          <span className="replay-label" style={{ color }}>
-            {opLabel}
-          </span>
-        </div>
+        <div className="replay-journey-title">{journey.title}</div>
 
-        {step.parents && (
-          <div className="replay-parents" key={"p" + i}>
-            {step.parents.map((p, k) => (
-              <div className="replay-parent" key={k}>
-                {(p.text || "").slice(0, 70) || "—"}
+        {isTitle ? (
+          <div className="replay-scene title" key="title">
+            <div className="replay-count">the journey of</div>
+            <h1 className="replay-big">{journey.title}</h1>
+            <div className="replay-sub">{steps.length} stages · from first spark to final form</div>
+          </div>
+        ) : isSynth ? (
+          <div className="replay-scene synth" key="synth">
+            <div className="replay-count">the arc, end to end</div>
+            <div className="replay-orb-wrap" key="synth-orb">
+              <span className="replay-shock" />
+              <div className="replay-orb">
+                <span className="stage-symbol" style={{ color }}>
+                  ✧
+                </span>
               </div>
-            ))}
+            </div>
+            <div className="replay-synthesis">{journey.synthesis}</div>
+            <div className="replay-final">“{steps[steps.length - 1]?.to}”</div>
+          </div>
+        ) : (
+          <div className="replay-scene" key={"s" + i}>
+            <div className="replay-head">
+              <span className="replay-count">
+                stage {stepIdx + 1} / {steps.length}
+              </span>
+              <span className="replay-move" style={{ color }}>
+                {chapter.move || (step.op && step.op.name) || meta.label}
+              </span>
+            </div>
+
+            {step.parents && (
+              <div className="replay-parents">
+                {step.parents.map((p, k) => (
+                  <div className="replay-parent" key={k}>
+                    {(p.text || "").slice(0, 80) || "—"}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="replay-orb-wrap" key={"o" + i}>
+              <span className="replay-shock" />
+              <span className="replay-shock two" />
+              <div className="replay-orb">
+                <StepGlyph step={step} color={color} />
+              </div>
+            </div>
+
+            <div className="replay-narration">{chapter.narration}</div>
+            <div className="replay-text">{step.to ? `“${step.to}”` : <em className="muted">an empty seed</em>}</div>
           </div>
         )}
-
-        {prev && !step.parents && (
-          <div className="replay-from" key={"f" + i}>
-            {(prev.to || "").slice(0, 90) || "an empty seed"}
-          </div>
-        )}
-
-        <div className="replay-orb-wrap" key={"o" + i}>
-          <span className="replay-shock" />
-          <span className="replay-shock two" />
-          <div className="replay-orb">
-            <StepGlyph step={step} color={color} />
-          </div>
-        </div>
-
-        <div className="replay-text" key={"t" + i}>
-          {step.to ? step.to : <em className="muted">empty</em>}
-        </div>
 
         <div className="replay-dots">
-          {steps.map((_, k) => (
+          {Array.from({ length: total }, (_, k) => (
             <button
               key={k}
               className={"replay-dot" + (k === i ? " on" : "") + (k < i ? " done" : "")}
@@ -1042,7 +1209,14 @@ function Replay({ seed, onClose }) {
           >
             ⟲ restart
           </button>
-          <button className="ghost-btn" onClick={() => setI((v) => Math.max(0, v - 1))} disabled={i === 0}>
+          <button
+            className="ghost-btn"
+            onClick={() => {
+              setPlaying(false);
+              setI((v) => Math.max(0, v - 1));
+            }}
+            disabled={i === 0}
+          >
             ‹ prev
           </button>
           <button className="ghost-btn" onClick={() => setPlaying((v) => !v)}>
@@ -1050,8 +1224,11 @@ function Replay({ seed, onClose }) {
           </button>
           <button
             className="ghost-btn"
-            onClick={() => setI((v) => Math.min(steps.length - 1, v + 1))}
-            disabled={i >= steps.length - 1}
+            onClick={() => {
+              setPlaying(false);
+              setI((v) => Math.min(total - 1, v + 1));
+            }}
+            disabled={i >= total - 1}
           >
             next ›
           </button>

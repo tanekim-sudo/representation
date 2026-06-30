@@ -1279,3 +1279,144 @@ body {
 .replay-controls .spacer {
   width: 6px;
 }
+
+/* ---- Replay: narrated journey ---- */
+.replay-journey-title {
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: var(--faint);
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+.replay-scene {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  animation: scenein 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes scenein {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.replay-move {
+  font-family: var(--serif);
+  font-size: 24px;
+  letter-spacing: 0.4px;
+  text-shadow: 0 0 26px var(--c);
+}
+
+.replay-narration {
+  max-width: 520px;
+  font-family: var(--serif);
+  font-size: 19px;
+  line-height: 1.55;
+  color: var(--ink);
+  text-shadow: 0 0 22px rgba(0, 0, 0, 0.65);
+}
+
+.replay-text {
+  max-width: 500px;
+  font-size: 14px;
+  line-height: 1.5;
+  font-style: italic;
+  color: var(--faint);
+}
+
+/* title scene */
+.replay-scene.title {
+  gap: 12px;
+  padding: 20px 0;
+}
+
+.replay-big {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: clamp(30px, 6vw, 54px);
+  font-weight: 500;
+  line-height: 1.08;
+  letter-spacing: 0.4px;
+  color: var(--ink);
+  text-shadow: 0 0 40px var(--c);
+  animation: glowpulse 3.6s ease-in-out infinite;
+}
+
+@keyframes glowpulse {
+  0%,
+  100% {
+    text-shadow: 0 0 28px var(--c);
+  }
+  50% {
+    text-shadow: 0 0 54px var(--c);
+  }
+}
+
+/* synthesis scene */
+.replay-scene.synth {
+  gap: 16px;
+}
+
+.replay-synthesis {
+  max-width: 560px;
+  font-family: var(--serif);
+  font-size: 19px;
+  line-height: 1.6;
+  color: var(--ink);
+  text-shadow: 0 0 22px rgba(0, 0, 0, 0.6);
+}
+
+.replay-final {
+  max-width: 520px;
+  font-size: 15px;
+  font-style: italic;
+  color: var(--c);
+  text-shadow: 0 0 20px color-mix(in srgb, var(--c) 60%, transparent);
+}
+
+/* loading / tracing */
+.replay-stage.loading {
+  gap: 22px;
+}
+
+.replay-orb.tracing {
+  animation: pulse 1.4s ease-in-out infinite, spin 6s linear infinite;
+}
+
+.replay-tracing {
+  font-family: var(--serif);
+  font-size: 22px;
+  letter-spacing: 0.5px;
+  color: var(--ink);
+  animation: breathe 2.2s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.replay-sub {
+  max-width: 440px;
+  font-size: 13px;
+  color: var(--faint);
+}
