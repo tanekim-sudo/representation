@@ -773,10 +773,69 @@ function structurePreview(struct) {
   return parts.join(" · ") || struct.title || "empty";
 }
 
+function parseApiResponse(res, raw) {
+  if (res.status === 504 || /FUNCTION_INVOCATION_TIMEOUT|timeout/i.test(raw)) {
+    throw new Error("Research timed out on the server. Try again in a moment.");
+  }
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    const snippet = raw.trim().slice(0, 80);
+    if (snippet.startsWith("<!") || snippet.toLowerCase().startsWith("<html")) {
+      throw new Error("Could not reach the API server. Refresh and try again.");
+    }
+    try {
+      data = JSON.parse(jsonrepair(raw));
+    } catch {
+      throw new Error("Server returned invalid JSON. The request may have timed out — try again.");
+    }
+  }
+  if (!res.ok) throw new Error(data.error || "Request failed.");
+  return data;
+}
+
+async function runPipelineOnServer({ op, opMap, operators, material, image, onProgress }) {
+  const ids = collectSubtreeIds(op.id, opMap);
+  const subset = {};
+  for (const id of ids) subset[id] = opMap[id];
+
+  const controller = new AbortController();
+  const timeoutMs = 300000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let elapsed = 0;
+  const progressTimer = setInterval(() => {
+    elapsed += 5;
+    onProgress?.(`${op.name} · ${elapsed}s`, Math.min(0.88, 0.18 + (elapsed / 240) * 0.7));
+  }, 5000);
+
+  try {
+    const res = await fetch("/api/pipeline", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op, opMap: subset, operators, material, image }),
+      signal: controller.signal,
+    });
+    const raw = await res.text();
+    const data = parseApiResponse(res, raw);
+    if (data.steps?.length) {
+      const last = data.steps[data.steps.length - 1];
+      onProgress?.(last.name || op.name, 0.92);
+    }
+    return data.output || "";
+  } catch (err) {
+    if (err.name === "AbortError") throw new Error("Research timed out after 5 minutes. Try again.");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    clearInterval(progressTimer);
+  }
+}
+
 async function runClaude(prompt, text, opts = {}) {
   const { image = null, system = null, maxTokens = null, research = false } = opts;
   const controller = new AbortController();
-  const timeoutMs = research ? 180000 : 120000;
+  const timeoutMs = research ? 300000 : 120000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch("/api/run", {
@@ -786,21 +845,7 @@ async function runClaude(prompt, text, opts = {}) {
       signal: controller.signal,
     });
     const raw = await res.text();
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      const snippet = raw.trim().slice(0, 80);
-      if (snippet.startsWith("<!") || snippet.toLowerCase().startsWith("<html")) {
-        throw new Error("Could not reach the API server. Refresh and try again.");
-      }
-      try {
-        data = JSON.parse(jsonrepair(raw));
-      } catch {
-        throw new Error("Server returned invalid JSON. Check your API key and retry.");
-      }
-    }
-    if (!res.ok) throw new Error(data.error || "Claude did not answer.");
+    const data = parseApiResponse(res, raw);
     return (data.outputs || [])[0] || "";
   } catch (err) {
     if (err.name === "AbortError") throw new Error(research ? "Research timed out — try again." : "Request timed out — try again.");
@@ -1211,38 +1256,6 @@ export default function App() {
   // ---- composed operators (functions made of functions) ----
   const opMap = useMemo(() => Object.fromEntries(operators.map((o) => [o.id, o])), [operators]);
 
-  // run a function: pipelines chain their sub-functions (output -> next input)
-  async function applyOpTree(op, material, image, ctx = {}) {
-    if (!op) return material;
-    const originalMaterial = ctx.originalMaterial ?? material;
-    const pipelineResearch = shouldEnableResearch(op, opMap, originalMaterial);
-
-    if (op.kind === "pipeline" && op.steps?.length) {
-      let cur = material;
-      let img = image;
-      const total = op.steps.length;
-      for (let i = 0; i < op.steps.length; i++) {
-        const sid = op.steps[i];
-        const sub = opMap[sid];
-        ctx.onStep?.(sub?.name || `step ${i + 1}`, i, total);
-        cur = await applyOpTree(sub, cur, img, { ...ctx, originalMaterial, pipelineResearch });
-        img = null;
-      }
-      return cur;
-    }
-
-    ctx.onStep?.(op.name, 0, 1);
-    const leafPrompt = (op.prompt || "").trim() || `Produce the "${op.name}" deliverable for the input subject. Return only the result.`;
-    const input = formatPipelineInput(originalMaterial, material);
-    const stepResearch = !!op.research || pipelineResearch;
-    return await runClaude(leafPrompt, input, {
-      image,
-      system: executionSystem(operators, opMap, op, originalMaterial, stepResearch),
-      maxTokens: stepResearch ? 8192 : 4096,
-      research: stepResearch,
-    });
-  }
-
   function spawnMultipleObjects(texts, sourceIds, atWorld) {
     const idSet = new Set(sourceIds || []);
     const sel = itemsRef.current.filter((it) => idSet.has(it.id));
@@ -1277,21 +1290,19 @@ export default function App() {
     const researching = shouldEnableResearch(op, opMap, text);
     patchJob(jobId, { step: researching ? "researching…" : `running · ${op.name}`, progress: 0.15 });
 
-    const onStep = (stepName, i, total) => {
-      patchJob(jobId, {
-        step: total > 1 ? `${stepName} (${i + 1}/${total})` : stepName,
-        progress: 0.15 + ((i + 1) / Math.max(total, 1)) * 0.75,
-      });
-    };
+    const onProgress = (step, progress) => patchJob(jobId, { step, progress });
+
+    const out = await runPipelineOnServer({
+      op,
+      opMap,
+      operators,
+      material: text,
+      image,
+      onProgress,
+    });
 
     // primitive: split → multiple objects
     if (op.multi || op.name === "split") {
-      const out = await runClaude(op.prompt, text, {
-        image,
-        system: executionSystem(operators, opMap, op, text, researching),
-        maxTokens: 4096,
-        research: researching,
-      });
       const parts = out
         .split(/\n{2,}/)
         .map((p) => p.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim())
@@ -1310,7 +1321,6 @@ export default function App() {
       return;
     }
 
-    const out = await applyOpTree(op, text, image, { originalMaterial: text, pipelineResearch: researching, onStep });
     if (!out?.trim()) throw new Error("empty output");
     patchJob(jobId, { step: "spawning object…", progress: 0.95 });
     const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;

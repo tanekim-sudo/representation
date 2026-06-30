@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import { runPrompt, hasKey, MODEL } from "./claude.js";
+import { runPipeline } from "./pipeline.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 8787;
@@ -32,6 +33,27 @@ app.post("/api/run", async (req, res) => {
     console.error("[lens] /api/run failed:", err?.message || err);
     res.status(err?.status || 500).json({
       error: err?.error?.error?.message || err?.message || "Something went wrong calling Claude.",
+    });
+  }
+});
+
+app.post("/api/pipeline", async (req, res) => {
+  try {
+    const { op, opMap, operators, material, image } = req.body ?? {};
+    const steps = [];
+    const data = await runPipeline({
+      op,
+      opMap: opMap || {},
+      operators: operators || [],
+      material: material || "",
+      image: image || null,
+      onStep: (name, i, total) => steps.push({ name, index: i, total }),
+    });
+    res.json({ ...data, steps });
+  } catch (err) {
+    console.error("[lens] /api/pipeline failed:", err?.message || err);
+    res.status(err?.status || 500).json({
+      error: err?.error?.error?.message || err?.message || "Pipeline failed.",
     });
   }
 });
