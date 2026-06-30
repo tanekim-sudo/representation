@@ -144,9 +144,19 @@ body {
   border-radius: 10px;
   background: var(--paper);
   overflow: hidden;
-  cursor: grab;
 }
-.op-card:active {
+.op-drag-grip {
+  display: grid;
+  place-items: center;
+  padding: 0 8px;
+  color: var(--faint);
+  cursor: grab;
+  border-right: 1px solid var(--line);
+  font-size: 14px;
+  user-select: none;
+  flex: none;
+}
+.op-drag-grip:active {
   cursor: grabbing;
 }
 .op-card-row {
@@ -235,7 +245,20 @@ body {
   border-left: 1px solid var(--line);
 }
 
-/* transform handles */
+/* transform handles — screen space overlay */
+.xform-screen-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 25;
+}
+.xform-outline-screen {
+  position: fixed;
+  border: 1.5px solid var(--ink);
+  border-radius: 3px;
+  opacity: 0.5;
+  pointer-events: none;
+}
 .xform-frame {
   z-index: 5;
   pointer-events: none;
@@ -298,6 +321,8 @@ body {
   transform-origin: 0 0;
   will-change: transform;
   pointer-events: none;
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--ink) 7%, transparent) 1px, transparent 1px);
+  background-size: 24px 24px;
 }
 
 .world .board-text,
@@ -336,14 +361,16 @@ body {
   cursor: default;
 }
 .board-text.sel {
-  box-shadow: inset 0 -2px 0 0 var(--ink);
+  background: color-mix(in srgb, var(--ink) 5%, var(--card));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink) 22%, transparent);
 }
 .board-text.editing {
   outline: none;
-  background: color-mix(in srgb, var(--ink) 4%, var(--card));
-  box-shadow: 0 0 0 1.5px var(--line-2);
+  background: var(--card);
+  box-shadow: 0 0 0 2px var(--ink);
   cursor: text;
-  min-width: 8px;
+  min-width: 120px;
+  min-height: 1.5em;
 }
 
 .board-img {
@@ -364,13 +391,14 @@ body {
   pointer-events: none;
 }
 
-/* live lasso (screen space) */
+/* live lasso (viewport-local) */
 .lasso {
   position: absolute;
   border: 1px dashed var(--ink);
   background: rgba(32, 32, 29, 0.04);
   border-radius: 3px;
   pointer-events: none;
+  z-index: 4;
 }
 
 /* ---- brand + hints ---- */

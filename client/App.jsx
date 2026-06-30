@@ -112,7 +112,7 @@ ${summary}`;
 function executionSystem(operators, opMap, activeOp) {
   const compact = summarizeLibrary(operators, opMap, { compact: true });
   let sys =
-    "You execute a transformation on the user's thinking whiteboard. Return ONLY the transformed result — no preamble, labels, or commentary.";
+    "You execute a transformation on the user's thinking whiteboard. Return ONLY the transformed result — no preamble, labels, or commentary. Work with whatever material is given, even brief fragments, keywords, or rough notes. Never refuse or ask for more data; do the best possible transform on what's provided.";
   if (activeOp?.name) {
     sys += `\n\nActive transform: "${activeOp.name}"`;
     if (activeOp.description) sys += ` — ${activeOp.description}`;
@@ -126,7 +126,7 @@ function executionSystem(operators, opMap, activeOp) {
 function boardSystem(operators, opMap) {
   const compact = summarizeLibrary(operators, opMap, { compact: true });
   let sys =
-    "You operate on selected material from the user's thinking whiteboard. Return ONLY the requested result.";
+    "You operate on selected material from the user's thinking whiteboard. Return ONLY the requested result. Work with whatever is given — fragments, keywords, rough notes — never refuse for insufficient data.";
   if (compact) {
     sys += `\n\nThis user's personal library of functions and transformations — align your output with their established patterns:\n${compact}`;
   }
@@ -338,17 +338,20 @@ function itemHeight(it) {
 }
 
 function itemStyle(it) {
-  const w = itemWidth(it);
-  const h = itemHeight(it);
-  const rot = it.rotation || 0;
-  const sc = it.scale ?? 1;
-  return {
+  const style = {
     left: it.x,
     top: it.y,
-    width: it.type === "text" ? it.w || 360 : undefined,
-    transform: `rotate(${rot}deg) scale(${sc})`,
-    transformOrigin: `${w / 2}px ${h / 2}px`,
   };
+  if (it.type === "text") style.width = it.w || 360;
+  const rot = it.rotation || 0;
+  const sc = it.scale ?? 1;
+  if (rot || sc !== 1) {
+    const w = itemWidth(it);
+    const h = itemHeight(it);
+    style.transform = `rotate(${rot}deg) scale(${sc})`;
+    style.transformOrigin = `${w / 2}px ${h / 2}px`;
+  }
+  return style;
 }
 
 function cornerWorld(it, corner) {
@@ -462,10 +465,12 @@ export default function App() {
   const toolRef = useRef(tool);
   const selRef = useRef(selection);
   const spaceRef = useRef(false);
+  const editingRef = useRef(editing);
   camRef.current = camera;
   itemsRef.current = items;
   toolRef.current = tool;
   selRef.current = selection;
+  editingRef.current = editing;
 
   useEffect(() => localStorage.setItem(ITEMS_KEY, JSON.stringify(items)), [items]);
   useEffect(() => localStorage.setItem(CAMERA_KEY, JSON.stringify(camera)), [camera]);
@@ -476,15 +481,58 @@ export default function App() {
     setTimeout(() => setToast((t) => (t === msg ? null : t)), 3200);
   }
 
-  // ---- camera math (transform-origin is 0 0) ----
-  const screenToWorld = (sx, sy) => {
+  // ---- camera math: all world coords are relative to the viewport (not the window) ----
+  function vpRect() {
+    return viewportRef.current?.getBoundingClientRect() || { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+  }
+
+  function vpLocal(clientX, clientY) {
+    const r = vpRect();
+    return { x: clientX - r.left, y: clientY - r.top };
+  }
+
+  function clientToWorld(clientX, clientY) {
+    const l = vpLocal(clientX, clientY);
     const c = camRef.current;
-    return { x: (sx - c.x) / c.scale, y: (sy - c.y) / c.scale };
-  };
-  const worldToScreen = (wx, wy) => {
+    return { x: (l.x - c.x) / c.scale, y: (l.y - c.y) / c.scale };
+  }
+
+  function worldToLocal(wx, wy) {
     const c = camRef.current;
     return { x: wx * c.scale + c.x, y: wy * c.scale + c.y };
-  };
+  }
+
+  function worldToClient(wx, wy) {
+    const l = worldToLocal(wx, wy);
+    const r = vpRect();
+    return { x: l.x + r.left, y: l.y + r.top };
+  }
+
+  function viewportCenterWorld() {
+    const r = vpRect();
+    return clientToWorld(r.left + r.width / 2, r.top + r.height / 2);
+  }
+
+  function zoomCamera(c, factor) {
+    const r = vpRect();
+    const lx = r.width / 2;
+    const ly = r.height / 2;
+    const scale = clamp(c.scale * factor, 0.12, 4.5);
+    const wx = (lx - c.x) / c.scale;
+    const wy = (ly - c.y) / c.scale;
+    return { scale, x: lx - wx * scale, y: ly - wy * scale };
+  }
+
+  function finishEditing() {
+    const id = editingRef.current;
+    if (!id) return;
+    const el = document.querySelector(`[data-item="${id}"].editing`);
+    if (el?.isContentEditable) {
+      commitEdit(id, el.innerText ?? "");
+    } else {
+      setEditing(null);
+    }
+  }
 
   // global pointer move/up so gestures work across canvas items
   useEffect(() => {
@@ -497,7 +545,7 @@ export default function App() {
       if (g.mode === "pan") {
         setCamera({ ...g.cam, x: g.cam.x + (cx - g.cx), y: g.cam.y + (cy - g.cy) });
       } else if (g.mode === "draw") {
-        const w = screenToWorld(cx, cy);
+        const w = clientToWorld(cx, cy);
         g.points.push(w);
         setDraft({ points: g.points.slice(), marker: g.marker });
       } else if (g.mode === "erase") {
@@ -517,14 +565,21 @@ export default function App() {
             return { ...it, x: it.x + dx, y: it.y + dy };
           })
         );
+      } else if (g.mode === "pending") {
+        const dist = Math.hypot(cx - g.cx, cy - g.cy);
+        if (dist > 4) {
+          g.mode = "move";
+          g.moved = 0;
+        }
       } else if (g.mode === "lasso") {
-        g.x1 = cx;
-        g.y1 = cy;
-        setLasso({ x0: g.x0, y0: g.y0, x1: cx, y1: cy });
+        const lp = vpLocal(cx, cy);
+        g.x1 = lp.x;
+        g.y1 = lp.y;
+        setLasso({ x0: g.x0, y0: g.y0, x1: lp.x, y1: lp.y });
       } else if (g.mode === "rotate") {
         const it = itemsRef.current.find((i) => i.id === g.id);
         if (!it) return;
-        const c = worldToScreen(g.cx0, g.cy0);
+        const c = worldToClient(g.cx0, g.cy0);
         const a1 = Math.atan2(cy - c.y, cx - c.x);
         const deg = g.startRot + ((a1 - g.startAngle) * 180) / Math.PI;
         updateItem(g.id, { rotation: deg });
@@ -565,8 +620,11 @@ export default function App() {
         setDraft(null);
       } else if (g.mode === "lasso") {
         setLasso(null);
-        const L = Math.min(g.x0, g.x1), R = Math.max(g.x0, g.x1);
-        const T = Math.min(g.y0, g.y1), B = Math.max(g.y0, g.y1);
+        const r = vpRect();
+        const L = Math.min(g.x0, g.x1) + r.left;
+        const R = Math.max(g.x0, g.x1) + r.left;
+        const T = Math.min(g.y0, g.y1) + r.top;
+        const B = Math.max(g.y0, g.y1) + r.top;
         if (Math.abs(R - L) >= 4 || Math.abs(B - T) >= 4) {
           const picked = itemsRef.current
             .filter((it) => {
@@ -575,9 +633,9 @@ export default function App() {
             })
             .map((it) => it.id);
           setSelection(picked);
-        } else {
-          setLasso(null);
         }
+      } else if (g.mode === "pending") {
+        /* click only — selection already set */
       }
     }
 
@@ -599,11 +657,12 @@ export default function App() {
       e.preventDefault();
       if (e.ctrlKey || e.metaKey) {
         const factor = Math.exp(-e.deltaY * 0.0016);
+        const local = vpLocal(e.clientX, e.clientY);
         setCamera((c) => {
           const scale = clamp(c.scale * factor, 0.12, 4.5);
-          const wx = (e.clientX - c.x) / c.scale;
-          const wy = (e.clientY - c.y) / c.scale;
-          return { scale, x: e.clientX - wx * scale, y: e.clientY - wy * scale };
+          const wx = (local.x - c.x) / c.scale;
+          const wy = (local.y - c.y) / c.scale;
+          return { scale, x: local.x - wx * scale, y: local.y - wy * scale };
         });
       } else {
         setCamera((c) => ({ ...c, x: c.x - e.deltaX, y: c.y - e.deltaY }));
@@ -625,8 +684,8 @@ export default function App() {
       }
       if (typing) return;
       if (e.key === "Escape") {
+        finishEditing();
         setSelection([]);
-        setEditing(null);
         setLasso(null);
       }
       if ((e.key === "Delete" || e.key === "Backspace") && selRef.current.length) {
@@ -679,7 +738,7 @@ export default function App() {
       const text = e.clipboardData?.getData("text/plain")?.trim();
       if (text) {
         e.preventDefault();
-        const center = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
+        const center = viewportCenterWorld();
         const id = uid();
         setItems((arr) => [...arr, normalizeItem({ id, type: "text", x: center.x, y: center.y, text, w: 360 })]);
         setSelection([id]);
@@ -721,7 +780,13 @@ export default function App() {
   }
 
   async function runOperator(op, targetIds) {
-    const ids = targetIds || selRef.current;
+    let ids = targetIds || selRef.current;
+    if (!ids.length) {
+      const candidates = itemsRef.current.filter(
+        (it) => (it.type === "text" && it.text?.trim()) || it.type === "image"
+      );
+      if (candidates.length === 1) ids = [candidates[0].id];
+    }
     const idSet = new Set(ids);
     const texts = itemsRef.current
       .filter((it) => idSet.has(it.id) && it.type === "text" && it.text?.trim())
@@ -729,14 +794,15 @@ export default function App() {
     const image = itemsRef.current.find((it) => idSet.has(it.id) && it.type === "image")?.src || null;
     const material = texts.join("\n\n———\n\n");
     if (!material && !image) {
-      showToast("select text or an image, or drop a transform onto it");
+      showToast("click material on the board to select it, then apply a transform");
       return;
     }
     setSelection(ids);
     setAiBusy(true);
     try {
       const out = await applyOpTree(op, material, image);
-      placeResults([out]);
+      applyTransformResult(out, ids);
+      showToast(`applied · ${op.name}`);
     } catch (err) {
       showToast(err.message || "Claude did not answer");
     } finally {
@@ -852,13 +918,13 @@ export default function App() {
 
   function itemScreenBBox(it) {
     if (it.type === "stroke") {
-      const xs = it.points.map((p) => worldToScreen(p.x, p.y).x);
-      const ys = it.points.map((p) => worldToScreen(p.x, p.y).y);
+      const xs = it.points.map((p) => worldToClient(p.x, p.y).x);
+      const ys = it.points.map((p) => worldToClient(p.x, p.y).y);
       return { left: Math.min(...xs), top: Math.min(...ys), right: Math.max(...xs), bottom: Math.max(...ys) };
     }
     const el = document.querySelector(`[data-item="${it.id}"]`);
     if (!el) {
-      const p = worldToScreen(it.x, it.y);
+      const p = worldToClient(it.x, it.y);
       return { left: p.x, top: p.y, right: p.x + 10, bottom: p.y + 10 };
     }
     const r = el.getBoundingClientRect();
@@ -871,8 +937,8 @@ export default function App() {
       const it = list[i];
       if (it.type === "stroke") {
         for (let k = 1; k < it.points.length; k++) {
-          const a = worldToScreen(it.points[k - 1].x, it.points[k - 1].y);
-          const b = worldToScreen(it.points[k].x, it.points[k].y);
+          const a = worldToClient(it.points[k - 1].x, it.points[k - 1].y);
+          const b = worldToClient(it.points[k].x, it.points[k].y);
           if (distToSeg(cx, cy, a.x, a.y, b.x, b.y) <= Math.max(8, it.width * camRef.current.scale * 0.7)) return it;
         }
       } else {
@@ -890,8 +956,8 @@ export default function App() {
     let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
     for (const it of sel) {
       const bb = itemScreenBBox(it);
-      const a = screenToWorld(bb.left, bb.top);
-      const b = screenToWorld(bb.right, bb.bottom);
+      const a = clientToWorld(bb.left, bb.top);
+      const b = clientToWorld(bb.right, bb.bottom);
       minx = Math.min(minx, a.x);
       miny = Math.min(miny, a.y);
       maxx = Math.max(maxx, b.x);
@@ -903,23 +969,27 @@ export default function App() {
   // ---- pointer gestures on the board ----
   function onPointerDown(e) {
     if (e.button !== 0) return;
-    if (e.target.closest?.(".xform-handle, .board-rail, .dock, .zoom, .palette")) return;
+    if (e.target.closest?.(".xform-handle, .xform-screen-layer, .board-rail, .dock, .zoom, .palette, .op-drag-grip")) return;
     const cx = e.clientX;
     const cy = e.clientY;
-    const w = screenToWorld(cx, cy);
     const panning = spaceRef.current || toolRef.current === "hand";
     const t = toolRef.current;
 
-    if (editing) setEditing(null);
+    if (!e.target.closest?.(".board-text.editing")) finishEditing();
+
+    const w = clientToWorld(cx, cy);
+    const lp = vpLocal(cx, cy);
 
     if (panning) {
       gesture.current = { mode: "pan", cx, cy, cam: { ...camRef.current } };
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
       return;
     }
 
     if (t === "pen" || t === "marker") {
       gesture.current = { mode: "draw", marker: t === "marker", points: [w] };
       setDraft({ points: [w], marker: t === "marker" });
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
       return;
     }
 
@@ -927,12 +997,13 @@ export default function App() {
       gesture.current = { mode: "erase" };
       const hit = itemAtPoint(cx, cy);
       if (hit) setItems((arr) => arr.filter((it) => it.id !== hit.id));
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
       return;
     }
 
     if (t === "text") {
       const id = uid();
-      setItems((arr) => [...arr, normalizeItem({ id, type: "text", x: w.x, y: w.y - 14, text: "", w: 360 })]);
+      setItems((arr) => [...arr, normalizeItem({ id, type: "text", x: w.x, y: w.y, text: "", w: 360 })]);
       setSelection([id]);
       setEditing(id);
       setTool("select");
@@ -950,11 +1021,11 @@ export default function App() {
         ? selRef.current
         : [hit.id];
       setSelection(nextSel);
-      gesture.current = { mode: "move", cx, cy, ids: nextSel, moved: 0, hitId: hit.id };
+      gesture.current = { mode: "pending", cx, cy, ids: nextSel, hitId: hit.id };
     } else {
       if (!e.shiftKey) setSelection([]);
-      gesture.current = { mode: "lasso", x0: cx, y0: cy, x1: cx, y1: cy };
-      setLasso({ x0: cx, y0: cy, x1: cx, y1: cy });
+      gesture.current = { mode: "lasso", x0: lp.x, y0: lp.y, x1: lp.x, y1: lp.y };
+      setLasso({ x0: lp.x, y0: lp.y, x1: lp.x, y1: lp.y });
     }
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -989,7 +1060,7 @@ export default function App() {
   async function addImage(file, at) {
     try {
       const { src, w, h } = await fileToImage(file);
-      const center = at || screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
+      const center = at || viewportCenterWorld();
       const scale = Math.min(1, 260 / w);
       const id = uid();
       setItems((arr) => [...arr, normalizeItem({ id, type: "image", x: center.x, y: center.y, w: Math.round(w * scale), h: Math.round(h * scale), src, rotation: 0, scale: 1 })]);
@@ -1008,6 +1079,8 @@ export default function App() {
 
   // double-click: edit an existing text, or write a new one
   function onDoubleClick(e) {
+    if (e.target.closest?.(".board-rail, .dock, .zoom, .palette")) return;
+    finishEditing();
     const hit = itemAtPoint(e.clientX, e.clientY);
     if (hit) {
       if (hit.type === "text") {
@@ -1016,9 +1089,9 @@ export default function App() {
       }
       return;
     }
-    const w = screenToWorld(e.clientX, e.clientY);
+    const w = clientToWorld(e.clientX, e.clientY);
     const id = uid();
-    setItems((arr) => [...arr, normalizeItem({ id, type: "text", x: w.x, y: w.y - 14, text: "" })]);
+    setItems((arr) => [...arr, normalizeItem({ id, type: "text", x: w.x, y: w.y, text: "" })]);
     setSelection([id]);
     setEditing(id);
   }
@@ -1037,18 +1110,33 @@ export default function App() {
 
   function placeResults(texts) {
     const bb = selectionWorldBBox();
-    const startX = bb ? bb.minx : screenToWorld(window.innerWidth / 2, 200).x;
-    let y = bb ? bb.maxy + 60 : screenToWorld(0, 240).y;
+    const center = viewportCenterWorld();
+    const startX = bb ? bb.minx : center.x;
+    let y = bb ? bb.maxy + 60 : center.y;
     const newIds = [];
     const newItems = texts.map((t) => {
       const id = uid();
       newIds.push(id);
-      const item = { id, type: "text", x: startX, y, text: stripMd(t) };
-      y += 46 + Math.min(220, stripMd(t).length * 0.32);
-      return item;
+      const text = stripMd(t);
+      const w = Math.min(520, Math.max(280, Math.round(text.length * 0.55 + 180)));
+      return normalizeItem({ id, type: "text", x: startX, y, text, w });
     });
     setItems((arr) => [...arr, ...newItems]);
     setSelection(newIds);
+  }
+
+  function applyTransformResult(out, ids) {
+    const clean = stripMd(out || "").trim();
+    if (!clean) return;
+    const idSet = new Set(ids);
+    const sel = itemsRef.current.filter((it) => idSet.has(it.id));
+    const textOnly = sel.length === 1 && sel[0].type === "text" && !sel.some((it) => it.type === "image");
+    if (textOnly) {
+      updateItem(sel[0].id, { text: clean });
+      setSelection([sel[0].id]);
+      return;
+    }
+    placeResults([clean]);
   }
 
   async function runAI(prompt, { multi = false } = {}) {
@@ -1069,7 +1157,7 @@ export default function App() {
           .filter((l) => l.length > 1);
         placeResults(parts.length ? parts : [out]);
       } else {
-        placeResults([out]);
+        applyTransformResult(out, selRef.current);
       }
     } catch (err) {
       showToast(err.message || "Claude did not answer");
@@ -1096,7 +1184,7 @@ export default function App() {
   const selBBox = selection.length ? selectionWorldBBox() : null;
   const selItem = selection.length === 1 ? items.find((it) => it.id === selection[0]) : null;
   const canTransform = selItem && (selItem.type === "text" || selItem.type === "image");
-  const aiMenuPos = selBBox && !editing && !gesture.current ? worldToScreen(selBBox.minx, selBBox.miny) : null;
+  const aiMenuPos = selBBox && !editing && !gesture.current ? worldToClient(selBBox.minx, selBBox.miny) : null;
   const cursorClass =
     spaceDown || tool === "hand"
       ? "cur-grab"
@@ -1205,7 +1293,7 @@ export default function App() {
             return;
           }
           if (e.dataTransfer.files?.length) {
-            const w = screenToWorld(e.clientX, e.clientY);
+            const w = clientToWorld(e.clientX, e.clientY);
             addImage(e.dataTransfer.files[0], w);
           }
         }}
@@ -1270,38 +1358,8 @@ export default function App() {
               )
             )}
 
-          {/* transform handles for single selection */}
-          {canTransform && !editing && (
-            <TransformHandles
-              item={selItem}
-              onRotateStart={(e) => {
-                const c = itemCenter(selItem);
-                const sc = worldToScreen(c.x, c.y);
-                startHandleGesture(e, "rotate", {
-                  id: selItem.id,
-                  cx0: c.x,
-                  cy0: c.y,
-                  startRot: selItem.rotation || 0,
-                  startAngle: Math.atan2(e.clientY - sc.y, e.clientX - sc.x),
-                });
-              }}
-              onResizeStart={(e, corner) => {
-                startHandleGesture(e, "resize", {
-                  id: selItem.id,
-                  corner,
-                  startW: itemWidth(selItem),
-                  startH: itemHeight(selItem),
-                  aspect: selItem.type === "image",
-                });
-              }}
-              onScaleStart={(e) => {
-                startHandleGesture(e, "scale", { id: selItem.id, startScale: selItem.scale ?? 1 });
-              }}
-            />
-          )}
-
           {/* selection box */}
-          {selBBox && selection.length > 0 && (
+          {selBBox && selection.length > 0 && !canTransform && (
             <div
               className="sel-box"
               style={{
@@ -1314,7 +1372,7 @@ export default function App() {
           )}
         </div>
 
-        {/* live lasso (screen space) */}
+        {/* live lasso (viewport-local space) */}
         {lasso && (
           <div
             className="lasso"
@@ -1327,6 +1385,36 @@ export default function App() {
           />
         )}
       </div>
+
+      {/* screen-space transform handles (outside zoomed world) */}
+      {canTransform && !editing && (
+        <ScreenTransformHandles
+          bbox={itemScreenBBox(selItem)}
+          onRotateStart={(e) => {
+            const c = itemCenter(selItem);
+            const sc = worldToClient(c.x, c.y);
+            startHandleGesture(e, "rotate", {
+              id: selItem.id,
+              cx0: c.x,
+              cy0: c.y,
+              startRot: selItem.rotation || 0,
+              startAngle: Math.atan2(e.clientY - sc.y, e.clientX - sc.x),
+            });
+          }}
+          onResizeStart={(e, corner) => {
+            startHandleGesture(e, "resize", {
+              id: selItem.id,
+              corner,
+              startW: itemWidth(selItem),
+              startH: itemHeight(selItem),
+              aspect: selItem.type === "image",
+            });
+          }}
+          onScaleStart={(e) => {
+            startHandleGesture(e, "scale", { id: selItem.id, startScale: selItem.scale ?? 1 });
+          }}
+        />
+      )}
 
       {/* brand */}
       <div className="brand">lens</div>
@@ -1380,11 +1468,11 @@ export default function App() {
 
       {/* zoom controls */}
       <div className="zoom">
-        <button onClick={() => setCamera((c) => zoomBy(c, 1 / 1.2))}>−</button>
+        <button onClick={() => setCamera((c) => zoomCamera(c, 1 / 1.2))}>−</button>
         <button className="zoom-pct" onClick={() => setCamera((c) => ({ ...c, scale: 1 }))}>
           {Math.round(camera.scale * 100)}%
         </button>
-        <button onClick={() => setCamera((c) => zoomBy(c, 1.2))}>+</button>
+        <button onClick={() => setCamera((c) => zoomCamera(c, 1.2))}>+</button>
       </div>
       </div>
 
@@ -1409,20 +1497,16 @@ export default function App() {
   );
 }
 
-function zoomBy(c, factor) {
-  const scale = clamp(c.scale * factor, 0.12, 4.5);
-  const cx = window.innerWidth / 2;
-  const cy = window.innerHeight / 2;
-  const wx = (cx - c.x) / c.scale;
-  const wy = (cy - c.y) / c.scale;
-  return { scale, x: cx - wx * scale, y: cy - wy * scale };
-}
-
 function BoardText({ item, selected, editing, onCommit }) {
   const ref = useRef(null);
-  const style = itemStyle(item);
+  const seeded = useRef(false);
+
   useEffect(() => {
     if (editing && ref.current) {
+      if (!seeded.current) {
+        ref.current.innerText = item.text || "";
+        seeded.current = true;
+      }
       ref.current.focus();
       const r = document.createRange();
       r.selectNodeContents(ref.current);
@@ -1431,7 +1515,10 @@ function BoardText({ item, selected, editing, onCommit }) {
       s.removeAllRanges();
       s.addRange(r);
     }
-  }, [editing]);
+    if (!editing) seeded.current = false;
+  }, [editing, item.id]);
+
+  const style = itemStyle(item);
 
   if (editing) {
     return (
@@ -1443,16 +1530,17 @@ function BoardText({ item, selected, editing, onCommit }) {
         suppressContentEditableWarning
         style={style}
         onPointerDown={(e) => e.stopPropagation()}
-        onDoubleClick={(e) => e.stopPropagation()}
-        onBlur={() => onCommit(ref.current ? ref.current.innerText : item.text)}
         onKeyDown={(e) => {
-          if (e.key === "Escape" || (e.key === "Enter" && (e.metaKey || e.ctrlKey))) {
-            e.preventDefault();
-            onCommit(ref.current.innerText);
-          }
           e.stopPropagation();
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onCommit(ref.current?.innerText ?? "");
+          }
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            onCommit(ref.current?.innerText ?? "");
+          }
         }}
-        dangerouslySetInnerHTML={{ __html: escapeHtml(item.text) }}
       />
     );
   }
@@ -1467,49 +1555,39 @@ function BoardText({ item, selected, editing, onCommit }) {
   );
 }
 
-function TransformHandles({ item, onRotateStart, onResizeStart, onScaleStart }) {
-  const w = itemWidth(item) * (item.scale ?? 1);
-  const h = itemHeight(item) * (item.scale ?? 1);
-  const rot = item.rotation || 0;
-  const sc = item.scale ?? 1;
+function ScreenTransformHandles({ bbox, onRotateStart, onResizeStart, onScaleStart }) {
+  const w = bbox.right - bbox.left;
+  const h = bbox.bottom - bbox.top;
+  const cx = (bbox.left + bbox.right) / 2;
   const handles = [
-    ["nw", 0, 0],
-    ["ne", w, 0],
-    ["se", w, h],
-    ["sw", 0, h],
+    ["nw", bbox.left, bbox.top],
+    ["ne", bbox.right, bbox.top],
+    ["se", bbox.right, bbox.bottom],
+    ["sw", bbox.left, bbox.bottom],
   ];
   return (
-    <div
-      className="xform-frame"
-      style={{
-        position: "absolute",
-        left: item.x,
-        top: item.y,
-        width: w,
-        height: h,
-        transform: `rotate(${rot}deg) scale(${sc})`,
-        transformOrigin: `${w / 2}px ${h / 2}px`,
-        pointerEvents: "none",
-      }}
-    >
-      <div className="xform-outline" />
-      {handles.map(([corner, hx, hy]) => (
+    <div className="xform-screen-layer">
+      <div
+        className="xform-outline-screen"
+        style={{ left: bbox.left, top: bbox.top, width: w, height: h }}
+      />
+      {handles.map(([corner, x, y]) => (
         <div
           key={corner}
           className="xform-handle corner"
-          style={{ left: hx - 5, top: hy - 5 }}
+          style={{ left: x - 5, top: y - 5 }}
           onPointerDown={(e) => onResizeStart(e, corner)}
         />
       ))}
       <div
         className="xform-handle rotate"
-        style={{ left: w / 2 - 5, top: -28 }}
+        style={{ left: cx - 6, top: bbox.top - 30 }}
         onPointerDown={onRotateStart}
         title="rotate"
       />
       <div
         className="xform-handle scale"
-        style={{ left: w + 8, top: h / 2 - 5 }}
+        style={{ left: bbox.right + 6, top: bbox.top + h / 2 - 5 }}
         onPointerDown={onScaleStart}
         title="scale"
       />
@@ -1528,13 +1606,16 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onApply, onEdit, busy,
   const open = expanded[op.id];
   return (
     <div className="op-card-wrap">
-      <div
-        className="op-card"
-        draggable={!busy}
-        onDragStart={(e) => startOpDrag(e, op)}
-        title="drag onto canvas · click to apply"
-      >
+      <div className="op-card" title="click to apply · drag ⠿ onto canvas">
         <div className="op-card-row">
+          <span
+            className="op-drag-grip"
+            draggable={!busy}
+            onDragStart={(e) => startOpDrag(e, op)}
+            title="drag onto canvas"
+          >
+            ⠿
+          </span>
           <button className="op-card-apply" disabled={busy} onClick={() => onApply(op)}>
             <span className="op-card-name">{op.name}</span>
             {op.description && <span className="op-card-desc">{op.description}</span>}
@@ -1568,10 +1649,16 @@ function DraggableStep({ step, opMap, expanded, onToggle, onApply, onEdit, busy,
     <div className="op-step" style={{ paddingLeft: depth * 10 }}>
       <div
         className={"op-step-chip" + (isLeaf ? " leaf" : "")}
-        draggable={!busy}
-        onDragStart={(e) => startOpDrag(e, step)}
-        title="drag onto canvas · click to apply"
+        title="click to apply · drag ⠿ onto canvas"
       >
+        <span
+          className="op-drag-grip"
+          draggable={!busy}
+          onDragStart={(e) => startOpDrag(e, step)}
+          title="drag onto canvas"
+        >
+          ⠿
+        </span>
         <button className="op-step-apply" disabled={busy} onClick={() => onApply(step)}>
           <span className="op-step-name">{step.name}</span>
           {step.description && <span className="op-step-desc">{step.description}</span>}
