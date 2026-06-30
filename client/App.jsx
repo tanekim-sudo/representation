@@ -1,260 +1,326 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const SEEDS_KEY = "lens.seeds.v2";
-const EDGES_KEY = "lens.edges.v2";
-const CAMERA_KEY = "lens.camera.v2";
-const SYMBOLS_KEY = "lens.operators.v2";
-const NODES_KEY = "lens.savednodes.v1";
-const STRUCTSEQ_KEY = "lens.structseq.v1";
+const ITEMS_KEY = "lens.board.items.v1";
+const CAMERA_KEY = "lens.board.camera.v1";
+const OPERATORS_KEY = "lens.board.operators.v1";
+const OLD_SEEDS_KEY = "lens.seeds.v2"; // migrate ideas from the old node version
 
-const MAX_RESPONSES = 6;
-const CANVAS_SIZE = 256;
-
-const STAR_COLORS = ["#20201d"];
-
-const EMOJI_CHOICES = [
-  "✨", "📝", "🔍", "🌍", "🎯", "💡", "🧹", "📌", "🔥", "🧠",
-  "⚡", "🪄", "📖", "✂️", "🎨", "🧪", "🗜️", "💬", "🔧", "⭐",
-];
-const COLOR_CHOICES = ["#20201d"];
-const PEN_COLORS = ["#20201d", "#46443c", "#6b6760", "#928d80", "#b8b2a3"];
-
-// The primitive grammar of idea-operations. Arities:
-//   1            unary — transforms the selected idea into one child
-//   "many"       unary fan-out — produces several children
-//   2            binary — needs a second idea picked on the canvas
-//   "many-select" collapses several picked ideas into one
-//   "analysis"   a perceptual lens — emits an analysis node, doesn't alter meaning
-const OPS = {
-  // ── primitives (the + - x / of ideas) ──
-  reorient: { sym: "↺", name: "reorient", arity: 1, group: "primitive", color: "#8ab4ff",
-    prompt: "Reorient this idea: shift its frame of reference or vantage point so the same thing is seen from a fundamentally different angle. Return only the reoriented idea, no preamble." },
-  integrate: { sym: "⊕", name: "integrate", arity: 2, group: "primitive", color: "#34d399",
-    prompt: "Integrate these two ideas into one unified idea that fuses their structures into a single coherent whole. Return only the integrated idea, no preamble." },
-  release: { sym: "⊖", name: "release", arity: 1, group: "primitive", color: "#fca5a5",
-    prompt: "Release this idea: identify its central constraint, assumption, or excess and strip it away — return what remains, lighter and freer, once that is let go. Return only the resulting idea, no preamble." },
-  reciprocate: { sym: "⇄", name: "reciprocate", arity: 2, group: "primitive", color: "#f0abfc",
-    prompt: "Reciprocate: articulate the mutual, two-way exchange between these two ideas — what each gives to and receives from the other, as a single relational idea. Return only that idea, no preamble." },
-  amplify: { sym: "↑", name: "amplify", arity: 1, group: "primitive", color: "#fcd34d",
-    prompt: "Amplify this idea: intensify it, raise its stakes, push it toward its boldest and most extreme form. Return only the amplified idea, no preamble." },
-  reduce: { sym: "↓", name: "reduce", arity: 1, group: "primitive", color: "#7dd3fc",
-    prompt: "Reduce this idea to its minimal essential core — the smallest form that still carries its full meaning. Return only the reduced idea, no preamble." },
-  harmonize: { sym: "≈", name: "harmonize", arity: 2, group: "primitive", color: "#5eead4",
-    prompt: "Harmonize these two ideas: resolve their tension into a balanced form in which both coexist without contradiction. Return only the harmonized idea, no preamble." },
-  differentiate: { sym: "✦", name: "differentiate", arity: "many", group: "primitive", color: "#c084fc",
-    prompt: "Differentiate this idea into its distinct facets — the meaningfully different forms or aspects latent within it. Return each on its own line, no numbering, no bullets, no preamble." },
-  iterate: { sym: "⟳", name: "iterate", arity: 1, group: "primitive", color: "#60a5fa",
-    prompt: "Iterate this idea: apply one more refining pass, tightening and improving it as if producing the next draft. Return only the iterated idea, no preamble." },
-  transcend: { sym: "⤴", name: "transcend", arity: 1, group: "primitive", color: "#a78bfa",
-    prompt: "Transcend this idea: rise one level of abstraction to the larger principle or paradigm it is an instance of. Return only the transcendent idea, no preamble." },
-
-  // ── maps (perceptual lenses) ──
-  map: { sym: "❋", name: "map", arity: "analysis", group: "map", color: "#22d3ee",
-    prompt: "Search across ALL domains (physics, biology, economics, art, theology, engineering, social systems, mathematics...) for problems and structures with the SAME deep structure as this idea. Return, with short headers:\n• Deep structure: the abstract pattern in one line\n• Isomorphisms: 3-5 concrete structural matches in other domains\n• Solution families: the kinds of solutions those domains already use\n• Latent equivalences: non-obvious things this idea is secretly the same as\nBe specific and concrete." },
-  spacemap: { sym: "◎", name: "spacemap", arity: "analysis", group: "map", color: "#fb7185",
-    prompt: "Locate this idea within the cultural solution manifold — how explored this region already is. Return, with short headers:\n• Novelty: how closely it resembles what has already been done (low/med/high + one line)\n• Nearest neighbors: the closest prior art or existing analogues\n• Density: how crowded / well-trodden this region of idea-space is\n• Gradient to novelty: the specific direction that is most unexplored from here\nBe specific and concrete." },
-
-  // ── interactions (composed moves) ──
-  extend: { sym: "⟿", name: "extend", arity: 1, group: "interaction", color: "#34d399",
-    prompt: "Continue this idea forward: carry its line of thought one decisive step further, as the natural next move along the same trajectory. Return only the continued idea, no preamble." },
-  split: { sym: "⨁", name: "split", arity: "many", group: "interaction", color: "#fcd34d",
-    prompt: "Find the central tension inside this idea and fork it there into 2-3 divergent ideas, each fully committing to one side of that tension. Return each on its own line, no numbering, no bullets, no preamble." },
-  resonate: { sym: "∿", name: "resonate", arity: 1, group: "interaction", color: "#f0abfc",
-    prompt: "Take the deep structure of this idea and re-embody it in a COMPLETELY different domain (e.g. recast a social idea as biology, music, or geology). Start by naming the target domain, then state the resonant idea in one or two sentences. Return only that, no preamble." },
-  stabilize: { sym: "⊙", name: "stabilize", arity: "many-select", group: "interaction", color: "#5e6b80",
-    prompt: "Collapse these branches into the shared structure they hold in common — the stable invariant underneath all of them. Return only that shared structure, as a single idea, no preamble." },
-
-  // ── discovery (the discovery engine) ──
-  sameness: { sym: "⟁", name: "find hidden sameness", arity: "many-select", group: "discovery", color: "#b5832b",
-    prompt: "" },
-};
-
-const OP_GROUPS = [
-  { key: "primitive", label: "primitives" },
-  { key: "interaction", label: "interactions" },
-  { key: "map", label: "maps" },
-  { key: "discovery", label: "discovery" },
-];
-
-// Prompt for the discovery engine: find the deep isomorphism across N disparate things.
-function samenessPrompt(items) {
-  const body = items
-    .map((t, i) => `(${i + 1}) ${t}`)
-    .join("\n");
-  return `You are a discovery engine that finds HIDDEN SAMENESS — the deep structural isomorphism shared by seemingly unrelated things.
-
-Here are ${items.length} things:
-${body}
-
-Find the single deepest structure they all share — the abstract pattern that is secretly the same across all of them. Ignore surface similarity; reach for the invariant mechanism.
-
-Return EXACTLY this format, no preamble:
-NAME: <a vivid 2-5 word name for the discovered structure>
-STRUCTURE: <one or two sentences stating the shared deep structure precisely>
-MAPPING:
-${items.map((_, i) => `- (${i + 1}) → <how this thing instantiates the structure, one line>`).join("\n")}
-WHY IT MATTERS: <one sentence on what this isomorphism unlocks or predicts>`;
-}
-
-function parseSameness(out) {
-  const grab = (re) => {
-    const m = out.match(re);
-    return m ? m[1].trim() : "";
-  };
-  const name = grab(/NAME:\s*(.+)/i);
-  return { name: name || "Hidden Structure", body: out.trim() };
-}
-
-function opsIn(group) {
-  return Object.entries(OPS)
-    .filter(([, o]) => o.group === group)
-    .map(([k, o]) => ({ key: k, ...o }));
-}
-
-// Provenance / formation metadata for replay (invisible until a node is replayed)
-const VERB_META = {
-  plant: { label: "planted", color: "#5e6b80", symbol: "✦" },
-  write: { label: "written", color: "#cbd5ff", symbol: "✎" },
-  operator: { label: "operator", color: "#8ab4ff", symbol: "◈" },
-  // legacy kinds from earlier versions
-  evolve: { label: "evolved", color: "#a78bfa", symbol: "❂" },
-  branch: { label: "branched", color: "#5eead4", symbol: "❧" },
-  combine: { label: "integrated", color: "#34d399", symbol: "⊕" },
-};
-Object.entries(OPS).forEach(([k, o]) => {
-  VERB_META[k] = { label: o.name, color: o.color, symbol: o.sym };
-});
-
-// ── Highlighter grammar: operations on extracted thought-particles ──
-// kind: extract (instant, no AI) | one | fan | binary | analysis-binary
-const FRAG_OPS = {
-  isolate: { sym: "⟐", name: "isolate", kind: "extract", color: "#5e6b80",
-    hint: "pull this fragment out as its own particle" },
-  collide: { sym: "⚡", name: "collide", kind: "binary", color: "#fcd34d",
-    hint: "crash this into another fragment",
-    prompt: "These two thought-fragments collide. Return the single new idea that emerges from their collision — the spark, friction, or fusion produced when they crash together. Return only that idea, no preamble." },
-  synthesize: { sym: "⊕", name: "synthesize", kind: "one", color: "#34d399",
-    hint: "grow this fragment into a fuller idea",
-    prompt: "Synthesize this fragment into a single fuller, realized idea — develop what it is reaching toward without padding. Return only the idea, no preamble." },
-  mutate: { sym: "✦", name: "mutate", kind: "fan", color: "#c084fc",
-    hint: "spawn mutations of this fragment",
-    prompt: "Mutate this fragment into 3 distinct variations — each a different mutation of the same seed-thought, pushing it in a different direction. Return each on its own line, no numbering, no bullets, no preamble." },
-  compare: { sym: "⇄", name: "compare", kind: "analysis-binary", color: "#22d3ee",
-    hint: "compare this with another fragment",
-    prompt: "Compare these two thought-fragments. Return, with short headers:\n• Shared structure\n• Key differences\n• The tension between them\n• What each reveals about the other\nBe concrete." },
-};
-const FRAG_ORDER = ["isolate", "collide", "synthesize", "mutate", "compare"];
-Object.entries(FRAG_OPS).forEach(([k, o]) => {
-  VERB_META[k] = { label: o.name, color: o.color, symbol: o.sym };
-});
-
-// What a floating thing can be. Everything is matter in the field.
 const INK = "#20201d";
-const KINDS = {
-  idea: { glyph: "✦", color: INK, label: "idea" },
-  question: { glyph: "❓", color: INK, label: "question" },
-  experiment: { glyph: "⚗", color: INK, label: "experiment" },
-  fragment: { glyph: "❖", color: INK, label: "fragment" },
-  structure: { glyph: "⬡", color: INK, label: "structure" },
-  observation: { glyph: "◉", color: INK, label: "observation" },
-  memory: { glyph: "❁", color: INK, label: "memory" },
-  book: { glyph: "▤", color: INK, label: "book" },
-  person: { glyph: "☻", color: INK, label: "person" },
-  experience: { glyph: "✷", color: INK, label: "experience" },
-};
-const KIND_ORDER = Object.keys(KINDS);
+const PEN_W = 2.4; // world units
+const MARKER_W = 16;
 
-// Rotating prompts for the entry portal.
-const ENTRY_EXAMPLES = [
-  "discipleship",
-  "marriage",
-  "exercise",
-  "startup building",
-  "learning piano",
+const DEFAULT_OPERATORS = [
+  { id: "op-sharpen", name: "sharpen", prompt: "Rewrite this more sharply and precisely, preserving the meaning. Return only the rewritten text." },
+  { id: "op-expand", name: "expand", prompt: "Expand this idea with depth, specifics and a fresh angle. Return only the expanded text." },
+  { id: "op-counter", name: "counter", prompt: "Give the single strongest counter-argument or opposing view to this. Return only that argument." },
+  { id: "op-simplify", name: "simplify", prompt: "Explain this as simply and concretely as possible, like to a smart friend. Return only the explanation." },
 ];
 
-const BINARY_ARITIES = new Set([2]);
+const ONBOARDED_KEY = "lens.onboarded.v1";
 
-function lastText(h) {
-  return h && h.length ? h[h.length - 1].to ?? "" : "";
-}
-
-// Capture a manual edit as a formation stage if the text drifted since last step
-function withWrite(seed) {
-  const h = seed.history && seed.history.length ? seed.history : [{ kind: "plant", op: null, to: "" }];
-  if ((seed.text || "") !== lastText(h)) return [...h, { kind: "write", op: null, to: seed.text || "" }];
-  return h;
-}
-
-const DEFAULT_SYMBOLS = [
-  {
-    id: "op-summarize",
-    name: "Distill",
-    emoji: "🌀",
-    color: "#22d3ee",
-    image: null,
-    strokes: [],
-    prompt: "Distill this into its sharpest, most essential form.",
-    count: 1,
-  },
-  {
-    id: "op-question",
-    name: "Question",
-    emoji: "💬",
-    color: "#fcd34d",
-    image: null,
-    strokes: [],
-    prompt: "Ask the most provocative questions this idea raises.",
-    count: 3,
-  },
+const ROLES = [
+  "investor",
+  "founder",
+  "tutor",
+  "artist",
+  "researcher",
+  "writer",
+  "designer",
+  "therapist",
+  "student",
+  "strategist",
 ];
 
-function uid() {
-  return "s-" + Math.random().toString(36).slice(2, 9);
+const uid = () => Math.random().toString(36).slice(2, 10);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+function parseJSON(raw) {
+  let s = (raw || "").trim();
+  const a = s.indexOf("{");
+  const b = s.lastIndexOf("}");
+  if (a !== -1 && b !== -1) s = s.slice(a, b + 1);
+  return JSON.parse(s);
+}
+
+// The system prompt teaches Claude exactly how lens works, so every function
+// it designs is composable, realistic, and decomposed down to editable primitives.
+const LENS_SYSTEM = `You are the function-architect for "lens", an infinite thinking whiteboard where a person operates on their own notes with AI.
+
+HOW LENS WORKS — internalize this completely:
+- The user selects some material on the board (text, or an image) and applies a FUNCTION to it. The function transforms that material and writes the result back onto the board. Material flows in; transformed material flows out.
+- A FUNCTION is a COMPOSITION, never a monolith. It is built from smaller functions, which are built from smaller functions, all the way down to PRIMITIVE OPERATORS. Functions comprise functions comprise functions.
+- A FUNCTION is executed as a PIPELINE: the output of each step becomes the input to the very next step. Therefore a decomposition is an ORDERED sequence in which each step does real work on the result of the previous one. Order matters; later steps may assume earlier steps already ran.
+- A PRIMITIVE OPERATOR is a LEAF: one atomic transformation, expressed as a precise instruction ("prompt") to you, the model. It receives the running text as its material and returns ONLY the transformed result — no preamble, no labels, no commentary, no meta-talk.
+- The user can open any function in a toolbox, see every sub-function and primitive nested inside it, and EDIT any primitive's prompt by hand. So every layer must be legible and self-explanatory, and every leaf must be a genuinely reusable, expertly engineered prompt that stands on its own.
+
+YOUR STANDARDS — non-negotiable:
+- TRUE USEFULNESS: design for the operations this specific person actually repeats in their real workflow, the high-leverage moves that save real time or raise real quality. No filler, no generic "brainstorm ideas" fluff.
+- REALISTIC: the pipeline should mirror how a sharp practitioner actually does the work, step by step, in the right order.
+- DECOMPOSE TO PRIMITIVES: keep breaking steps down until each leaf does exactly ONE clear thing. Prefer more, smaller, sharper primitives over a few vague mega-steps. A leaf that does two things must be split.
+- MAX-STRENGTH PROMPTS: write each leaf prompt to use Claude at full power — specific, demanding, role-aware instructions that produce expert-grade output. State exactly what to do with the input and exactly what to return. Bake in the relevant expertise, criteria, and format.
+- CLOSED PIPELINE: a leaf may only rely on "the input text" (whatever the previous step produced). Never require information the pipeline hasn't yet created.
+- STRUCTURE: composite nodes have "steps" and NO "prompt". Leaf nodes have "prompt" and NO "steps".
+- OUTPUT: return ONLY valid JSON. No markdown fences, no explanation outside the JSON.`;
+
+// summarize the user's personal library so Claude can tailor every prompt
+function summarizeLibrary(operators, opMap, { compact = false } = {}) {
+  if (!operators?.length) return "";
+  const tops = operators.filter((o) => o.top);
+  const lines = [];
+
+  if (tops.length) {
+    lines.push(compact ? "Functions:" : "Top-level functions:");
+    for (const t of tops.slice(0, compact ? 10 : 20)) {
+      let line = `• ${t.name}${t.description ? ` — ${t.description}` : ""}`;
+      if (!compact && t.kind === "pipeline" && t.steps?.length) {
+        const subs = t.steps.map((id) => opMap[id]?.name).filter(Boolean);
+        if (subs.length) line += `\n  steps: ${subs.join(" → ")}`;
+      }
+      lines.push(line);
+    }
+  }
+
+  const leaves = operators.filter((o) => (o.kind === "prompt" || !o.kind) && o.prompt);
+  if (leaves.length && !compact) {
+    lines.push("\nPrimitive transformation patterns:");
+    for (const p of leaves.slice(0, 30)) {
+      const snippet = p.prompt.slice(0, 110);
+      lines.push(`• "${p.name}": ${snippet}${p.prompt.length > 110 ? "…" : ""}`);
+    }
+  } else if (leaves.length && compact) {
+    lines.push(`Primitives: ${leaves.map((p) => p.name).slice(0, 24).join(", ")}`);
+  }
+
+  return lines.join("\n");
+}
+
+function librarySystem(operators, opMap) {
+  const summary = summarizeLibrary(operators, opMap);
+  if (!summary) return LENS_SYSTEM;
+  return `${LENS_SYSTEM}
+
+---
+THE USER'S PERSONAL LIBRARY — tailor every function, decomposition, and leaf prompt to this library.
+• Reuse its vocabulary, tone, and level of specificity.
+• Complement what already exists — do not duplicate names or purposes.
+• New primitives should feel like they belong alongside the patterns below.
+• When editing, preserve consistency with the rest of the library.
+
+${summary}`;
+}
+
+function executionSystem(operators, opMap, activeOp) {
+  const compact = summarizeLibrary(operators, opMap, { compact: true });
+  let sys =
+    "You execute a transformation on the user's thinking whiteboard. Return ONLY the transformed result — no preamble, labels, or commentary.";
+  if (activeOp?.name) {
+    sys += `\n\nActive transform: "${activeOp.name}"`;
+    if (activeOp.description) sys += ` — ${activeOp.description}`;
+  }
+  if (compact) {
+    sys += `\n\nThis user's personal library (match their style, vocabulary, and transformation patterns):\n${compact}`;
+  }
+  return sys;
+}
+
+function boardSystem(operators, opMap) {
+  const compact = summarizeLibrary(operators, opMap, { compact: true });
+  let sys =
+    "You operate on selected material from the user's thinking whiteboard. Return ONLY the requested result.";
+  if (compact) {
+    sys += `\n\nThis user's personal library of functions and transformations — align your output with their established patterns:\n${compact}`;
+  }
+  return sys;
+}
+
+// role/profession -> the most valuable cognitive functions to automate
+async function generateFunctionList(role, operators, opMap) {
+  const hasLib = operators?.length > 0;
+  const prompt = `The user is a: ${role}.
+
+Design the 10 single most valuable FUNCTIONS this person would want on their lens whiteboard — the repeated, high-leverage cognitive operations they perform on notes, ideas, drafts, data, or documents in their real day-to-day work. Think about their actual workflow and where AI gives the biggest lift.
+${hasLib ? "\nThey already have a personal library (see system context). Design NEW functions that complement it — do not duplicate existing names or purposes.\n" : ""}
+For each function give:
+- "name": 2-4 words, the verb-led operation (e.g. "Stress-test thesis", "Draft cold outreach").
+- "description": one plain sentence a beginner instantly understands, stating what material goes in and what comes out.
+
+Return ONLY JSON: {"functions":[{"name":"...","description":"..."}]} with exactly 10 functions, ordered from most to least frequently used.`;
+  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 2000 });
+  const j = parseJSON(out);
+  return Array.isArray(j.functions) ? j.functions.slice(0, 10) : [];
+}
+
+// decompose one function into a deep tree of sub-functions ending in primitives
+async function decomposeFunction(role, fn, operators, opMap) {
+  const prompt = `The user is a: ${role}.
+
+Decompose this ONE function into a deep tree of smaller functions, ending in primitive operators, exactly as lens executes them (a pipeline where each step's output feeds the next).
+Tailor every name, description, and leaf prompt to the user's personal library in the system context — reuse their vocabulary and match their existing transformation patterns where relevant.
+
+FUNCTION
+name: ${fn.name}
+description: ${fn.description}
+
+Requirements:
+- Break it into 2-5 ordered sub-functions that mirror how an expert ${role} actually performs this, in sequence.
+- Recursively decompose sub-functions wherever they still bundle more than one operation, going 2-4 layers deep, until every leaf is a PRIMITIVE that does exactly one thing.
+- Every LEAF must have a "prompt": a precise, max-strength instruction tailored to this user's library that transforms "the input text" (the previous step's output) and returns ONLY the result.
+- Composite nodes have "steps" and NO "prompt". Leaf nodes have "prompt" and NO "steps".
+- Names: 1-4 words. Descriptions: one short, clear sentence each.
+
+Return ONLY JSON for THIS function:
+{"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}`;
+  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 6000 });
+  return parseJSON(out);
+}
+
+// flatten a decomposition tree into flat operators; returns the root id
+function materializeTree(node, role, top, out) {
+  const id = uid();
+  const name = (node.name || "function").trim();
+  const description = (node.description || "").trim();
+  if (Array.isArray(node.steps) && node.steps.length) {
+    const steps = node.steps.map((s) => materializeTree(s, role, false, out));
+    out.push({ id, name, description, kind: "pipeline", steps, role, top });
+  } else {
+    const prompt = (node.prompt || "").trim() || `Apply "${name}" to the input text and return only the result.`;
+    out.push({ id, name, description, kind: "prompt", prompt, role, top });
+  }
+  return id;
+}
+
+// human-readable tree for Claude context when editing in prose
+function serializeTree(node, opMap, depth = 0) {
+  if (!node) return "";
+  const pad = "  ".repeat(depth);
+  let line = `${pad}• ${node.name}`;
+  if (node.description) line += ` — ${node.description}`;
+  if (node.kind === "prompt" && node.prompt) {
+    line += `\n${pad}  prompt: ${node.prompt.slice(0, 220)}${node.prompt.length > 220 ? "…" : ""}`;
+  }
+  const lines = [line];
+  if (node.kind === "pipeline" && node.steps?.length) {
+    for (const sid of node.steps) lines.push(serializeTree(opMap[sid], opMap, depth + 1));
+  }
+  return lines.filter(Boolean).join("\n");
+}
+
+function collectSubtreeIds(rootId, opMap) {
+  const ids = new Set();
+  function walk(id) {
+    if (!id || ids.has(id)) return;
+    ids.add(id);
+    const op = opMap[id];
+    if (op?.kind === "pipeline" && op.steps) op.steps.forEach(walk);
+  }
+  walk(rootId);
+  return ids;
+}
+
+// create a full function from the user's plain-English description
+async function createFunctionFromProse(description, operators, opMap) {
+  const prompt = `The user wants to CREATE a new function for their lens whiteboard toolbox.
+Tailor it to their personal library (see system context) — complement existing functions, reuse their vocabulary and prompt style.
+
+They described it in their own words:
+"""
+${description}
+"""
+
+Design this as a complete function tree: decompose it into ordered sub-functions ending in primitive operators, exactly as lens executes them (pipeline where each step's output feeds the next).
+
+Requirements:
+- Infer a sharp 2-4 word name and one-sentence description for the top function.
+- Break into 2-5 ordered sub-functions; recurse 2-4 layers until every leaf is one atomic primitive.
+- Every LEAF has a max-strength "prompt" tailored to this user's library. Composites have "steps" and NO "prompt".
+- Do not duplicate functions already in their library unless the user explicitly asks to recreate one.
+
+Return ONLY JSON:
+{"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}`;
+  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 6000 });
+  return parseJSON(out);
+}
+
+// edit an existing function tree from the user's prose instruction
+async function editFunctionWithProse(op, opMap, instruction, operators) {
+  const current = serializeTree(op, opMap);
+  const prompt = `The user is EDITING an existing function on their lens whiteboard.
+Keep it consistent with their personal library (see system context) — same vocabulary, style, and transformation patterns.
+
+CURRENT FUNCTION (tree — composites have steps, leaves have prompts):
+${current}
+
+The user wants these changes (in their own words):
+"""
+${instruction}
+"""
+
+Apply their request. Preserve anything they didn't ask to change. You may rename, re-describe, re-prompt, reorder, add, remove, or split steps. Keep decomposing until leaves are single atomic primitives with excellent prompts tailored to this user's library.
+
+Return ONLY JSON for the COMPLETE updated function (same shape as create):
+{"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}
+
+If this should become a single primitive with no sub-steps, return a leaf:
+{"name":"...","description":"...","prompt":"..."}`;
+  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 6000 });
+  return parseJSON(out);
+}
+
+// turn a Claude JSON node into flat operators; returns root id
+function treeToOperators(node, opts = {}) {
+  const { role = null, top = false } = opts;
+  const out = [];
+  const rootId = materializeTree(node, role, top, out);
+  return { rootId, ops: out };
 }
 
 function load(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
-    if (!raw) return fallback;
-    return JSON.parse(raw) ?? fallback;
+    return raw ? JSON.parse(raw) : fallback;
   } catch {
     return fallback;
   }
 }
 
-function pickColor() {
-  return STAR_COLORS[Math.floor(Math.random() * STAR_COLORS.length)];
+function stripMd(s) {
+  return (s || "")
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/[*_`>]/g, "")
+    .replace(/^\s*[-•]\s+/gm, "")
+    .trim();
 }
 
-function makeSeed(x, y, text = "", extra = {}) {
-  const { history, ...rest } = extra;
-  return {
-    id: uid(),
-    type: "text",
-    x,
-    y,
-    text,
-    color: pickColor(),
-    born: Date.now(),
-    ...rest,
-    history: history || [{ kind: "plant", op: null, to: text }],
-  };
+// one-time migration: bring ideas from the old node canvas onto the new board
+function migrateOldSeeds() {
+  const seeds = load(OLD_SEEDS_KEY, null);
+  if (!Array.isArray(seeds) || !seeds.length) return [];
+  return seeds
+    .map((s) => {
+      if (s.type === "image" && s.image) {
+        return { id: uid(), type: "image", x: s.x || 0, y: s.y || 0, w: 220, src: s.image };
+      }
+      const text = stripMd(s.title || s.text || "");
+      if (!text) return null;
+      return { id: uid(), type: "text", x: (s.x || 0) - 90, y: (s.y || 0) - 14, text };
+    })
+    .filter(Boolean);
 }
 
-async function runClaude(prompt, text, count = 1, image = null) {
+async function runClaude(prompt, text, opts = {}) {
+  const { image = null, system = null, maxTokens = null } = opts;
   const res = await fetch("/api/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, text, count, image }),
+    body: JSON.stringify({ prompt, text, count: 1, image, system, maxTokens }),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "The void did not answer.");
-  return data.outputs || [];
+  if (!res.ok) throw new Error(data.error || "Claude did not answer.");
+  return (data.outputs || [])[0] || "";
 }
 
-// Read a File/Blob into a downscaled data URL (keeps payloads small for vision)
-function fileToImage(file, max = 1024) {
+function fileToImage(file, max = 1100) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -268,7 +334,7 @@ function fileToImage(file, max = 1024) {
         canvas.height = h;
         canvas.getContext("2d").drawImage(img, 0, 0, w, h);
         const type = file.type === "image/png" ? "image/png" : "image/jpeg";
-        resolve(canvas.toDataURL(type, 0.86));
+        resolve({ src: canvas.toDataURL(type, 0.86), w, h });
       };
       img.onerror = reject;
       img.src = reader.result;
@@ -278,165 +344,137 @@ function fileToImage(file, max = 1024) {
   });
 }
 
-async function ask(prompt, text) {
-  const outs = await runClaude(prompt, text, 1);
-  return outs[0] || "";
-}
-
-function parseJourney(raw) {
-  let s = (raw || "").trim();
-  const a = s.indexOf("{");
-  const b = s.lastIndexOf("}");
-  if (a !== -1 && b !== -1) s = s.slice(a, b + 1);
-  return JSON.parse(s);
-}
-
-// Ask Claude to reconstruct the genuine intellectual journey behind a node.
-async function narrateJourney(history) {
-  const lineage = history
-    .map((s, i) => {
-      const meta = VERB_META[s.kind] || VERB_META.operator;
-      const opName = (s.op && s.op.name) || meta.label;
-      let line = `[stage ${i + 1}] (${opName}) ${s.to ? s.to : "(an empty seed)"}`;
-      if (s.parents && s.parents.length) {
-        line += `\n    ↳ merged from: ${s.parents.map((p) => `"${(p.text || "").trim()}"`).join("  +  ")}`;
-      }
-      return line;
-    })
-    .join("\n");
-
-  const prompt = `You are a thought-historian narrating how a single idea was really developed on an infinite idea-canvas. Below is its true chronological lineage. Each stage is tagged with the operation that produced it:
-- planted = the very first spark, written by hand
-- written = a manual edit by the thinker
-- evolved = deepened by AI
-- branched = a new related direction spun off
-- split = broken into sub-ideas
-- combined = synthesized from two earlier ideas
-- a named operator = a custom transformation the thinker built and applied
-
-Reconstruct the genuine intellectual journey end to end: how the thinking actually moved from the first spark to the final form — the realizations, the pivots, the widening or sharpening of the idea. Be specific to THIS idea's content, not generic.
-
-Return ONLY valid JSON (no markdown fences) in exactly this shape:
-{
-  "title": "short evocative name for this line of thought (max 6 words)",
-  "chapters": [
-    { "move": "2-4 word name for the cognitive move at this stage", "narration": "1-2 vivid sentences in second person ('you...') describing what you were doing and what shifted in your understanding at this exact step" }
-  ],
-  "synthesis": "3-4 sentences capturing the whole arc: where it began, the pivotal turns, and where it arrived and why that matters"
-}
-There MUST be exactly one chapter object per stage, in the same order as the stages.`;
-
-  const out = await ask(prompt, lineage);
-  const j = parseJourney(out);
-  if (!j || !Array.isArray(j.chapters)) throw new Error("Could not trace the thought.");
-  return j;
+// distance from point to a segment (screen space)
+function distToSeg(px, py, ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy || 1;
+  let t = ((px - ax) * dx + (py - ay) * dy) / len2;
+  t = clamp(t, 0, 1);
+  const cx = ax + t * dx;
+  const cy = ay + t * dy;
+  return Math.hypot(px - cx, py - cy);
 }
 
 export default function App() {
-  const [seeds, setSeeds] = useState(() => load(SEEDS_KEY, []));
-  const [edges, setEdges] = useState(() => load(EDGES_KEY, []));
-  const [camera, setCamera] = useState(() => load(CAMERA_KEY, { x: 0, y: 0, scale: 1 }));
-  const [symbols, setSymbols] = useState(() => {
-    const s = load(SYMBOLS_KEY, null);
-    return Array.isArray(s) ? s : DEFAULT_SYMBOLS;
+  const [items, setItems] = useState(() => {
+    const saved = load(ITEMS_KEY, null);
+    if (Array.isArray(saved)) return saved;
+    return migrateOldSeeds();
   });
-  const [selected, setSelected] = useState(null);
-  // pending multi-node operation: { opKey, fromId, picks: [ids] }
-  const [pending, setPending] = useState(null);
-  const [busyIds, setBusyIds] = useState([]);
+  const [camera, setCamera] = useState(() => load(CAMERA_KEY, { x: 0, y: 0, scale: 1 }));
+  const [operators, setOperators] = useState(() => {
+    const s = load(OPERATORS_KEY, null);
+    return Array.isArray(s) ? s : DEFAULT_OPERATORS;
+  });
+
+  const [tool, setTool] = useState("select"); // select | text | pen | marker | eraser
+  const [selection, setSelection] = useState([]);
+  const [editing, setEditing] = useState(null); // item id being edited
+  const [draft, setDraft] = useState(null); // live stroke (world points)
+  const [lasso, setLasso] = useState(null); // {x0,y0,x1,y1} client coords
+  const [aiBusy, setAiBusy] = useState(false);
   const [toast, setToast] = useState(null);
-  const [editing, setEditing] = useState(null);
+  const [opEditor, setOpEditor] = useState(null); // operator being edited
+  const [spaceDown, setSpaceDown] = useState(false);
   const [toolboxOpen, setToolboxOpen] = useState(true);
-  const [replaySeed, setReplaySeed] = useState(null);
-  // highlighter: current text selection -> { text, rect, sourceId }
-  const [highlight, setHighlight] = useState(null);
-  // a two-fragment op waiting for its second fragment -> { opKey, fragA, sourceA }
-  const [pendingFrag, setPendingFrag] = useState(null);
-  // entry portal + palette
-  const [entryText, setEntryText] = useState("");
-  const [entryKind, setEntryKind] = useState("idea");
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const [exIdx, setExIdx] = useState(0);
-  // toolbox: two object types live here — nodes and operators
-  const [savedNodes, setSavedNodes] = useState(() => load(NODES_KEY, []));
-  const [toolboxTab, setToolboxTab] = useState("operators");
-  // discovery engine working state -> { items: [...labels], started }
-  const [discovering, setDiscovering] = useState(null);
-  // the highlighter marker — the primary input device
-  const [markerOn, setMarkerOn] = useState(true);
-  const [markerPts, setMarkerPts] = useState(null); // live stroke (screen coords)
-  const [selection, setSelection] = useState([]); // node ids under the marker
-  const markerRef = useRef(null);
+  const [expanded, setExpanded] = useState({}); // operator id -> open in toolbox tree
+  const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
 
   const viewportRef = useRef(null);
-  const panRef = useRef(null);
+  const gesture = useRef(null);
+  const camRef = useRef(camera);
+  const itemsRef = useRef(items);
+  const toolRef = useRef(tool);
+  const selRef = useRef(selection);
+  const spaceRef = useRef(false);
+  camRef.current = camera;
+  itemsRef.current = items;
+  toolRef.current = tool;
+  selRef.current = selection;
 
-  useEffect(() => {
-    const clean = seeds.map(({ busy, flash, loading, error, ...s }) => s);
-    localStorage.setItem(SEEDS_KEY, JSON.stringify(clean));
-  }, [seeds]);
-  useEffect(() => localStorage.setItem(EDGES_KEY, JSON.stringify(edges)), [edges]);
+  useEffect(() => localStorage.setItem(ITEMS_KEY, JSON.stringify(items)), [items]);
   useEffect(() => localStorage.setItem(CAMERA_KEY, JSON.stringify(camera)), [camera]);
-  useEffect(() => localStorage.setItem(SYMBOLS_KEY, JSON.stringify(symbols)), [symbols]);
-  useEffect(() => localStorage.setItem(NODES_KEY, JSON.stringify(savedNodes)), [savedNodes]);
+  useEffect(() => localStorage.setItem(OPERATORS_KEY, JSON.stringify(operators)), [operators]);
 
+  function showToast(msg) {
+    setToast(msg);
+    setTimeout(() => setToast((t) => (t === msg ? null : t)), 3200);
+  }
+
+  // ---- camera math (transform-origin is 0 0) ----
+  const screenToWorld = (sx, sy) => {
+    const c = camRef.current;
+    return { x: (sx - c.x) / c.scale, y: (sy - c.y) / c.scale };
+  };
+  const worldToScreen = (wx, wy) => {
+    const c = camRef.current;
+    return { x: wx * c.scale + c.x, y: wy * c.scale + c.y };
+  };
+
+  // wheel: pan; cmd/ctrl+wheel: zoom toward cursor
   useEffect(() => {
-    function onKey(e) {
-      const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || "");
-      if (e.key === "Escape") {
-        setSelected(null);
-        setPending(null);
-        setHighlight(null);
-        setPendingFrag(null);
-        clearSelection();
+    const el = viewportRef.current;
+    if (!el) return;
+    function onWheel(e) {
+      e.preventDefault();
+      if (e.ctrlKey || e.metaKey) {
+        const factor = Math.exp(-e.deltaY * 0.0016);
+        setCamera((c) => {
+          const scale = clamp(c.scale * factor, 0.12, 4.5);
+          const wx = (e.clientX - c.x) / c.scale;
+          const wy = (e.clientY - c.y) / c.scale;
+          return { scale, x: e.clientX - wx * scale, y: e.clientY - wy * scale };
+        });
+      } else {
+        setCamera((c) => ({ ...c, x: c.x - e.deltaX, y: c.y - e.deltaY }));
       }
-      if ((e.key === "Delete" || e.key === "Backspace") && !typing && selection.length) {
+    }
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // keyboard: tools, space-pan, delete, escape
+  useEffect(() => {
+    function down(e) {
+      const typing = e.target.isContentEditable || /^(INPUT|TEXTAREA)$/.test(e.target.tagName || "");
+      if (e.code === "Space" && !typing) {
+        spaceRef.current = true;
+        setSpaceDown(true);
+        e.preventDefault();
+        return;
+      }
+      if (typing) return;
+      if (e.key === "Escape") {
+        setSelection([]);
+        setEditing(null);
+        setLasso(null);
+      }
+      if ((e.key === "Delete" || e.key === "Backspace") && selRef.current.length) {
         e.preventDefault();
         deleteSelection();
       }
+      if (e.key === "v" || e.key === "1") setTool("select");
+      if (e.key === "t" || e.key === "2") setTool("text");
+      if (e.key === "p" || e.key === "3") setTool("pen");
+      if (e.key === "m" || e.key === "4") setTool("marker");
+      if (e.key === "e" || e.key === "5") setTool("eraser");
     }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [selection]);
-
-  // ---- the highlighter: capture any selection inside a [data-selectable] surface ----
-  useEffect(() => {
-    function capture() {
-      const sel = window.getSelection();
-      const text = sel && !sel.isCollapsed ? sel.toString().trim() : "";
-      if (!text || text.length < 2 || sel.rangeCount === 0) {
-        // don't drop a pending second-fragment prompt just because selection collapsed
-        setHighlight((h) => (h ? null : h));
-        return;
+    function up(e) {
+      if (e.code === "Space") {
+        spaceRef.current = false;
+        setSpaceDown(false);
       }
-      const range = sel.getRangeAt(0);
-      let node = range.startContainer;
-      if (node.nodeType === 3) node = node.parentElement;
-      const surface = node && node.closest ? node.closest("[data-selectable]") : null;
-      if (!surface) {
-        setHighlight(null);
-        return;
-      }
-      const rect = range.getBoundingClientRect();
-      setHighlight({
-        text,
-        sourceId: surface.getAttribute("data-seed-id") || null,
-        rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width },
-      });
     }
-    function onUp(e) {
-      if (e.target.closest && e.target.closest(".sel-toolbar")) return; // keep selection while clicking toolbar
-      setTimeout(capture, 0);
-    }
-    document.addEventListener("mouseup", onUp);
-    document.addEventListener("touchend", onUp);
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
     return () => {
-      document.removeEventListener("mouseup", onUp);
-      document.removeEventListener("touchend", onUp);
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
     };
   }, []);
 
-  // paste an image from the clipboard anywhere -> a node in the field
+  // paste image anywhere
   useEffect(() => {
     function onPaste(e) {
       const items = e.clipboardData?.items || [];
@@ -444,8 +482,8 @@ export default function App() {
         if (it.type && it.type.startsWith("image/")) {
           const f = it.getAsFile();
           if (f) {
-            addImageFiles([f]);
             e.preventDefault();
+            addImage(f);
             return;
           }
         }
@@ -453,745 +491,463 @@ export default function App() {
     }
     document.addEventListener("paste", onPaste);
     return () => document.removeEventListener("paste", onPaste);
-  }, [camera]);
-
-  // rotate the entry-portal placeholder examples
-  useEffect(() => {
-    const id = setInterval(() => setExIdx((i) => (i + 1) % ENTRY_EXAMPLES.length), 2800);
-    return () => clearInterval(id);
   }, []);
 
-  function showToast(msg) {
-    setToast(msg);
-    setTimeout(() => setToast((t) => (t === msg ? null : t)), 3400);
-  }
-
-  // ---- camera ----
-  function screenToWorld(sx, sy) {
-    return { x: (sx - camera.x) / camera.scale, y: (sy - camera.y) / camera.scale };
-  }
-  function worldToScreen(wx, wy) {
-    return { x: wx * camera.scale + camera.x, y: wy * camera.scale + camera.y };
-  }
-  function viewCenterWorld() {
-    const r = viewportRef.current?.getBoundingClientRect();
-    if (!r) return { x: 0, y: 0 };
-    return screenToWorld(r.width / 2, r.height / 2);
-  }
-
-  // distance from point p to segment a-b (screen space)
-  function distToSeg(p, a, b) {
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    const len2 = dx * dx + dy * dy;
-    let t = len2 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2 : 0;
-    t = Math.max(0, Math.min(1, t));
-    const cx = a.x + t * dx;
-    const cy = a.y + t * dy;
-    return Math.hypot(p.x - cx, p.y - cy);
-  }
-  // which nodes does this marker stroke cover?
-  function nodesUnderStroke(pts) {
-    if (!pts || pts.length === 0) return [];
-    const reach = 26; // marker half-thickness + node radius, in screen px
-    const hit = [];
-    for (const s of seeds) {
-      const sp = worldToScreen(s.x, s.y);
-      let near = false;
-      for (let i = 0; i < pts.length; i++) {
-        const a = pts[i];
-        const b = pts[i + 1] || pts[i];
-        if (distToSeg(sp, a, b) <= reach) {
-          near = true;
-          break;
-        }
-      }
-      if (near) hit.push(s.id);
-    }
-    return hit;
-  }
-
-  function onPointerDown(e) {
-    if (e.target.closest(".seed") || e.target.closest(".seed-panel")) return;
-    const r = viewportRef.current.getBoundingClientRect();
-    const pt = { x: e.clientX - r.left, y: e.clientY - r.top };
-    if (markerOn) {
-      markerRef.current = { pts: [pt] };
-      setMarkerPts([pt]);
-      setSelection([]);
-      viewportRef.current.setPointerCapture(e.pointerId);
-      return;
-    }
-    panRef.current = { x: e.clientX, y: e.clientY, moved: 0 };
-    viewportRef.current.setPointerCapture(e.pointerId);
-  }
-  function onPointerMove(e) {
-    if (markerRef.current) {
-      const r = viewportRef.current.getBoundingClientRect();
-      const pt = { x: e.clientX - r.left, y: e.clientY - r.top };
-      const pts = [...markerRef.current.pts, pt];
-      markerRef.current.pts = pts;
-      setMarkerPts(pts);
-      setSelection(nodesUnderStroke(pts));
-      return;
-    }
-    if (!panRef.current) return;
-    const dx = e.clientX - panRef.current.x;
-    const dy = e.clientY - panRef.current.y;
-    panRef.current.x = e.clientX;
-    panRef.current.y = e.clientY;
-    panRef.current.moved += Math.abs(dx) + Math.abs(dy);
-    setCamera((c) => ({ ...c, x: c.x + dx, y: c.y + dy }));
-  }
-  function onPointerUp() {
-    if (markerRef.current) {
-      const pts = markerRef.current.pts;
-      markerRef.current = null;
-      const hit = nodesUnderStroke(pts);
-      setSelection(hit);
-      setMarkerPts(null);
-      if (!hit.length) {
-        // a tap on empty space clears any current selection
-        setSelected(null);
-      }
-      return;
-    }
-    const p = panRef.current;
-    panRef.current = null;
-    if (p && p.moved < 4) {
-      setSelected(null);
-      setPending(null);
-      setSelection([]);
-    }
-  }
-  function clearSelection() {
-    setSelection([]);
-    setMarkerPts(null);
-    markerRef.current = null;
+  // ---- item helpers ----
+  function updateItem(id, patch) {
+    setItems((arr) => arr.map((it) => (it.id === id ? { ...it, ...patch } : it)));
   }
   function deleteSelection() {
-    if (!selection.length) return;
-    const ids = new Set(selection);
-    setSeeds((p) => p.filter((s) => !ids.has(s.id)));
-    setEdges((p) => p.filter((e) => !ids.has(e.a) && !ids.has(e.b)));
-    if (ids.has(selected)) setSelected(null);
-    showToast(`cleared ${selection.length}`);
-    clearSelection();
-  }
-  function stabilizeSelection() {
-    if (selection.length < 2) return showToast("select at least two");
-    const first = seeds.find((s) => s.id === selection[0]);
-    if (first) applyOp("stabilize", first, selection.slice(1));
-    clearSelection();
-  }
-  function discoverSelection() {
-    if (selection.length < 2) return showToast("select at least two");
-    runDiscoveryOn([...selection]);
-    clearSelection();
-  }
-  function onWheel(e) {
-    const r = viewportRef.current.getBoundingClientRect();
-    const sx = e.clientX - r.left;
-    const sy = e.clientY - r.top;
-    setCamera((c) => {
-      const factor = Math.exp(-e.deltaY * 0.0015);
-      const scale = Math.min(2.6, Math.max(0.25, c.scale * factor));
-      const wx = (sx - c.x) / c.scale;
-      const wy = (sy - c.y) / c.scale;
-      return { x: sx - wx * scale, y: sy - wy * scale, scale };
-    });
-  }
-  function onDoubleClick(e) {
-    if (e.target.closest(".seed") || e.target.closest(".seed-panel")) return;
-    const r = viewportRef.current.getBoundingClientRect();
-    const w = screenToWorld(e.clientX - r.left, e.clientY - r.top);
-    plantText(w.x, w.y);
+    const ids = new Set(selRef.current);
+    setItems((arr) => arr.filter((it) => !ids.has(it.id)));
+    setSelection([]);
   }
 
-  // ---- seed ops ----
-  function plantText(x, y, kind = "idea", text = "") {
-    const c = x == null ? viewCenterWorld() : { x, y };
-    const k = KINDS[kind] || KINDS.idea;
-    const seed = makeSeed(c.x, c.y, text, { kind, color: k.color });
-    setSeeds((p) => [...p, seed]);
-    setSelected(seed.id);
-    return seed;
-  }
-  function plantSketch() {
-    const c = viewCenterWorld();
-    const seed = makeSeed(c.x, c.y, "", { type: "sketch", kind: "fragment", image: null, strokes: [] });
-    setSeeds((p) => [...p, seed]);
-    setSelected(seed.id);
-  }
-  function plantImage(dataUrl, x, y) {
-    const c = x == null ? viewCenterWorld() : { x, y };
-    const seed = makeSeed(c.x, c.y, "", {
-      type: "image",
-      kind: "observation",
-      color: "#5e6b80",
-      image: dataUrl,
-    });
-    setSeeds((p) => [...p, seed]);
-    setSelected(seed.id);
-  }
-  async function addImageFiles(files, x, y) {
-    const list = [...files].filter((f) => f.type.startsWith("image/"));
-    for (let i = 0; i < list.length; i++) {
-      try {
-        const data = await fileToImage(list[i]);
-        plantImage(data, x == null ? null : x + i * 30, y == null ? null : y + i * 30);
-      } catch {
-        showToast("Could not read that image.");
+  // ---- composed operators (functions made of functions) ----
+  const opMap = useMemo(() => Object.fromEntries(operators.map((o) => [o.id, o])), [operators]);
+
+  // run a function: pipelines chain their sub-functions (output -> next input)
+  async function applyOpTree(op, material, image) {
+    if (!op) return material;
+    if (op.kind === "pipeline" && op.steps?.length) {
+      let cur = material;
+      let img = image;
+      for (const sid of op.steps) {
+        cur = await applyOpTree(opMap[sid], cur, img);
+        img = null; // an image only feeds the first step
       }
+      return cur;
+    }
+    return await runClaude(op.prompt || "", material, {
+      image,
+      system: executionSystem(operators, opMap, op),
+    });
+  }
+
+  async function runOperator(op) {
+    const texts = selectedTextMaterial();
+    const image = selectedImage();
+    const material = texts.join("\n\n———\n\n");
+    if (!material && !image) {
+      showToast("select some text or an image first");
+      return;
+    }
+    setAiBusy(true);
+    try {
+      const out = await applyOpTree(op, material, image);
+      placeResults([out]);
+    } catch (err) {
+      showToast(err.message || "Claude did not answer");
+    } finally {
+      setAiBusy(false);
     }
   }
-  function pickImageFile() {
+
+  // ---- onboarding: build a whole toolbox for a role ----
+  async function runOnboarding(role) {
+    setOnboard({ step: "working", role, done: 0, total: 10, label: "imagining your functions…" });
+    try {
+      const list = await generateFunctionList(role, operators, opMap);
+      if (!list.length) throw new Error("Could not imagine functions. Try again.");
+      setOnboard((o) => ({ ...o, total: list.length }));
+      let done = 0;
+      const trees = await Promise.all(
+        list.map(async (fn) => {
+          let tree;
+          try {
+            tree = await decomposeFunction(role, fn, operators, opMap);
+          } catch {
+            tree = {
+              name: fn.name,
+              description: fn.description,
+              prompt: `Apply the function "${fn.name}" (${fn.description}) to the input text and return only the result.`,
+            };
+          }
+          done += 1;
+          setOnboard((o) => (o && o.step === "working" ? { ...o, done } : o));
+          return tree;
+        })
+      );
+      const newOps = [];
+      trees.forEach((t) => materializeTree(t, role, true, newOps));
+      setOperators((prev) => [...prev, ...newOps]);
+      localStorage.setItem(ONBOARDED_KEY, "1");
+      setToolboxOpen(true);
+      setOnboard({ step: "done", role, count: trees.length });
+    } catch (err) {
+      setOnboard({ step: "error", message: err.message || "Something went wrong." });
+    }
+  }
+
+  function skipOnboarding() {
+    localStorage.setItem(ONBOARDED_KEY, "1");
+    setOnboard(null);
+  }
+
+  function openCreateFunction() {
+    setOpEditor({ mode: "create" });
+  }
+
+  function openEditFunction(op) {
+    setOpEditor({ mode: "edit", op });
+  }
+
+  function saveFunctionTree(oldRootId, newOps) {
+    setOperators((arr) => {
+      let next = arr;
+      if (oldRootId) {
+        const map = Object.fromEntries(arr.map((o) => [o.id, o]));
+        const removeIds = collectSubtreeIds(oldRootId, map);
+        next = arr.filter((o) => !removeIds.has(o.id));
+      }
+      return [...next, ...newOps];
+    });
+    setOpEditor(null);
+    showToast(oldRootId ? "function updated" : "function created");
+  }
+
+  function saveManualOp(op) {
+    setOperators((arr) => {
+      const exists = arr.some((o) => o.id === op.id);
+      const normalized = {
+        ...op,
+        kind: op.kind || "prompt",
+        name: (op.name || "").trim(),
+        description: (op.description || "").trim(),
+        prompt: (op.prompt || "").trim(),
+      };
+      if (!normalized.prompt && normalized.kind === "prompt") return arr;
+      return exists ? arr.map((o) => (o.id === op.id ? normalized : o)) : [...arr, normalized];
+    });
+    setOpEditor(null);
+    showToast("saved");
+  }
+
+  function deleteFunction(rootId) {
+    const map = Object.fromEntries(operators.map((o) => [o.id, o]));
+    const removeIds = collectSubtreeIds(rootId, map);
+    setOperators((arr) => arr.filter((o) => !removeIds.has(o.id)));
+    setOpEditor(null);
+    showToast("function deleted");
+  }
+
+  const topFunctions = operators.filter((o) => o.top);
+  const basics = operators.filter((o) => !o.role && !o.top);
+  const paletteOps = operators.filter((o) => o.top || !o.role);
+
+  function itemScreenBBox(it) {
+    if (it.type === "stroke") {
+      const xs = it.points.map((p) => worldToScreen(p.x, p.y).x);
+      const ys = it.points.map((p) => worldToScreen(p.x, p.y).y);
+      return { left: Math.min(...xs), top: Math.min(...ys), right: Math.max(...xs), bottom: Math.max(...ys) };
+    }
+    const el = document.querySelector(`[data-item="${it.id}"]`);
+    if (!el) {
+      const p = worldToScreen(it.x, it.y);
+      return { left: p.x, top: p.y, right: p.x + 10, bottom: p.y + 10 };
+    }
+    const r = el.getBoundingClientRect();
+    return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+  }
+
+  function itemAtPoint(cx, cy) {
+    const list = itemsRef.current;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const it = list[i];
+      if (it.type === "stroke") {
+        for (let k = 1; k < it.points.length; k++) {
+          const a = worldToScreen(it.points[k - 1].x, it.points[k - 1].y);
+          const b = worldToScreen(it.points[k].x, it.points[k].y);
+          if (distToSeg(cx, cy, a.x, a.y, b.x, b.y) <= Math.max(8, it.width * camRef.current.scale * 0.7)) return it;
+        }
+      } else {
+        const bb = itemScreenBBox(it);
+        if (cx >= bb.left && cx <= bb.right && cy >= bb.top && cy <= bb.bottom) return it;
+      }
+    }
+    return null;
+  }
+
+  function selectionWorldBBox() {
+    const ids = new Set(selRef.current);
+    const sel = itemsRef.current.filter((it) => ids.has(it.id));
+    if (!sel.length) return null;
+    let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+    for (const it of sel) {
+      const bb = itemScreenBBox(it);
+      const a = screenToWorld(bb.left, bb.top);
+      const b = screenToWorld(bb.right, bb.bottom);
+      minx = Math.min(minx, a.x);
+      miny = Math.min(miny, a.y);
+      maxx = Math.max(maxx, b.x);
+      maxy = Math.max(maxy, b.y);
+    }
+    return { minx, miny, maxx, maxy };
+  }
+
+  // ---- pointer gestures on the board ----
+  function onPointerDown(e) {
+    if (e.button === 1) return; // middle handled by browser pan? ignore
+    const cx = e.clientX;
+    const cy = e.clientY;
+    const w = screenToWorld(cx, cy);
+    const panning = spaceRef.current || toolRef.current === "hand";
+    const t = toolRef.current;
+
+    if (editing) setEditing(null);
+
+    if (panning) {
+      gesture.current = { mode: "pan", cx, cy, cam: { ...camRef.current } };
+      return;
+    }
+
+    if (t === "pen" || t === "marker") {
+      gesture.current = { mode: "draw", marker: t === "marker", points: [w] };
+      setDraft({ points: [w], marker: t === "marker" });
+      return;
+    }
+
+    if (t === "eraser") {
+      gesture.current = { mode: "erase" };
+      const hit = itemAtPoint(cx, cy);
+      if (hit) setItems((arr) => arr.filter((it) => it.id !== hit.id));
+      return;
+    }
+
+    if (t === "text") {
+      const id = uid();
+      setItems((arr) => [...arr, { id, type: "text", x: w.x, y: w.y - 14, text: "" }]);
+      setSelection([id]);
+      setEditing(id);
+      setTool("select");
+      return;
+    }
+
+    // select tool
+    const hit = itemAtPoint(cx, cy);
+    if (hit) {
+      const already = selRef.current.includes(hit.id);
+      const nextSel = e.shiftKey
+        ? already
+          ? selRef.current.filter((id) => id !== hit.id)
+          : [...selRef.current, hit.id]
+        : already
+        ? selRef.current
+        : [hit.id];
+      setSelection(nextSel);
+      gesture.current = { mode: "move", cx, cy, ids: nextSel, moved: 0, hitId: hit.id };
+    } else {
+      if (!e.shiftKey) setSelection([]);
+      gesture.current = { mode: "lasso", x0: cx, y0: cy, x1: cx, y1: cy };
+      setLasso({ x0: cx, y0: cy, x1: cx, y1: cy });
+    }
+  }
+
+  function onPointerMove(e) {
+    const g = gesture.current;
+    if (!g) return;
+    const cx = e.clientX;
+    const cy = e.clientY;
+
+    if (g.mode === "pan") {
+      setCamera({ ...g.cam, x: g.cam.x + (cx - g.cx), y: g.cam.y + (cy - g.cy) });
+    } else if (g.mode === "draw") {
+      const w = screenToWorld(cx, cy);
+      g.points.push(w);
+      setDraft({ points: g.points.slice(), marker: g.marker });
+    } else if (g.mode === "erase") {
+      const hit = itemAtPoint(cx, cy);
+      if (hit) setItems((arr) => arr.filter((it) => it.id !== hit.id));
+    } else if (g.mode === "move") {
+      const dx = (cx - g.cx) / camRef.current.scale;
+      const dy = (cy - g.cy) / camRef.current.scale;
+      g.cx = cx;
+      g.cy = cy;
+      g.moved += Math.abs(cx) + Math.abs(cy);
+      const ids = new Set(g.ids);
+      setItems((arr) =>
+        arr.map((it) => {
+          if (!ids.has(it.id)) return it;
+          if (it.type === "stroke") return { ...it, points: it.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+          return { ...it, x: it.x + dx, y: it.y + dy };
+        })
+      );
+    } else if (g.mode === "lasso") {
+      g.x1 = cx;
+      g.y1 = cy;
+      setLasso({ x0: g.x0, y0: g.y0, x1: cx, y1: cy });
+    }
+  }
+
+  function onPointerUp() {
+    const g = gesture.current;
+    gesture.current = null;
+    if (!g) return;
+
+    if (g.mode === "draw") {
+      if (g.points.length > 1) {
+        setItems((arr) => [
+          ...arr,
+          { id: uid(), type: "stroke", points: g.points, color: INK, width: g.marker ? MARKER_W : PEN_W, marker: g.marker },
+        ]);
+      }
+      setDraft(null);
+    } else if (g.mode === "lasso") {
+      setLasso(null);
+      const L = Math.min(g.x0, g.x1), R = Math.max(g.x0, g.x1);
+      const T = Math.min(g.y0, g.y1), B = Math.max(g.y0, g.y1);
+      if (Math.abs(R - L) < 4 && Math.abs(B - T) < 4) return;
+      const picked = itemsRef.current
+        .filter((it) => {
+          const bb = itemScreenBBox(it);
+          return bb.left < R && bb.right > L && bb.top < B && bb.bottom > T;
+        })
+        .map((it) => it.id);
+      setSelection(picked);
+    }
+  }
+
+  // ---- text editing ----
+  function commitEdit(id, text) {
+    const clean = (text || "").replace(/\u00a0/g, " ");
+    if (!clean.trim()) {
+      setItems((arr) => arr.filter((it) => it.id !== id));
+    } else {
+      updateItem(id, { text: clean });
+    }
+    setEditing(null);
+  }
+
+  // ---- images ----
+  async function addImage(file, at) {
+    try {
+      const { src, w, h } = await fileToImage(file);
+      const center = at || screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
+      const scale = Math.min(1, 260 / w);
+      const id = uid();
+      setItems((arr) => [...arr, { id, type: "image", x: center.x, y: center.y, w: Math.round(w * scale), h: Math.round(h * scale), src }]);
+      setSelection([id]);
+    } catch {
+      showToast("could not load that image");
+    }
+  }
+  function pickImage() {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "image/*";
-    input.multiple = true;
-    input.onchange = () => input.files && addImageFiles(input.files);
+    input.onchange = () => input.files && input.files[0] && addImage(input.files[0]);
     input.click();
   }
-  function enterThought(text, kind = "idea") {
-    const t = text.trim();
-    if (!t) return;
-    plantText(null, null, kind, t);
-  }
-  function updateSeed(id, patch) {
-    setSeeds((p) => p.map((s) => (s.id === id ? { ...s, ...patch } : s)));
-  }
-  function moveSeedBy(id, dx, dy) {
-    setSeeds((p) => p.map((s) => (s.id === id ? { ...s, x: s.x + dx, y: s.y + dy } : s)));
-  }
-  function deleteSeed(id) {
-    setSeeds((p) => p.filter((s) => s.id !== id));
-    setEdges((p) => p.filter((e) => e.a !== id && e.b !== id));
-    if (selected === id) setSelected(null);
-    if (pending && (pending.fromId === id || pending.picks.includes(id))) setPending(null);
-  }
-  function connect(a, b) {
-    setEdges((p) => [...p, { id: uid(), a, b }]);
-  }
-  function setBusy(id, on) {
-    setBusyIds((p) => (on ? [...new Set([...p, id])] : p.filter((x) => x !== id)));
+
+  // double-click: edit an existing text, or write a new one
+  function onDoubleClick(e) {
+    const hit = itemAtPoint(e.clientX, e.clientY);
+    if (hit) {
+      if (hit.type === "text") {
+        setSelection([hit.id]);
+        setEditing(hit.id);
+      }
+      return;
+    }
+    const w = screenToWorld(e.clientX, e.clientY);
+    const id = uid();
+    setItems((arr) => [...arr, { id, type: "text", x: w.x, y: w.y - 14, text: "" }]);
+    setSelection([id]);
+    setEditing(id);
   }
 
-  function placeNear(seed, index = 0, total = 1) {
-    const base = Math.random() * Math.PI * 2;
-    const angle = total > 1 ? base + (index / total) * Math.PI * 1.7 : base;
-    const radius = 155 + Math.random() * 45;
-    return { x: seed.x + Math.cos(angle) * radius, y: seed.y + Math.sin(angle) * radius };
+  // ---- the laboratory: AI on the selection ----
+  function selectedTextMaterial() {
+    const ids = new Set(selRef.current);
+    return itemsRef.current
+      .filter((it) => ids.has(it.id) && it.type === "text" && it.text.trim())
+      .map((it) => it.text.trim());
+  }
+  function selectedImage() {
+    const ids = new Set(selRef.current);
+    return itemsRef.current.find((it) => ids.has(it.id) && it.type === "image")?.src || null;
   }
 
-  function parseLines(out) {
-    const parts = out
-      .split("\n")
-      .map((l) => l.replace(/^[\s\-*\d.)]+/, "").trim())
-      .filter(Boolean);
-    return parts.length ? parts : [out];
+  function placeResults(texts) {
+    const bb = selectionWorldBBox();
+    const startX = bb ? bb.minx : screenToWorld(window.innerWidth / 2, 200).x;
+    let y = bb ? bb.maxy + 60 : screenToWorld(0, 240).y;
+    const newIds = [];
+    const newItems = texts.map((t) => {
+      const id = uid();
+      newIds.push(id);
+      const item = { id, type: "text", x: startX, y, text: stripMd(t) };
+      y += 46 + Math.min(220, stripMd(t).length * 0.32);
+      return item;
+    });
+    setItems((arr) => [...arr, ...newItems]);
+    setSelection(newIds);
   }
 
-  function midOf(nodes) {
-    const n = nodes.length || 1;
-    return {
-      x: nodes.reduce((s, m) => s + m.x, 0) / n,
-      y: nodes.reduce((s, m) => s + m.y, 0) / n - 40,
-    };
-  }
-
-  // The single entry point for the whole primitive grammar.
-  // `extra` holds the other node ids for binary / many-select ops.
-  async function applyOp(opKey, seed, extra = []) {
-    const op = OPS[opKey];
-    if (!op) return;
-    const others = extra.map((id) => seeds.find((s) => s.id === id)).filter(Boolean);
-    const meta = { name: op.name, sym: op.sym, color: op.color };
-
-    const hasContent = (seed.text || "").trim() || seed.type === "sketch" || seed.type === "image";
-    if (op.arity === 2 && others.length < 1) return;
-    if (op.arity === "many-select" && others.length < 1)
-      return showToast("Pick at least one more idea to stabilize.");
-    if (op.arity !== "many-select" && op.arity !== 2 && !hasContent)
-      return showToast("This seed is still empty.");
-
-    const img = seed.type === "image" ? seed.image : null;
-    const involved = [seed, ...others];
-    involved.forEach((n) => setBusy(n.id, true));
-
+  async function runAI(prompt, { multi = false } = {}) {
+    const texts = selectedTextMaterial();
+    const image = selectedImage();
+    const material = texts.join("\n\n———\n\n");
+    if (!material && !image) {
+      showToast("select some text or an image first");
+      return;
+    }
+    setAiBusy(true);
     try {
-      // ---- build the input text + history scaffolding by arity ----
-      if (op.arity === 2 || op.arity === "many-select") {
-        const input = involved
-          .map((n, i) => `Idea ${String.fromCharCode(65 + i)}:\n${n.text || "(a sketch)"}`)
-          .join("\n\n");
-        const out = (await runClaude(op.prompt, input, 1))[0] || "";
-        const mid = midOf(involved);
-        const child = makeSeed(mid.x, mid.y, out, {
-          color: op.color,
-          history: [
-            {
-              kind: opKey,
-              op: meta,
-              to: out,
-              parents: involved.map((n) => ({ text: n.text, history: n.history })),
-            },
-          ],
-        });
-        setSeeds((p) => [...p, child]);
-        setEdges((p) => [...p, ...involved.map((n) => ({ id: uid(), a: n.id, b: child.id }))]);
-        setSelected(child.id);
-        pulse(child.id);
-      } else if (op.arity === "many") {
-        const baseH = withWrite(seed);
-        const out = (await runClaude(op.prompt, seed.text, 1, img))[0] || "";
-        const list = parseLines(out);
-        const children = list.map((t, i) => {
-          const pos = placeNear(seed, i, list.length);
-          return makeSeed(pos.x, pos.y, t, {
-            color: op.color,
-            history: [...baseH, { kind: opKey, op: meta, to: t }],
-          });
-        });
-        setSeeds((p) => [...p, ...children]);
-        setEdges((p) => [...p, ...children.map((c) => ({ id: uid(), a: seed.id, b: c.id }))]);
+      const out = await runClaude(prompt, material, { image, system: boardSystem(operators, opMap) });
+      if (multi) {
+        const parts = out
+          .split(/\n+/)
+          .map((l) => l.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim())
+          .filter((l) => l.length > 1);
+        placeResults(parts.length ? parts : [out]);
       } else {
-        // unary (1) and analysis
-        const baseH = withWrite(seed);
-        const out = (await runClaude(op.prompt, seed.text, 1, img))[0] || "";
-        const pos = placeNear(seed);
-        const child = makeSeed(pos.x, pos.y, out, {
-          color: op.color,
-          analysis: op.group === "map",
-          history: [...baseH, { kind: opKey, op: meta, to: out }],
-        });
-        setSeeds((p) => [...p, child]);
-        connect(seed.id, child.id);
-        setSelected(child.id);
-        pulse(child.id);
+        placeResults([out]);
       }
-    } catch (e) {
-      showToast(e.message);
+    } catch (err) {
+      showToast(err.message || "Claude did not answer");
     } finally {
-      involved.forEach((n) => setBusy(n.id, false));
+      setAiBusy(false);
     }
   }
 
-  function pulse(id) {
-    setSeeds((p) => p.map((s) => (s.id === id ? { ...s, flash: true } : s)));
-    setTimeout(
-      () => setSeeds((p) => p.map((s) => (s.id === id ? { ...s, flash: false } : s))),
-      900
-    );
-  }
+  const AI = {
+    operator: (op) => runOperator(op),
+    custom: (instruction) => runAI(`${instruction}\n\nApply this to the material. Return only the result.`),
+    combine: () =>
+      runAI("Synthesize the following fragments into one tight, original idea that captures what they share and where they point. Return only that idea."),
+    split: () =>
+      runAI("Break the material into its distinct underlying sub-ideas. Return a short list, one idea per line, no numbering.", { multi: true }),
+    ask: (q) => runAI(`Using only the material provided, answer this question clearly and concretely.\n\nQuestion: ${q}`),
+    sameness: () =>
+      runAI(
+        "These are distinct things from different domains. Find the hidden structural sameness — the deep invariant pattern they all share beneath their surface differences. Name the structure in a short phrase, then explain it in 2-3 sentences. Return only that."
+      ),
+  };
 
-  // Begin / advance / run a multi-node operation from the panel.
-  function startOp(opKey, seed) {
-    const op = OPS[opKey];
-    if (opKey === "sameness") {
-      startDiscovery(seed);
-      return;
-    }
-    if (op.arity === 2) {
-      setPending({ opKey, fromId: seed.id, picks: [] });
-      showToast(`pick another idea to ${op.name}`);
-    } else if (op.arity === "many-select") {
-      setPending({ opKey, fromId: seed.id, picks: [] });
-      showToast(`pick the branches to ${op.name}, then confirm`);
-    } else {
-      applyOp(opKey, seed);
-    }
-  }
-
-  function runPending() {
-    if (!pending) return;
-    if (pending.discover) return runDiscovery();
-    const seed = seeds.find((s) => s.id === pending.fromId);
-    if (seed) applyOp(pending.opKey, seed, pending.picks);
-    setPending(null);
-  }
-
-  // ---- the discovery engine: find hidden sameness across many nodes ----
-  function startDiscovery(seed = null) {
-    setSelected(null);
-    setPending({ discover: true, opKey: "sameness", fromId: seed?.id ?? null, picks: [] });
-    showToast("select things, then find their hidden sameness");
-  }
-
-  function nextStructNumber() {
-    const cur = parseInt(localStorage.getItem(STRUCTSEQ_KEY) || "283", 10) || 283;
-    const n = cur + 1;
-    localStorage.setItem(STRUCTSEQ_KEY, String(n));
-    return n;
-  }
-
-  function runDiscovery() {
-    if (!pending || !pending.discover) return;
-    const ids = [...(pending.fromId ? [pending.fromId] : []), ...pending.picks];
-    setPending(null);
-    runDiscoveryOn(ids);
-  }
-
-  async function runDiscoveryOn(ids) {
-    const nodes = ids.map((id) => seeds.find((s) => s.id === id)).filter(Boolean);
-    if (nodes.length < 2) return showToast("select at least two things to compare");
-    const labels = nodes.map((n) =>
-      (n.text || "").trim() || (n.type === "image" ? "[an image]" : "[a sketch]")
-    );
-    setPending(null);
-    setDiscovering({ count: nodes.length, started: Date.now() });
-    nodes.forEach((n) => setBusy(n.id, true));
-    try {
-      const out = (await runClaude(samenessPrompt(labels), "", 1))[0] || "";
-      const parsed = parseSameness(out);
-      const num = nextStructNumber();
-      const title = `STRUCTURE #${num} — ${parsed.name}`;
-      const mid = midOf(nodes);
-      const child = makeSeed(mid.x, mid.y - 30, parsed.body, {
-        kind: "structure",
-        color: INK,
-        struct: num,
-        title,
-        discovery: true,
-        history: [
-          {
-            kind: "sameness",
-            op: { name: "find hidden sameness", sym: "⟁", color: INK },
-            to: parsed.body,
-            parents: nodes.map((n) => ({ text: n.text, history: n.history })),
-          },
-        ],
-      });
-      setSeeds((p) => [...p, child]);
-      setEdges((p) => [...p, ...nodes.map((n) => ({ id: uid(), a: n.id, b: child.id }))]);
-      setSelected(child.id);
-      pulse(child.id);
-      showToast(title);
-    } catch (e) {
-      showToast(e.message);
-    } finally {
-      nodes.forEach((n) => setBusy(n.id, false));
-      setDiscovering(null);
-    }
-  }
-
-  // ---- saved nodes (idea structures stored in the toolbox) ----
-  function saveNodeToToolbox(seed) {
-    const snap = {
-      id: uid(),
-      kind: seed.kind || "idea",
-      color: seed.color,
-      type: seed.type || "text",
-      text: seed.text || "",
-      image: seed.image || null,
-      strokes: seed.strokes || [],
-      title: seed.title || (seed.text || "").trim().split("\n")[0].slice(0, 48) || "untitled",
-      savedAt: Date.now(),
-    };
-    setSavedNodes((p) => [snap, ...p]);
-    setToolboxTab("nodes");
-    showToast("saved to toolbox");
-  }
-  function deleteSavedNode(id) {
-    setSavedNodes((p) => p.filter((n) => n.id !== id));
-  }
-  function plantSavedNode(node) {
-    const c = viewCenterWorld();
-    const seed = makeSeed(c.x, c.y, node.text || "", {
-      kind: node.kind,
-      color: node.color,
-      type: node.type,
-      image: node.image,
-      strokes: node.strokes,
-      title: node.title,
-      struct: node.struct,
-    });
-    setSeeds((p) => [...p, seed]);
-    setSelected(seed.id);
-  }
-
-  // ---- composed operators: a saved SEQUENCE of functions ----
-  function savePathAsOperator(seed) {
-    const steps = (seed.history || [])
-      .filter((h) => OPS[h.kind] && OPS[h.kind].prompt)
-      .map((h) => ({ kind: h.kind, name: OPS[h.kind].name, prompt: OPS[h.kind].prompt }));
-    if (!steps.length)
-      return showToast("no reusable function-path on this node yet");
-    const names = steps.map((s) => OPS[s.kind].sym).join(" ");
-    const op = {
-      id: uid(),
-      name: `path · ${steps.map((s) => s.name).join(" → ").slice(0, 40)}`,
-      emoji: "⛓",
-      color: seed.color || INK,
-      image: null,
-      strokes: [],
-      kind: "composed",
-      steps,
-      glyphs: names,
-      count: 1,
-    };
-    setSymbols((p) => [...p, op]);
-    setToolboxTab("operators");
-    showToast(`operator saved · ${names}`);
-  }
-
-  async function applyComposedOperator(op, seed) {
-    const start = (seed.text || "").trim();
-    if (!start && seed.type !== "image" && seed.type !== "sketch")
-      return showToast("This seed is still empty.");
-    setBusy(seed.id, true);
-    let cur = start;
-    const hist = [...withWrite(seed)];
-    try {
-      for (const step of op.steps) {
-        const out = (await runClaude(step.prompt, cur, 1))[0] || "";
-        cur = out.split("\n").map((l) => l.trim()).filter(Boolean)[0] || out;
-        hist.push({ kind: step.kind, op: { name: step.name, sym: OPS[step.kind]?.sym, color: op.color }, to: cur });
-      }
-      const pos = placeNear(seed);
-      const child = makeSeed(pos.x, pos.y, cur, { color: op.color, history: hist });
-      setSeeds((p) => [...p, child]);
-      connect(seed.id, child.id);
-      setSelected(child.id);
-      pulse(child.id);
-    } catch (e) {
-      showToast(e.message);
-    } finally {
-      setBusy(seed.id, false);
-    }
-  }
-
-  // ---- the highlighter engine: operate on extracted thought-particles ----
-  function spawnAnchor(sourceId) {
-    const src = seeds.find((s) => s.id === sourceId);
-    if (src) return src;
-    const c = viewCenterWorld();
-    return { id: null, x: c.x, y: c.y };
-  }
-
-  function onFragmentOp(opKey) {
-    if (!highlight) return;
-    const op = FRAG_OPS[opKey];
-    if (op.kind === "binary" || op.kind === "analysis-binary") {
-      setPendingFrag({ opKey, fragA: highlight.text, sourceA: highlight.sourceId });
-      setHighlight(null);
-      window.getSelection()?.removeAllRanges();
-      showToast(`${op.sym} highlight the fragment to ${op.name} with`);
-      return;
-    }
-    applyFragmentOp(opKey, highlight.text, highlight.sourceId);
-    setHighlight(null);
-    window.getSelection()?.removeAllRanges();
-  }
-
-  function runPendingFrag() {
-    if (!pendingFrag || !highlight) return;
-    applyFragmentOp(pendingFrag.opKey, pendingFrag.fragA, pendingFrag.sourceA, highlight.text, highlight.sourceId);
-    setPendingFrag(null);
-    setHighlight(null);
-    window.getSelection()?.removeAllRanges();
-  }
-
-  async function applyFragmentOp(opKey, frag, sourceId, frag2, source2Id) {
-    const op = FRAG_OPS[opKey];
-    const meta = { name: op.name, sym: op.sym, color: op.color };
-    const anchor = spawnAnchor(sourceId);
-
-    if (op.kind === "extract") {
-      const pos = placeNear(anchor);
-      const baseH = sourceId
-        ? withWrite(seeds.find((s) => s.id === sourceId))
-        : [{ kind: "plant", op: null, to: frag }];
-      const child = makeSeed(pos.x, pos.y, frag, {
-        color: op.color,
-        particle: true,
-        history: [...baseH, { kind: "isolate", op: meta, to: frag }],
-      });
-      setSeeds((p) => [...p, child]);
-      if (sourceId) connect(sourceId, child.id);
-      setSelected(child.id);
-      pulse(child.id);
-      return;
-    }
-
-    if (sourceId) setBusy(sourceId, true);
-    if (source2Id) setBusy(source2Id, true);
-    try {
-      if (op.kind === "binary" || op.kind === "analysis-binary") {
-        const input = `Fragment A:\n${frag}\n\nFragment B:\n${frag2}`;
-        const out = (await runClaude(op.prompt, input, 1))[0] || "";
-        const a = seeds.find((s) => s.id === sourceId);
-        const b = seeds.find((s) => s.id === source2Id);
-        const anchors = [a, b].filter(Boolean);
-        const mid = anchors.length ? midOf(anchors) : placeNear(anchor);
-        const child = makeSeed(mid.x, mid.y, out, {
-          color: op.color,
-          particle: true,
-          analysis: op.kind === "analysis-binary",
-          history: [{ kind: opKey, op: meta, to: out, parents: [{ text: frag }, { text: frag2 }] }],
-        });
-        setSeeds((p) => [...p, child]);
-        if (anchors.length) setEdges((p) => [...p, ...anchors.map((n) => ({ id: uid(), a: n.id, b: child.id }))]);
-        setSelected(child.id);
-        pulse(child.id);
-      } else if (op.kind === "fan") {
-        const out = (await runClaude(op.prompt, frag, 1))[0] || "";
-        const list = parseLines(out);
-        const baseH = sourceId
-          ? withWrite(seeds.find((s) => s.id === sourceId))
-          : [{ kind: "plant", op: null, to: frag }];
-        const children = list.map((t, i) => {
-          const pos = placeNear(anchor, i, list.length);
-          return makeSeed(pos.x, pos.y, t, {
-            color: op.color,
-            particle: true,
-            history: [...baseH, { kind: opKey, op: meta, to: t }],
-          });
-        });
-        setSeeds((p) => [...p, ...children]);
-        if (sourceId) setEdges((p) => [...p, ...children.map((c) => ({ id: uid(), a: sourceId, b: c.id }))]);
-      } else {
-        // one
-        const out = (await runClaude(op.prompt, frag, 1))[0] || "";
-        const pos = placeNear(anchor);
-        const baseH = sourceId
-          ? withWrite(seeds.find((s) => s.id === sourceId))
-          : [{ kind: "plant", op: null, to: frag }];
-        const child = makeSeed(pos.x, pos.y, out, {
-          color: op.color,
-          particle: true,
-          history: [...baseH, { kind: opKey, op: meta, to: out }],
-        });
-        setSeeds((p) => [...p, child]);
-        if (sourceId) connect(sourceId, child.id);
-        setSelected(child.id);
-        pulse(child.id);
-      }
-    } catch (e) {
-      showToast(e.message);
-    } finally {
-      if (sourceId) setBusy(sourceId, false);
-      if (source2Id) setBusy(source2Id, false);
-    }
-  }
-
-  // ---- custom operator applied to a seed ----
-  async function applyOperator(opId, seed) {
-    const op = symbols.find((s) => s.id === opId);
-    if (!op) return;
-    if (op.kind === "composed") return applyComposedOperator(op, seed);
-    const text = (seed.text || "").trim();
-    if (!text && seed.type !== "sketch") return showToast("This seed is still empty.");
-    const n = Math.min(Math.max(op.count || 1, 1), MAX_RESPONSES);
-    const baseH = withWrite(seed);
-    const opMeta = { name: op.name, color: op.color, image: op.image, emoji: op.emoji };
-
-    const placeholders = Array.from({ length: n }, (_, i) => {
-      const pos = placeNear(seed, i, n);
-      return {
-        id: uid(),
-        type: "text",
-        x: pos.x,
-        y: pos.y,
-        text: "",
-        color: op.color,
-        born: Date.now(),
-        loading: true,
-        history: [...baseH, { kind: "operator", op: opMeta, to: "" }],
-      };
-    });
-    setSeeds((p) => [...p, ...placeholders]);
-    setEdges((p) => [...p, ...placeholders.map((c) => ({ id: uid(), a: seed.id, b: c.id }))]);
-
-    try {
-      const outs = await runClaude(op.prompt, text, n);
-      setSeeds((prev) => {
-        const arr = [...prev];
-        placeholders.forEach((ph, i) => {
-          const idx = arr.findIndex((o) => o.id === ph.id);
-          if (idx === -1) return;
-          if (i < outs.length) {
-            const hist = [...baseH, { kind: "operator", op: opMeta, to: outs[i] }];
-            arr[idx] = { ...arr[idx], loading: false, text: outs[i], history: hist };
-          } else arr.splice(idx, 1);
-        });
-        return arr;
-      });
-    } catch (e) {
-      showToast(e.message);
-      setSeeds((prev) => prev.filter((o) => !placeholders.some((ph) => ph.id === o.id)));
-      setEdges((prev) => prev.filter((ed) => !placeholders.some((ph) => ph.id === ed.b)));
-    }
-  }
-
-  function onSeedActivate(id) {
-    if (pending) {
-      const op = OPS[pending.opKey];
-      if (pending.discover) {
-        if (id === pending.fromId) return;
-        setPending((p) => ({
-          ...p,
-          picks: p.picks.includes(id) ? p.picks.filter((x) => x !== id) : [...p.picks, id],
-        }));
-        return;
-      }
-      if (id === pending.fromId) return; // ignore source
-      if (op.arity === 2) {
-        const seed = seeds.find((s) => s.id === pending.fromId);
-        setPending(null);
-        if (seed) applyOp(pending.opKey, seed, [id]);
-        return;
-      }
-      if (op.arity === "many-select") {
-        setPending((p) => ({
-          ...p,
-          picks: p.picks.includes(id) ? p.picks.filter((x) => x !== id) : [...p.picks, id],
-        }));
-        return;
-      }
-    }
-    setSelected(id);
-  }
-
-  // ---- operators CRUD ----
-  function saveSymbol(sym) {
-    setSymbols((prev) => {
-      const exists = prev.some((s) => s.id === sym.id);
-      return exists ? prev.map((s) => (s.id === sym.id ? sym : s)) : [...prev, sym];
-    });
-    setEditing(null);
-  }
-  function deleteSymbol(id) {
-    setSymbols((prev) => prev.filter((s) => s.id !== id));
-  }
-
-  const selectedSeed = seeds.find((s) => s.id === selected) || null;
-  const screenPos = selectedSeed ? worldToScreen(selectedSeed.x, selectedSeed.y) : null;
-
-  const activeLayer =
-    highlight || pendingFrag ? "exp" : busyIds.length || pending ? "branch" : "field";
+  // ---- render ----
+  const selBBox = selection.length ? selectionWorldBBox() : null;
+  const aiMenuPos = selBBox && !editing && !gesture.current ? worldToScreen(selBBox.minx, selBBox.miny) : null;
+  const cursorClass =
+    spaceDown ? "cur-grab" : tool === "text" ? "cur-text" : tool === "pen" || tool === "marker" ? "cur-draw" : tool === "eraser" ? "cur-erase" : "cur-select";
 
   return (
-    <div className="void-app">
-
+    <div className="board-app">
       <div
-        className={"viewport" + (markerOn ? " marker-mode" : "")}
         ref={viewportRef}
+        className={"viewport " + cursorClass}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerLeave={onPointerUp}
-        onWheel={onWheel}
         onDoubleClick={onDoubleClick}
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes("Files")) e.preventDefault();
         }}
         onDrop={(e) => {
-          if (e.dataTransfer.files && e.dataTransfer.files.length) {
+          if (e.dataTransfer.files?.length) {
             e.preventDefault();
-            const r = viewportRef.current.getBoundingClientRect();
-            const w = screenToWorld(e.clientX - r.left, e.clientY - r.top);
-            addImageFiles(e.dataTransfer.files, w.x, w.y);
+            const w = screenToWorld(e.clientX, e.clientY);
+            addImage(e.dataTransfer.files[0], w);
           }
         }}
       >
@@ -1199,1445 +955,785 @@ export default function App() {
           className="world"
           style={{ transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.scale})` }}
         >
-          <Synapses seeds={seeds} edges={edges} />
-          {seeds.map((s) => (
-            <Seed
-              key={s.id}
-              seed={s}
-              scale={camera.scale}
-              selected={selected === s.id}
-              pendingFrom={!pending?.discover && pending?.fromId === s.id}
-              picked={
-                pending?.picks.includes(s.id) ||
-                (pending?.discover && pending?.fromId === s.id)
-              }
-              pickMode={Boolean(pending)}
-              marked={selection.includes(s.id)}
-              busy={busyIds.includes(s.id)}
-              onActivate={() => onSeedActivate(s.id)}
-              onMoveBy={(dx, dy) => moveSeedBy(s.id, dx, dy)}
-              onDropOperator={(opId) => applyOperator(opId, s)}
-            />
-          ))}
-        </div>
-
-        {markerPts && markerPts.length > 0 && (
-          <svg className="marker-layer">
-            <polyline
-              points={markerPts.map((p) => `${p.x},${p.y}`).join(" ")}
-              fill="none"
-            />
-          </svg>
-        )}
-      </div>
-
-      <header className="void-brand">
-        <span className="void-mark">✦</span>
-        <span>lens</span>
-      </header>
-
-      {/* top toolbar: highlighter (primary) + discovery */}
-      <div className="field-tools">
-        <button
-          className={"tool-pill" + (markerOn ? " on" : "")}
-          onClick={() => {
-            setMarkerOn((v) => !v);
-            clearSelection();
-          }}
-          title="highlighter — drag across nodes to select them"
-        >
-          <span className="tool-mark">▔</span>
-          highlighter
-        </button>
-        <button
-          className={"tool-pill" + (pending?.discover ? " on" : "")}
-          onClick={() => (pending?.discover ? setPending(null) : startDiscovery())}
-          title="select several things, then find their hidden sameness"
-        >
-          <span className="tool-mark">⟁</span>
-          {pending?.discover ? "cancel" : "find sameness"}
-        </button>
-      </div>
-
-      {/* Toolbox: two object types — nodes and operators */}
-      <aside className={"toolbox" + (toolboxOpen ? "" : " collapsed")}>
-        <div className="toolbox-head">
-          <div className="toolbox-tabs">
-            <button
-              className={"tb-tab" + (toolboxTab === "operators" ? " on" : "")}
-              onClick={() => setToolboxTab("operators")}
-            >
-              operators
-            </button>
-            <button
-              className={"tb-tab" + (toolboxTab === "nodes" ? " on" : "")}
-              onClick={() => setToolboxTab("nodes")}
-            >
-              nodes
-            </button>
-          </div>
-          <button className="toolbox-toggle" onClick={() => setToolboxOpen((v) => !v)}>
-            {toolboxOpen ? "‹" : "›"}
-          </button>
-        </div>
-        {toolboxOpen && toolboxTab === "operators" && (
-          <>
-            <p className="toolbox-hint">drag a glyph onto a node</p>
-            <div className="operator-list">
-              {symbols.map((op) => (
-                <OperatorChip key={op.id} operator={op} onEdit={() => setEditing(op)} />
-              ))}
-              {symbols.length === 0 && <p className="toolbox-empty">no operators yet</p>}
-            </div>
-            <button className="op-new" onClick={() => setEditing(makeBlankSymbol())}>
-              + form an operator
-            </button>
-          </>
-        )}
-        {toolboxOpen && toolboxTab === "nodes" && (
-          <>
-            <p className="toolbox-hint">click a structure to drop it into the field</p>
-            <div className="node-list">
-              {savedNodes.map((n) => (
-                <SavedNodeChip
-                  key={n.id}
-                  node={n}
-                  onPlant={() => plantSavedNode(n)}
-                  onDelete={() => deleteSavedNode(n.id)}
+          {/* committed strokes */}
+          <svg className="ink-layer" style={{ overflow: "visible" }}>
+            {items
+              .filter((it) => it.type === "stroke")
+              .map((it) => (
+                <polyline
+                  key={it.id}
+                  data-item={it.id}
+                  points={it.points.map((p) => `${p.x},${p.y}`).join(" ")}
+                  fill="none"
+                  stroke={it.color}
+                  strokeWidth={it.width}
+                  strokeOpacity={it.marker ? 0.32 : 0.95}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className={selection.includes(it.id) ? "sel" : ""}
                 />
               ))}
-              {savedNodes.length === 0 && (
-                <p className="toolbox-empty">no saved nodes yet — save a structure from its panel</p>
+            {draft && draft.points.length > 1 && (
+              <polyline
+                points={draft.points.map((p) => `${p.x},${p.y}`).join(" ")}
+                fill="none"
+                stroke={INK}
+                strokeWidth={draft.marker ? MARKER_W : PEN_W}
+                strokeOpacity={draft.marker ? 0.32 : 0.95}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            )}
+          </svg>
+
+          {/* text + images */}
+          {items
+            .filter((it) => it.type !== "stroke")
+            .map((it) =>
+              it.type === "image" ? (
+                <img
+                  key={it.id}
+                  data-item={it.id}
+                  className={"board-img" + (selection.includes(it.id) ? " sel" : "")}
+                  src={it.src}
+                  style={{ left: it.x, top: it.y, width: it.w }}
+                  draggable={false}
+                  alt=""
+                />
+              ) : (
+                <BoardText
+                  key={it.id}
+                  item={it}
+                  selected={selection.includes(it.id)}
+                  editing={editing === it.id}
+                  onCommit={(text) => commitEdit(it.id, text)}
+                />
+              )
+            )}
+
+          {/* selection box */}
+          {selBBox && selection.length > 0 && (
+            <div
+              className="sel-box"
+              style={{
+                left: selBBox.minx - 10,
+                top: selBBox.miny - 10,
+                width: selBBox.maxx - selBBox.minx + 20,
+                height: selBBox.maxy - selBBox.miny + 20,
+              }}
+            />
+          )}
+        </div>
+
+        {/* live lasso (screen space) */}
+        {lasso && (
+          <div
+            className="lasso"
+            style={{
+              left: Math.min(lasso.x0, lasso.x1),
+              top: Math.min(lasso.y0, lasso.y1),
+              width: Math.abs(lasso.x1 - lasso.x0),
+              height: Math.abs(lasso.y1 - lasso.y0),
+            }}
+          />
+        )}
+      </div>
+
+      {/* brand */}
+      <div className="brand">lens</div>
+
+      {/* empty hint */}
+      {items.length === 0 && (
+        <div className="empty-hint">
+          double-click to write · draw with the pen · drag to select and operate
+        </div>
+      )}
+
+      {/* AI palette over the selection */}
+      {aiMenuPos && (
+        <AIPalette
+          pos={aiMenuPos}
+          busy={aiBusy}
+          operators={paletteOps}
+          textCount={selectedTextMaterial().length}
+          onAction={AI}
+          onDelete={deleteSelection}
+          onNewOperator={openCreateFunction}
+          onEditOperator={openEditFunction}
+        />
+      )}
+
+      {/* toolbox: your functions */}
+      <aside className={"toolbox" + (toolboxOpen ? "" : " closed")}>
+        <button className="tb-handle" onClick={() => setToolboxOpen((v) => !v)} title="toolbox">
+          {toolboxOpen ? "›" : "‹"}
+        </button>
+        {toolboxOpen && (
+          <div className="tb-body">
+            <div className="tb-head">
+              <span className="tb-title">toolbox</span>
+              <div className="tb-head-btns">
+                <button title="set up for a role" onClick={() => setOnboard({ step: "role" })}>
+                  ↻
+                </button>
+              </div>
+            </div>
+
+            <button className="tb-create" onClick={openCreateFunction}>
+              + create function
+            </button>
+
+            {topFunctions.length > 0 && (
+              <div className="tb-section">
+                <div className="tb-section-label">functions</div>
+                {topFunctions.map((op) => (
+                  <OperatorNode
+                    key={op.id}
+                    op={op}
+                    depth={0}
+                    opMap={opMap}
+                    expanded={expanded}
+                    onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
+                    onApply={(o) => runOperator(o)}
+                    onEdit={openEditFunction}
+                  />
+                ))}
+              </div>
+            )}
+
+            <div className="tb-section">
+              <div className="tb-section-label">basics</div>
+              {basics.map((op) => (
+                <OperatorNode
+                  key={op.id}
+                  op={op}
+                  depth={0}
+                  opMap={opMap}
+                  expanded={expanded}
+                  onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
+                  onApply={(o) => runOperator(o)}
+                  onEdit={openEditFunction}
+                />
+              ))}
+              {basics.length === 0 && topFunctions.length === 0 && (
+                <p className="tb-empty">no functions yet — set up for a role</p>
               )}
             </div>
-          </>
+          </div>
         )}
       </aside>
 
-      {/* plant controls */}
-      <div className="entry-dock">
-        {paletteOpen && (
-          <div className="palette">
-            <div className="palette-row">
-              {KIND_ORDER.map((k) => (
-                <button
-                  key={k}
-                  className="palette-chip"
-                  style={{ "--c": KINDS[k].color }}
-                  onClick={() => {
-                    setEntryKind(k);
-                    if (entryText.trim()) {
-                      enterThought(entryText, k);
-                      setEntryText("");
-                    } else {
-                      plantText(null, null, k);
-                    }
-                    setPaletteOpen(false);
-                  }}
-                  title={`new ${KINDS[k].label}`}
-                >
-                  <span className="palette-glyph">{KINDS[k].glyph}</span>
-                  <span className="palette-name">{KINDS[k].label}</span>
-                </button>
-              ))}
-            </div>
-            <div className="palette-row media">
-              <button
-                className="palette-chip media"
-                onClick={() => {
-                  plantSketch();
-                  setPaletteOpen(false);
-                }}
-              >
-                <span className="palette-glyph">✎</span>
-                <span className="palette-name">drawing</span>
-              </button>
-              <button
-                className="palette-chip media"
-                onClick={() => {
-                  pickImageFile();
-                  setPaletteOpen(false);
-                }}
-              >
-                <span className="palette-glyph">▦</span>
-                <span className="palette-name">image</span>
-              </button>
-            </div>
-            <div className="palette-tip">…or drop / paste an image anywhere</div>
-          </div>
-        )}
-
-        <div className="entry-bar">
+      {/* bottom tool dock */}
+      <div className="dock">
+        {[
+          ["select", "↖", "select / move (V)"],
+          ["text", "T", "text (T)"],
+          ["pen", "✎", "pen (P)"],
+          ["marker", "▔", "marker (M)"],
+          ["eraser", "⌫", "eraser (E)"],
+        ].map(([id, glyph, title]) => (
           <button
-            className={"entry-add" + (paletteOpen ? " open" : "")}
-            onClick={() => setPaletteOpen((v) => !v)}
-            title="choose a kind or medium"
+            key={id}
+            className={"tool" + (tool === id ? " on" : "")}
+            title={title}
+            onClick={() => setTool(id)}
           >
-            +
+            {glyph}
           </button>
-          <span className="entry-kind" style={{ color: KINDS[entryKind].color }} title={KINDS[entryKind].label}>
-            {KINDS[entryKind].glyph}
-          </span>
-          <input
-            className="entry-input"
-            value={entryText}
-            placeholder={`you enter: ${ENTRY_EXAMPLES[exIdx]}…`}
-            onChange={(e) => setEntryText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && entryText.trim()) {
-                enterThought(entryText, entryKind);
-                setEntryText("");
-              }
-            }}
-          />
-          <button
-            className="entry-go"
-            disabled={!entryText.trim()}
-            onClick={() => {
-              if (entryText.trim()) {
-                enterThought(entryText, entryKind);
-                setEntryText("");
-              }
-            }}
-          >
-            enter
-          </button>
-        </div>
+        ))}
+        <span className="dock-sep" />
+        <button className="tool" title="add image" onClick={pickImage}>
+          ▢
+        </button>
       </div>
 
-      {seeds.length === 0 && (
-        <div className="void-hint">
-          <p>emptiness, full of potential</p>
-          <span>
-            you enter a thought below — or drop an image, sketch, or double&#8209;click
-            anywhere
-          </span>
-        </div>
+      {/* zoom controls */}
+      <div className="zoom">
+        <button onClick={() => setCamera((c) => zoomBy(c, 1 / 1.2))}>−</button>
+        <button className="zoom-pct" onClick={() => setCamera((c) => ({ ...c, scale: 1 }))}>
+          {Math.round(camera.scale * 100)}%
+        </button>
+        <button onClick={() => setCamera((c) => zoomBy(c, 1.2))}>+</button>
+      </div>
+
+      {toast && <div className="toast">{toast}</div>}
+
+      {onboard && (
+        <Onboarding state={onboard} onStart={runOnboarding} onSkip={skipOnboarding} onClose={() => setOnboard(null)} />
       )}
 
-      {pending && pending.discover && (
-        <div className="combine-banner discover">
-          <span className="banner-sym">⟁</span> discovery engine ·{" "}
-          {pending.picks.length + (pending.fromId ? 1 : 0)} selected · click any nodes to include ·{" "}
-          <button
-            className="banner-go"
-            disabled={pending.picks.length + (pending.fromId ? 1 : 0) < 2}
-            onClick={runDiscovery}
-          >
-            find hidden sameness
-          </button>{" "}
-          · <em>esc to cancel</em>
-        </div>
-      )}
-
-      {pending && !pending.discover && (
-        <div className="combine-banner">
-          {OPS[pending.opKey].arity === "many-select" ? (
-            <>
-              <span className="banner-sym">{OPS[pending.opKey].sym}</span> {OPS[pending.opKey].name}:{" "}
-              {pending.picks.length + 1} selected · click ideas to add ·{" "}
-              <button className="banner-go" disabled={pending.picks.length < 1} onClick={runPending}>
-                {OPS[pending.opKey].name} now
-              </button>{" "}
-              · <em>esc to cancel</em>
-            </>
-          ) : (
-            <>
-              <span className="banner-sym">{OPS[pending.opKey].sym}</span> choose another idea to{" "}
-              {OPS[pending.opKey].name} · <em>esc to cancel</em>
-            </>
-          )}
-        </div>
-      )}
-
-      {selectedSeed && screenPos && (
-        <SeedPanel
-          seed={selectedSeed}
-          pos={screenPos}
-          flip={screenPos.x > window.innerWidth - 360}
-          busy={busyIds.includes(selectedSeed.id)}
-          onChange={(patch) => updateSeed(selectedSeed.id, patch)}
-          onOp={(opKey) => startOp(opKey, selectedSeed)}
-          onDelete={() => deleteSeed(selectedSeed.id)}
-          onReplay={() => setReplaySeed(selectedSeed)}
-          onSave={() => saveNodeToToolbox(selectedSeed)}
-          onSavePath={() => savePathAsOperator(selectedSeed)}
-          onClose={() => setSelected(null)}
+      {opEditor && (
+        <FunctionEditor
+          editor={opEditor}
+          opMap={opMap}
+          operators={operators}
+          onClose={() => setOpEditor(null)}
+          onSaveTree={saveFunctionTree}
+          onSaveManual={saveManualOp}
+          onDelete={deleteFunction}
         />
       )}
-
-      {replaySeed && <Replay seed={replaySeed} onClose={() => setReplaySeed(null)} />}
-
-      {discovering && <DiscoveryOverlay count={discovering.count} />}
-
-      {editing && (
-        <SymbolEditor
-          symbol={editing}
-          onSave={saveSymbol}
-          onDelete={editing.id && symbols.some((s) => s.id === editing.id) ? deleteSymbol : null}
-          onClose={() => setEditing(null)}
-        />
-      )}
-
-      {pendingFrag && (
-        <div className="combine-banner frag">
-          <span className="banner-sym">{FRAG_OPS[pendingFrag.opKey].sym}</span>
-          {FRAG_OPS[pendingFrag.opKey].name}: highlight the second fragment
-          {highlight ? (
-            <>
-              {" "}·{" "}
-              <button className="banner-go" onClick={runPendingFrag}>
-                {FRAG_OPS[pendingFrag.opKey].name} now
-              </button>
-            </>
-          ) : null}{" "}
-          · <em>esc to cancel</em>
-        </div>
-      )}
-
-      {highlight && (
-        <SelectionToolbar
-          rect={highlight.rect}
-          pendingFrag={pendingFrag}
-          onOp={onFragmentOp}
-          onConfirm={runPendingFrag}
-        />
-      )}
-
-      {selection.length > 0 && !markerPts && (
-        <div className="sel-bar">
-          <span className="sel-count">{selection.length} selected</span>
-          <button className="sel-act danger" onClick={deleteSelection}>
-            delete
-          </button>
-          <button
-            className="sel-act"
-            onClick={discoverSelection}
-            disabled={selection.length < 2}
-          >
-            find sameness
-          </button>
-          <button
-            className="sel-act"
-            onClick={stabilizeSelection}
-            disabled={selection.length < 2}
-          >
-            stabilize
-          </button>
-          <button className="sel-act ghost" onClick={clearSelection}>
-            clear
-          </button>
-        </div>
-      )}
-
-      {toast && <div className="void-toast">{toast}</div>}
     </div>
   );
 }
 
-function SavedNodeChip({ node, onPlant, onDelete }) {
-  const k = KINDS[node.kind] || KINDS.idea;
-  const preview =
-    node.title || (node.text || "").trim().split("\n")[0].slice(0, 40) || "untitled";
-  return (
-    <div className="node-chip" style={{ "--c": node.color || k.color }} onClick={onPlant}>
-      {node.type === "image" && node.image ? (
-        <span className="node-thumb" style={{ backgroundImage: `url(${node.image})` }} />
-      ) : (
-        <span className="node-glyph">{k.glyph}</span>
-      )}
-      <span className="node-title">{preview}</span>
-      <button
-        className="node-del"
-        onClick={(e) => {
+function zoomBy(c, factor) {
+  const scale = clamp(c.scale * factor, 0.12, 4.5);
+  const cx = window.innerWidth / 2;
+  const cy = window.innerHeight / 2;
+  const wx = (cx - c.x) / c.scale;
+  const wy = (cy - c.y) / c.scale;
+  return { scale, x: cx - wx * scale, y: cy - wy * scale };
+}
+
+function BoardText({ item, selected, editing, onCommit }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (editing && ref.current) {
+      ref.current.focus();
+      const r = document.createRange();
+      r.selectNodeContents(ref.current);
+      r.collapse(false);
+      const s = window.getSelection();
+      s.removeAllRanges();
+      s.addRange(r);
+    }
+  }, [editing]);
+
+  if (editing) {
+    return (
+      <div
+        ref={ref}
+        className="board-text editing"
+        data-item={item.id}
+        contentEditable
+        suppressContentEditableWarning
+        style={{ left: item.x, top: item.y }}
+        onPointerDown={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+        onBlur={() => onCommit(ref.current ? ref.current.innerText : item.text)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape" || (e.key === "Enter" && (e.metaKey || e.ctrlKey))) {
+            e.preventDefault();
+            onCommit(ref.current.innerText);
+          }
           e.stopPropagation();
-          onDelete();
         }}
-        title="remove"
-      >
-        ×
+        dangerouslySetInnerHTML={{ __html: escapeHtml(item.text) }}
+      />
+    );
+  }
+  return (
+    <div
+      className={"board-text" + (selected ? " sel" : "")}
+      data-item={item.id}
+      style={{ left: item.x, top: item.y }}
+    >
+      {item.text}
+    </div>
+  );
+}
+
+function escapeHtml(s) {
+  return (s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\n/g, "<br>");
+}
+
+function AIPalette({ pos, busy, operators, textCount, onAction, onDelete, onNewOperator, onEditOperator }) {
+  const [mode, setMode] = useState(null); // null | 'transform' | 'ask' | 'custom'
+  const [q, setQ] = useState("");
+  const style = { left: clamp(pos.x, 90, window.innerWidth - 90), top: Math.max(70, pos.y - 16) };
+
+  if (busy) {
+    return (
+      <div className="palette busy" style={style}>
+        <span className="spinner" /> working…
+      </div>
+    );
+  }
+
+  if (mode === "ask" || mode === "custom") {
+    const placeholder = mode === "ask" ? "ask a question about this…" : "describe a transformation…";
+    return (
+      <div className="palette" style={style}>
+        <input
+          autoFocus
+          className="palette-input"
+          placeholder={placeholder}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && q.trim()) {
+              mode === "ask" ? onAction.ask(q.trim()) : onAction.custom(q.trim());
+              setMode(null);
+              setQ("");
+            }
+            if (e.key === "Escape") setMode(null);
+          }}
+        />
+        <button className="p-btn" onClick={() => setMode(null)}>
+          ←
+        </button>
+      </div>
+    );
+  }
+
+  if (mode === "transform") {
+    return (
+      <div className="palette col" style={style}>
+        <div className="palette-row head">
+          <button className="p-btn ghost" onClick={() => setMode(null)}>
+            ←
+          </button>
+          <span className="palette-title">transform</span>
+        </div>
+        <div className="op-grid">
+          {operators.map((op) => (
+            <button
+              key={op.id}
+              className="op-chip"
+              onClick={() => onAction.operator(op)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                onEditOperator(op);
+              }}
+              title="click to apply · right-click to edit"
+            >
+              {op.name}
+            </button>
+          ))}
+          <button className="op-chip add" onClick={onNewOperator}>
+            + new
+          </button>
+        </div>
+        <button className="p-btn wide" onClick={() => setMode("custom")}>
+          custom instruction…
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="palette" style={style}>
+      <button className="p-btn" onClick={() => setMode("transform")}>
+        transform
+      </button>
+      <button className="p-btn" onClick={onAction.combine} disabled={textCount < 2}>
+        combine
+      </button>
+      <button className="p-btn" onClick={onAction.split}>
+        split
+      </button>
+      <button className="p-btn" onClick={() => setMode("ask")}>
+        ask
+      </button>
+      <button className="p-btn" onClick={onAction.sameness} disabled={textCount < 2}>
+        sameness
+      </button>
+      <span className="p-sep" />
+      <button className="p-btn danger" onClick={onDelete} title="delete selection">
+        ⌫
       </button>
     </div>
   );
 }
 
-const DISCOVERY_PHASES = [
-  "scanning each thing for its deep structure…",
-  "stripping away surface difference…",
-  "searching for the shared invariant…",
-  "testing the isomorphism across all of them…",
-  "crystallizing the hidden structure…",
-];
-
-function DiscoveryOverlay({ count }) {
-  const [secs, setSecs] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setSecs((s) => s + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
-  const phase = DISCOVERY_PHASES[Math.min(Math.floor(secs / 4), DISCOVERY_PHASES.length - 1)];
+function OperatorNode({ op, depth, opMap, expanded, onToggle, onApply, onEdit }) {
+  if (!op) return null;
+  const children = op.kind === "pipeline" && op.steps ? op.steps : [];
+  const open = expanded[op.id];
   return (
-    <div className="discovery-overlay">
-      <div className="disc-core">
-        <div className="disc-ring" />
-        <div className="disc-ring r2" />
-        <div className="disc-ring r3" />
-        <div className="disc-center">⟁</div>
+    <div className="tb-node">
+      <div className="tb-row" style={{ paddingLeft: 8 + depth * 14 }}>
+        {children.length ? (
+          <button className="tb-caret" onClick={() => onToggle(op.id)}>
+            {open ? "▾" : "▸"}
+          </button>
+        ) : (
+          <span className="tb-dot" />
+        )}
+        <div className="tb-text" onClick={() => onApply(op)} title="apply to selection">
+          <span className="tb-name">{op.name}</span>
+          {op.description && <span className="tb-desc">{op.description}</span>}
+        </div>
+        <button className="tb-edit" title="edit" onClick={() => onEdit(op)}>
+          ⚙
+        </button>
       </div>
-      <div className="disc-title">finding hidden sameness</div>
-      <div className="disc-sub">across {count} things · {secs}s</div>
-      <div className="disc-phase">{phase}</div>
+      {open &&
+        children.map((id) => (
+          <OperatorNode
+            key={id}
+            op={opMap[id]}
+            depth={depth + 1}
+            opMap={opMap}
+            expanded={expanded}
+            onToggle={onToggle}
+            onApply={onApply}
+            onEdit={onEdit}
+          />
+        ))}
     </div>
   );
 }
 
-const LAYERS = [
-  { key: "field", n: "I", label: "field", sub: "resonance space" },
-  { key: "branch", n: "II", label: "branching", sub: "collaborative growth" },
-  { key: "exp", n: "III", label: "experimentation", sub: "manipulable matter" },
-];
+function Onboarding({ state, onStart, onSkip, onClose }) {
+  const [custom, setCustom] = useState("");
 
-function LayersIndicator({ active }) {
-  return (
-    <div className="layers">
-      {LAYERS.map((l) => (
-        <div key={l.key} className={"layer" + (l.key === active ? " on" : "")}>
-          <span className="layer-n">{l.n}</span>
-          <span className="layer-text">
-            <span className="layer-label">{l.label}</span>
-            <span className="layer-sub">{l.sub}</span>
-          </span>
+  if (state.step === "role") {
+    return (
+      <div className="onboard-scrim">
+        <div className="onboard">
+          <div className="onboard-mark">lens</div>
+          <h2>What do you do?</h2>
+          <p className="onboard-sub">
+            I'll build you a toolbox of thinking functions — each one made of smaller functions — tuned to how you work.
+          </p>
+          <div className="role-grid">
+            {ROLES.map((r) => (
+              <button key={r} className="role-btn" onClick={() => onStart(r)}>
+                {r}
+              </button>
+            ))}
+          </div>
+          <div className="onboard-custom">
+            <input
+              placeholder="or type your own…"
+              value={custom}
+              onChange={(e) => setCustom(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && custom.trim() && onStart(custom.trim())}
+            />
+            <button disabled={!custom.trim()} onClick={() => custom.trim() && onStart(custom.trim())}>
+              build
+            </button>
+          </div>
+          <button className="onboard-skip" onClick={onSkip}>
+            skip for now
+          </button>
         </div>
+      </div>
+    );
+  }
+
+  if (state.step === "working") {
+    const pct = state.total ? Math.round((state.done / state.total) * 100) : 0;
+    return (
+      <div className="onboard-scrim">
+        <div className="onboard">
+          <div className="onboard-mark">lens</div>
+          <h2>Building your toolbox</h2>
+          <p className="onboard-sub">designing functions for a {state.role}, each composed of smaller functions…</p>
+          <div className="progress">
+            <div className="progress-bar" style={{ width: `${pct}%` }} />
+          </div>
+          <div className="progress-label">
+            {state.label || `${state.done} / ${state.total} functions`} {state.total ? `· ${state.done}/${state.total}` : ""}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (state.step === "done") {
+    return (
+      <div className="onboard-scrim">
+        <div className="onboard">
+          <div className="onboard-mark">lens</div>
+          <h2>Your toolbox is ready</h2>
+          <p className="onboard-sub">
+            {state.count} functions built for a {state.role}. Open one in the toolbox to see the smaller functions inside it,
+            or select text and apply a function.
+          </p>
+          <button className="onboard-go" onClick={onClose}>
+            start thinking
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="onboard-scrim">
+      <div className="onboard">
+        <div className="onboard-mark">lens</div>
+        <h2>Hm, that didn't work</h2>
+        <p className="onboard-sub">{state.message}</p>
+        <div className="onboard-custom">
+          <button className="onboard-go" onClick={() => onStart("founder")}>
+            try again
+          </button>
+          <button className="onboard-skip" onClick={onSkip}>
+            skip
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveManual, onDelete }) {
+  const isCreate = editor.mode === "create";
+  const op = editor.op || null;
+  const isPipeline = op?.kind === "pipeline";
+
+  const [tab, setTab] = useState("describe"); // describe | manual
+  const [prose, setProse] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [preview, setPreview] = useState(null); // Claude JSON tree awaiting save
+
+  const [name, setName] = useState(op?.name || "");
+  const [description, setDescription] = useState(op?.description || "");
+  const [prompt, setPrompt] = useState(op?.prompt || "");
+
+  async function runDescribe() {
+    const instruction = prose.trim();
+    if (!instruction) return;
+    setBusy(true);
+    setError(null);
+    setPreview(null);
+    try {
+      let tree;
+      if (isCreate) {
+        tree = await createFunctionFromProse(instruction, operators, opMap);
+      } else {
+        tree = await editFunctionWithProse(op, opMap, instruction, operators);
+      }
+      setPreview(tree);
+      setName(tree.name || name);
+      setDescription(tree.description || description);
+      if (tree.prompt) setPrompt(tree.prompt);
+    } catch (err) {
+      setError(err.message || "Could not build that function.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function acceptPreview() {
+    if (!preview) return;
+    const { ops } = treeToOperators(preview, {
+      role: op?.role || null,
+      top: isCreate ? true : !!op?.top,
+    });
+    onSaveTree(isCreate ? null : op.id, ops);
+  }
+
+  function saveManual() {
+    if (!name.trim()) return;
+    if (isPipeline) {
+      // pipeline metadata only — structure edits go through describe
+      onSaveManual({
+        ...op,
+        name: name.trim(),
+        description: description.trim(),
+      });
+      return;
+    }
+    const id = op?.id || uid();
+    onSaveManual({
+      id,
+      kind: "prompt",
+      name: name.trim(),
+      description: description.trim(),
+      prompt: prompt.trim(),
+      top: isCreate ? true : op?.top,
+    });
+  }
+
+  return (
+    <div className="modal-scrim" onClick={onClose}>
+      <div className="fn-editor" onClick={(e) => e.stopPropagation()}>
+        <div className="fn-head">
+          <h3>{isCreate ? "create function" : "edit function"}</h3>
+          <button className="fn-close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+
+        <div className="fn-tabs">
+          <button className={"fn-tab" + (tab === "describe" ? " on" : "")} onClick={() => setTab("describe")}>
+            describe
+          </button>
+          <button className={"fn-tab" + (tab === "manual" ? " on" : "")} onClick={() => setTab("manual")}>
+            manual
+          </button>
+        </div>
+
+        {tab === "describe" && (
+          <div className="fn-pane">
+            <p className="fn-hint">
+              {isCreate
+                ? "Describe what you want this function to do in plain English. Claude will design it and break it into sub-functions down to editable primitives."
+                : "Tell Claude what to change — add a step, rewrite a prompt, rename it, make it sharper. It updates the whole function tree."}
+            </p>
+
+            {!isCreate && op && (
+              <div className="fn-current">
+                <div className="fn-current-label">current</div>
+                <pre>{serializeTree(op, opMap)}</pre>
+              </div>
+            )}
+
+            <textarea
+              className="fn-prose"
+              rows={4}
+              autoFocus
+              placeholder={
+                isCreate
+                  ? 'e.g. "Take messy meeting notes and extract action items, owners, and deadlines as a clean list"'
+                  : 'e.g. "Add a step that checks for contradictions" or "Make the final output shorter and more direct"'
+              }
+              value={prose}
+              onChange={(e) => setProse(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) runDescribe();
+              }}
+            />
+
+            {error && <div className="fn-error">{error}</div>}
+
+            <button className="fn-generate" disabled={busy || !prose.trim()} onClick={runDescribe}>
+              {busy ? (
+                <>
+                  <span className="spinner" /> building…
+                </>
+              ) : isCreate ? (
+                "generate function"
+              ) : (
+                "apply changes"
+              )}
+            </button>
+
+            {preview && (
+              <div className="fn-preview">
+                <div className="fn-preview-head">
+                  <span className="fn-preview-label">preview</span>
+                  <span className="fn-preview-name">{preview.name}</span>
+                </div>
+                {preview.description && <p className="fn-preview-desc">{preview.description}</p>}
+                <FunctionPreviewTree node={preview} depth={0} />
+                <div className="fn-preview-actions">
+                  <button className="fn-secondary" onClick={() => setPreview(null)}>
+                    revise
+                  </button>
+                  <button className="fn-primary" onClick={acceptPreview}>
+                    {isCreate ? "add to toolbox" : "save changes"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "manual" && (
+          <div className="fn-pane">
+            <label>name</label>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. stress-test thesis" />
+
+            <label>description</label>
+            <input
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="what goes in, what comes out"
+            />
+
+            {isPipeline && op ? (
+              <>
+                <label>structure</label>
+                <p className="fn-hint small">
+                  This is a composed function. To add, remove, or reorder steps, use the <strong>describe</strong> tab.
+                </p>
+                <div className="fn-tree-readonly">
+                  <FunctionPreviewTreeFromOps root={op} opMap={opMap} depth={0} />
+                </div>
+              </>
+            ) : (
+              <>
+                <label>prompt</label>
+                <textarea
+                  rows={7}
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  placeholder="Precise instruction for Claude: what to do with the input text, and to return only the result."
+                />
+              </>
+            )}
+          </div>
+        )}
+
+        <div className="fn-foot">
+          {!isCreate && op && (
+            <button className="fn-del" onClick={() => onDelete(op.id)}>
+              delete
+            </button>
+          )}
+          <span style={{ flex: 1 }} />
+          <button className="fn-secondary" onClick={onClose}>
+            cancel
+          </button>
+          {tab === "manual" && (
+            <button
+              className="fn-primary"
+              disabled={!name.trim() || (!isPipeline && !prompt.trim())}
+              onClick={saveManual}
+            >
+              save
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// preview tree from Claude JSON (nested steps)
+function FunctionPreviewTree({ node, depth }) {
+  if (!node) return null;
+  const children = node.steps || [];
+  const isLeaf = !children.length;
+  return (
+    <div className="fn-tree-node" style={{ paddingLeft: depth * 16 }}>
+      <div className="fn-tree-row">
+        <span className={"fn-tree-dot" + (isLeaf ? " leaf" : "")} />
+        <span className="fn-tree-name">{node.name}</span>
+        {node.description && <span className="fn-tree-desc">{node.description}</span>}
+      </div>
+      {node.prompt && (
+        <div className="fn-tree-prompt" style={{ paddingLeft: 16 + depth * 16 }}>
+          {node.prompt}
+        </div>
+      )}
+      {children.map((child, i) => (
+        <FunctionPreviewTree key={i} node={child} depth={depth + 1} />
       ))}
     </div>
   );
 }
 
-function SelectionToolbar({ rect, pendingFrag, onOp, onConfirm }) {
-  const ref = useRef(null);
-  const [pos, setPos] = useState({ left: rect.left + rect.width / 2, top: rect.top - 8 });
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
-    let left = rect.left + rect.width / 2 - w / 2;
-    let top = rect.top - h - 10;
-    left = Math.max(10, Math.min(window.innerWidth - w - 10, left));
-    if (top < 10) top = rect.bottom + 10; // flip below if no room above
-    setPos({ left, top });
-  }, [rect]);
-
+// preview tree from flat opMap (saved operators)
+function FunctionPreviewTreeFromOps({ root, opMap, depth }) {
+  if (!root) return null;
+  const children = root.kind === "pipeline" && root.steps ? root.steps.map((id) => opMap[id]).filter(Boolean) : [];
+  const isLeaf = root.kind === "prompt";
   return (
-    <div className="sel-toolbar" ref={ref} style={{ left: pos.left, top: pos.top }}>
-      {pendingFrag ? (
-        <button
-          className="sel-btn confirm"
-          style={{ "--c": FRAG_OPS[pendingFrag.opKey].color }}
-          onClick={onConfirm}
-        >
-          <span className="sel-sym">{FRAG_OPS[pendingFrag.opKey].sym}</span>
-          <span className="sel-name">{FRAG_OPS[pendingFrag.opKey].name} with this</span>
-        </button>
-      ) : (
-        FRAG_ORDER.map((k) => {
-          const op = FRAG_OPS[k];
-          return (
-            <button
-              key={k}
-              className="sel-btn"
-              style={{ "--c": op.color }}
-              title={op.hint}
-              onClick={() => onOp(k)}
-            >
-              <span className="sel-sym">{op.sym}</span>
-              <span className="sel-name">{op.name}</span>
-            </button>
-          );
-        })
-      )}
-    </div>
-  );
-}
-
-function makeBlankSymbol() {
-  return {
-    id: uid(),
-    name: "",
-    emoji: EMOJI_CHOICES[Math.floor(Math.random() * EMOJI_CHOICES.length)],
-    color: COLOR_CHOICES[Math.floor(Math.random() * COLOR_CHOICES.length)],
-    image: null,
-    strokes: [],
-    prompt: "",
-    count: 1,
-    __isNew: true,
-  };
-}
-
-function SymbolIcon({ symbol, size = 22 }) {
-  if (symbol?.image) {
-    return (
-      <img
-        className="symbol-icon"
-        src={symbol.image}
-        alt={symbol.name || "operator"}
-        width={size}
-        height={size}
-        draggable={false}
-      />
-    );
-  }
-  return (
-    <span className="symbol-icon emoji" style={{ fontSize: size * 0.9 }}>
-      {symbol?.emoji}
-    </span>
-  );
-}
-
-function OperatorChip({ operator, onEdit }) {
-  const ghostRef = useRef(null);
-  return (
-    <div
-      className="operator-chip"
-      draggable
-      onDragStart={(e) => {
-        e.dataTransfer.setData("text/lens-operator", operator.id);
-        e.dataTransfer.effectAllowed = "copy";
-        if (ghostRef.current) e.dataTransfer.setDragImage(ghostRef.current, 28, 28);
-      }}
-      style={{ "--accent": operator.color }}
-      title="Drag onto a seed"
-    >
-      <span className="chip-icon">
-        <SymbolIcon symbol={operator} size={20} />
-      </span>
-      <span className="chip-name">{operator.name || "untitled"}</span>
-      {operator.count > 1 && <span className="chip-count">×{operator.count}</span>}
-      <button
-        className="chip-edit"
-        onClick={(e) => {
-          e.stopPropagation();
-          onEdit();
-        }}
-        title="Edit"
-      >
-        ⚙
-      </button>
-      <div className="drag-ghost" ref={ghostRef} style={{ "--accent": operator.color }}>
-        <SymbolIcon symbol={operator} size={38} />
+    <div className="fn-tree-node" style={{ paddingLeft: depth * 16 }}>
+      <div className="fn-tree-row">
+        <span className={"fn-tree-dot" + (isLeaf ? " leaf" : "")} />
+        <span className="fn-tree-name">{root.name}</span>
+        {root.description && <span className="fn-tree-desc">{root.description}</span>}
       </div>
-    </div>
-  );
-}
-
-// Realistic star tints (blue-white giants, sun-like, warm dwarfs)
-const STAR_TINTS = [
-  [170, 196, 255],
-  [202, 220, 255],
-  [235, 240, 255],
-  [255, 252, 240],
-  [255, 232, 200],
-  [255, 210, 170],
-];
-
-function mod(v, m) {
-  return ((v % m) + m) % m;
-}
-
-function Starfield({ camera }) {
-  const ref = useRef(null);
-  const camRef = useRef(camera);
-  camRef.current = camera;
-
-  useEffect(() => {
-    const canvas = ref.current;
-    const ctx = canvas.getContext("2d");
-    let raf;
-    let w = 0;
-    let h = 0;
-    let stars = [];
-    let shoots = [];
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-
-    function init() {
-      const n = Math.floor((w * h) / (5200 * dpr));
-      const count = Math.max(140, Math.min(420, n));
-      stars = Array.from({ length: count }, () => {
-        const depth = Math.random();
-        const bright = Math.random() < 0.07;
-        return {
-          x: Math.random() * w,
-          y: Math.random() * h,
-          r: (bright ? 1.4 + Math.random() * 1.8 : 0.3 + depth * 1.2) * dpr,
-          base: bright ? 0.85 : 0.25 + depth * 0.5,
-          tw: Math.random() * Math.PI * 2,
-          tws: (bright ? 0.012 : 0.02 + Math.random() * 0.03),
-          par: (0.015 + depth * 0.07) * dpr,
-          tint: STAR_TINTS[Math.floor(Math.random() * STAR_TINTS.length)],
-          bright,
-          spike: bright ? (3 + Math.random() * 4) * dpr : 0,
-        };
-      });
-    }
-    function resize() {
-      w = canvas.width = canvas.offsetWidth * dpr;
-      h = canvas.height = canvas.offsetHeight * dpr;
-      init();
-    }
-
-    function spawnShoot() {
-      const fromLeft = Math.random() < 0.5;
-      const y = Math.random() * h * 0.6;
-      const speed = (7 + Math.random() * 6) * dpr;
-      const ang = (fromLeft ? 0.32 : Math.PI - 0.32) + (Math.random() - 0.5) * 0.18;
-      shoots.push({
-        x: fromLeft ? -40 : w + 40,
-        y,
-        vx: Math.cos(ang) * speed,
-        vy: Math.sin(ang) * speed,
-        life: 1,
-        len: (90 + Math.random() * 80) * dpr,
-        tint: STAR_TINTS[Math.floor(Math.random() * 3)],
-      });
-    }
-
-    function tick() {
-      ctx.clearRect(0, 0, w, h);
-      const cam = camRef.current || { x: 0, y: 0 };
-
-      for (const s of stars) {
-        s.tw += s.tws;
-        const tw = 0.55 + 0.45 * Math.sin(s.tw);
-        const a = Math.min(1, s.base * tw);
-        const px = mod(s.x - cam.x * s.par, w);
-        const py = mod(s.y - cam.y * s.par, h);
-        const [r, g, b] = s.tint;
-
-        if (s.bright) {
-          const glowR = s.r * 7;
-          const grad = ctx.createRadialGradient(px, py, 0, px, py, glowR);
-          grad.addColorStop(0, `rgba(${r},${g},${b},${a * 0.7})`);
-          grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
-          ctx.fillStyle = grad;
-          ctx.beginPath();
-          ctx.arc(px, py, glowR, 0, Math.PI * 2);
-          ctx.fill();
-
-          // diffraction spikes
-          ctx.strokeStyle = `rgba(${r},${g},${b},${a * 0.5})`;
-          ctx.lineWidth = 0.7 * dpr;
-          const sp = s.spike * (0.7 + 0.3 * tw);
-          ctx.beginPath();
-          ctx.moveTo(px - sp, py);
-          ctx.lineTo(px + sp, py);
-          ctx.moveTo(px, py - sp);
-          ctx.lineTo(px, py + sp);
-          ctx.stroke();
-        }
-
-        ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
-        ctx.beginPath();
-        ctx.arc(px, py, s.r, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // shooting stars
-      if (Math.random() < 0.005 && shoots.length < 2) spawnShoot();
-      shoots = shoots.filter((sh) => sh.life > 0 && sh.x > -80 && sh.x < w + 80);
-      for (const sh of shoots) {
-        sh.x += sh.vx;
-        sh.y += sh.vy;
-        sh.life -= 0.012;
-        const tx = sh.x - sh.vx * (sh.len / Math.hypot(sh.vx, sh.vy));
-        const ty = sh.y - sh.vy * (sh.len / Math.hypot(sh.vx, sh.vy));
-        const [r, g, b] = sh.tint;
-        const grad = ctx.createLinearGradient(sh.x, sh.y, tx, ty);
-        grad.addColorStop(0, `rgba(${r},${g},${b},${0.9 * sh.life})`);
-        grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
-        ctx.strokeStyle = grad;
-        ctx.lineWidth = 1.6 * dpr;
-        ctx.lineCap = "round";
-        ctx.beginPath();
-        ctx.moveTo(sh.x, sh.y);
-        ctx.lineTo(tx, ty);
-        ctx.stroke();
-        ctx.fillStyle = `rgba(255,255,255,${sh.life})`;
-        ctx.beginPath();
-        ctx.arc(sh.x, sh.y, 1.6 * dpr, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      raf = requestAnimationFrame(tick);
-    }
-    resize();
-    tick();
-    window.addEventListener("resize", resize);
-    return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener("resize", resize);
-    };
-  }, []);
-  return <canvas ref={ref} className="starfield" />;
-}
-
-function Synapses({ seeds, edges }) {
-  const pos = useMemo(() => {
-    const m = {};
-    for (const s of seeds) m[s.id] = s;
-    return m;
-  }, [seeds]);
-
-  return (
-    <svg className="synapses" overflow="visible">
-      {edges.map((e) => {
-        const a = pos[e.a];
-        const b = pos[e.b];
-        if (!a || !b) return null;
-        return (
-          <line key={e.id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="synapse" stroke={a.color} />
-        );
-      })}
-    </svg>
-  );
-}
-
-function Seed({ seed, scale, selected, pendingFrom, picked, pickMode, marked, busy, onActivate, onMoveBy, onDropOperator }) {
-  const drag = useRef(null);
-  const [over, setOver] = useState(false);
-  const isSketch = seed.type === "sketch";
-  const isImage = seed.type === "image";
-  const size = isSketch || isImage ? 76 : 0;
-
-  function down(e) {
-    e.stopPropagation();
-    e.currentTarget.setPointerCapture(e.pointerId);
-    drag.current = { moved: 0 };
-  }
-  function move(e) {
-    if (!drag.current) return;
-    drag.current.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
-    onMoveBy(e.movementX / scale, e.movementY / scale);
-  }
-  function up() {
-    const d = drag.current;
-    drag.current = null;
-    if (d && d.moved < 4) onActivate();
-  }
-
-  const note = seed.title || (seed.text || "").trim();
-  const empty = !isSketch && !isImage && !note;
-
-  return (
-    <div
-      className={
-        "seed" +
-        (selected ? " selected" : "") +
-        (pendingFrom ? " combine-from" : "") +
-        (picked ? " picked" : "") +
-        (marked ? " marked" : "") +
-        (pickMode ? " targetable" : "") +
-        (seed.particle ? " particle" : "") +
-        (seed.discovery || seed.struct ? " structure" : "") +
-        (seed.analysis ? " analysis" : "") +
-        (seed.flash ? " flash" : "") +
-        (busy || seed.loading ? " busy" : "") +
-        (seed.loading ? " forming" : "") +
-        (over ? " op-over" : "")
-      }
-      style={{ left: seed.x, top: seed.y }}
-      onPointerDown={down}
-      onPointerMove={move}
-      onPointerUp={up}
-      onPointerLeave={up}
-      onDragOver={(e) => {
-        e.preventDefault();
-        setOver(true);
-      }}
-      onDragLeave={() => setOver(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setOver(false);
-        const id = e.dataTransfer.getData("text/lens-operator");
-        if (id) onDropOperator(id);
-      }}
-    >
-      {(isSketch || isImage) && seed.image ? (
-        <div
-          className={isImage ? "seed-image" : "seed-sketch"}
-          style={{ width: size, height: size, backgroundImage: `url(${seed.image})` }}
-        />
-      ) : empty ? (
-        <div className="seed-dot" />
-      ) : (
-        <div className="seed-note">{note}</div>
-      )}
-    </div>
-  );
-}
-
-function SeedPanel({ seed, pos, flip, busy, onChange, onOp, onDelete, onReplay, onSave, onSavePath, onClose }) {
-  const ref = useRef(null);
-  const isSketch = seed.type === "sketch";
-  const isImage = seed.type === "image";
-  const legacy = ["evolve", "branch", "split", "combine", "operator"];
-  const hasFormation = (seed.history || []).some(
-    (s) => OPS[s.kind] || legacy.includes(s.kind)
-  );
-  const hasPath = (seed.history || []).some((s) => OPS[s.kind] && OPS[s.kind].prompt);
-  const [editing, setEditing] = useState(!(seed.text || "").trim());
-  useEffect(() => {
-    setEditing(!(seed.text || "").trim());
-  }, [seed.id]);
-  useEffect(() => {
-    const el = ref.current;
-    if (el && editing) {
-      el.style.height = "auto";
-      el.style.height = Math.min(el.scrollHeight, 220) + "px";
-    }
-  }, [seed.text, editing]);
-
-  return (
-    <div
-      className={"seed-panel" + (flip ? " left" : "")}
-      style={{ left: pos.x, top: pos.y, "--glow": seed.color }}
-      onPointerDown={(e) => e.stopPropagation()}
-    >
-      <div className="seed-panel-glow" />
-
-      {seed.title && <div className="seed-struct-title">{seed.title}</div>}
-
-      <div className="kind-picker">
-        {KIND_ORDER.map((k) => (
-          <button
-            key={k}
-            className={"kind-chip" + (seed.kind === k ? " on" : "")}
-            style={{ "--c": KINDS[k].color }}
-            title={KINDS[k].label}
-            onClick={() => onChange({ kind: k, color: KINDS[k].color })}
-          >
-            <span className="kind-glyph">{KINDS[k].glyph}</span>
-          </button>
-        ))}
-      </div>
-
-      {isImage ? (
-        <div className="seed-image-view">
-          <div className="img-frame" style={{ backgroundImage: `url(${seed.image})` }} />
-          <textarea
-            className="seed-input caption"
-            value={seed.text}
-            placeholder="add a note or question about this image… (Claude can see it)"
-            onChange={(e) => onChange({ text: e.target.value })}
-          />
-        </div>
-      ) : isSketch ? (
-        <DrawPad
-          initialStrokes={seed.strokes}
-          accent={seed.color}
-          onChange={(image, strokes) => onChange({ image, strokes })}
-        />
-      ) : editing ? (
-        <textarea
-          ref={ref}
-          autoFocus
-          className="seed-input"
-          value={seed.text}
-          placeholder="speak the thought into being…"
-          onBlur={() => {
-            if ((seed.text || "").trim()) setEditing(false);
-          }}
-          onChange={(e) => onChange({ text: e.target.value })}
-        />
-      ) : (
-        <div className="seed-read-wrap">
-          <div className="seed-read" data-selectable data-seed-id={seed.id}>
-            {seed.text}
-          </div>
-          <button
-            className="read-edit"
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => setEditing(true)}
-            title="edit text"
-          >
-            ✎
-          </button>
-          <div className="read-hint">highlight any words to operate on them</div>
+      {root.prompt && (
+        <div className="fn-tree-prompt" style={{ paddingLeft: 16 + depth * 16 }}>
+          {root.prompt}
         </div>
       )}
-
-      {!isSketch && (
-        <div className="grammar">
-          {OP_GROUPS.map((g) => (
-            <div className="op-group" key={g.key}>
-              <span className="op-group-label">{g.label}</span>
-              <div className={"op-row " + g.key}>
-                {opsIn(g.key).map((op) => (
-                  <button
-                    key={op.key}
-                    className={"op-btn" + (op.arity === 2 || op.arity === "many-select" ? " dual" : "")}
-                    style={{ "--c": op.color }}
-                    onClick={() => onOp(op.key)}
-                    disabled={busy}
-                    title={`${op.name}${
-                      op.arity === 2
-                        ? " (needs a second idea)"
-                        : op.arity === "many-select"
-                        ? " (collapses several ideas)"
-                        : ""
-                    }`}
-                  >
-                    <span className="op-sym">{op.sym}</span>
-                    <span className="op-name">{op.name}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div className="seed-foot">
-        <button
-          className="ghost-btn replay"
-          onClick={onReplay}
-          disabled={!hasFormation}
-          title={hasFormation ? "replay formation" : "no operations yet — apply a primitive, interaction, or operator first"}
-        >
-          ▷ replay
-        </button>
-        <button className="ghost-btn save" onClick={onSave} title="save this node to the toolbox">
-          ⊕ save
-        </button>
-        <button
-          className="ghost-btn save"
-          onClick={onSavePath}
-          disabled={!hasPath}
-          title={hasPath ? "save the sequence of functions as a reusable operator" : "no reusable function-path yet"}
-        >
-          ⛓ path → operator
-        </button>
-        <div className="spacer" />
-        <button className="ghost-btn" onClick={onDelete}>
-          dissolve
-        </button>
-        <button className="ghost-btn" onClick={onClose}>
-          close
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function StepGlyph({ step, color }) {
-  const op = step.op;
-  if (op && op.image) return <img className="stage-img" src={op.image} alt={op.name || ""} />;
-  if (op && op.emoji) return <span className="stage-emoji">{op.emoji}</span>;
-  const meta = VERB_META[step.kind] || VERB_META.operator;
-  return <span className="stage-symbol" style={{ color }}>{meta.symbol}</span>;
-}
-
-// estimate a comfortable reading time for a scene
-function readMs(text) {
-  const words = (text || "").trim().split(/\s+/).filter(Boolean).length;
-  return Math.min(9000, Math.max(3600, 900 + words * 320));
-}
-
-function Replay({ seed, onClose }) {
-  const steps = useMemo(
-    () => (seed.history && seed.history.length ? seed.history : [{ kind: "plant", op: null, to: seed.text }]),
-    [seed]
-  );
-
-  const [phase, setPhase] = useState("loading"); // loading | play | error
-  const [journey, setJourney] = useState(null);
-  const [errMsg, setErrMsg] = useState("");
-  const [i, setI] = useState(0); // 0 = title, 1..N = stages, N+1 = synthesis
-  const [playing, setPlaying] = useState(true);
-
-  const total = steps.length + 2; // title + stages + synthesis
-
-  async function trace() {
-    setPhase("loading");
-    setErrMsg("");
-    try {
-      const j = await narrateJourney(steps);
-      setJourney(j);
-      setI(0);
-      setPlaying(true);
-      setPhase("play");
-    } catch (e) {
-      setErrMsg(e.message || "Could not trace the thought.");
-      setPhase("error");
-    }
-  }
-
-  useEffect(() => {
-    trace();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // scene content for timing
-  const sceneText = useMemo(() => {
-    if (phase !== "play" || !journey) return "";
-    if (i === 0) return journey.title || "";
-    if (i === total - 1) return journey.synthesis || "";
-    const ch = journey.chapters[i - 1] || {};
-    return (ch.narration || "") + " " + (steps[i - 1]?.to || "");
-  }, [phase, journey, i, total, steps]);
-
-  useEffect(() => {
-    if (phase !== "play" || !playing) return;
-    if (i >= total - 1) {
-      setPlaying(false);
-      return;
-    }
-    const t = setTimeout(() => setI((v) => v + 1), readMs(sceneText));
-    return () => clearTimeout(t);
-  }, [phase, playing, i, total, sceneText]);
-
-  useEffect(() => {
-    function onKey(e) {
-      if (e.key === "Escape") onClose();
-      if (phase !== "play") return;
-      if (e.key === "ArrowRight") {
-        setPlaying(false);
-        setI((v) => Math.min(total - 1, v + 1));
-      }
-      if (e.key === "ArrowLeft") {
-        setPlaying(false);
-        setI((v) => Math.max(0, v - 1));
-      }
-      if (e.key === " ") {
-        e.preventDefault();
-        setPlaying((v) => !v);
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [phase, total, onClose]);
-
-  if (phase === "loading") {
-    return (
-      <div className="replay-overlay" onClick={onClose}>
-        <div className="replay-stage loading" onClick={(e) => e.stopPropagation()} style={{ "--c": "#5e6b80" }}>
-          <div className="replay-orb-wrap">
-            <span className="replay-shock" />
-            <span className="replay-shock two" />
-            <div className="replay-orb tracing" />
-          </div>
-          <div className="replay-tracing">tracing the thought…</div>
-          <div className="replay-sub">reconstructing how this idea came to be</div>
-        </div>
-      </div>
-    );
-  }
-
-  if (phase === "error") {
-    return (
-      <div className="replay-overlay" onClick={onClose}>
-        <div className="replay-stage" onClick={(e) => e.stopPropagation()} style={{ "--c": "#fb7185" }}>
-          <div className="replay-label" style={{ color: "#fb7185" }}>
-            the thread went dark
-          </div>
-          <div className="replay-sub">{errMsg}</div>
-          <div className="replay-controls">
-            <button className="ghost-btn" onClick={trace}>
-              ⟲ try again
-            </button>
-            <div className="spacer" />
-            <button className="ghost-btn" onClick={onClose}>
-              close
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // ---- play phase ----
-  const isTitle = i === 0;
-  const isSynth = i === total - 1;
-  const stepIdx = i - 1;
-  const step = !isTitle && !isSynth ? steps[stepIdx] : null;
-  const chapter = step ? journey.chapters[stepIdx] || {} : null;
-  const meta = step ? VERB_META[step.kind] || VERB_META.operator : null;
-  const color = isTitle
-    ? "#5e6b80"
-    : isSynth
-    ? "#a78bfa"
-    : (step.op && step.op.color) || meta.color;
-
-  return (
-    <div className="replay-overlay" onClick={onClose}>
-      <div className="replay-stage" onClick={(e) => e.stopPropagation()} style={{ "--c": color }}>
-        <div className="replay-journey-title">{journey.title}</div>
-
-        {isTitle ? (
-          <div className="replay-scene title" key="title">
-            <div className="replay-count">the journey of</div>
-            <h1 className="replay-big">{journey.title}</h1>
-            <div className="replay-sub">{steps.length} stages · from first spark to final form</div>
-          </div>
-        ) : isSynth ? (
-          <div className="replay-scene synth" key="synth">
-            <div className="replay-count">the arc, end to end</div>
-            <div className="replay-orb-wrap" key="synth-orb">
-              <span className="replay-shock" />
-              <div className="replay-orb">
-                <span className="stage-symbol" style={{ color }}>
-                  ✧
-                </span>
-              </div>
-            </div>
-            <div className="replay-synthesis">{journey.synthesis}</div>
-            <div className="replay-final">“{steps[steps.length - 1]?.to}”</div>
-          </div>
-        ) : (
-          <div className="replay-scene" key={"s" + i}>
-            <div className="replay-head">
-              <span className="replay-count">
-                stage {stepIdx + 1} / {steps.length}
-              </span>
-              <span className="replay-move" style={{ color }}>
-                {chapter.move || (step.op && step.op.name) || meta.label}
-              </span>
-            </div>
-
-            {step.parents && (
-              <div className="replay-parents">
-                {step.parents.map((p, k) => (
-                  <div className="replay-parent" key={k}>
-                    {(p.text || "").slice(0, 80) || "—"}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div className="replay-orb-wrap" key={"o" + i}>
-              <span className="replay-shock" />
-              <span className="replay-shock two" />
-              <div className="replay-orb">
-                <StepGlyph step={step} color={color} />
-              </div>
-            </div>
-
-            <div className="replay-narration">{chapter.narration}</div>
-            <div className="replay-text">{step.to ? `“${step.to}”` : <em className="muted">an empty seed</em>}</div>
-          </div>
-        )}
-
-        <div className="replay-dots">
-          {Array.from({ length: total }, (_, k) => (
-            <button
-              key={k}
-              className={"replay-dot" + (k === i ? " on" : "") + (k < i ? " done" : "")}
-              onClick={() => {
-                setPlaying(false);
-                setI(k);
-              }}
-            />
-          ))}
-        </div>
-
-        <div className="replay-controls">
-          <button
-            className="ghost-btn"
-            onClick={() => {
-              setI(0);
-              setPlaying(true);
-            }}
-          >
-            ⟲ restart
-          </button>
-          <button
-            className="ghost-btn"
-            onClick={() => {
-              setPlaying(false);
-              setI((v) => Math.max(0, v - 1));
-            }}
-            disabled={i === 0}
-          >
-            ‹ prev
-          </button>
-          <button className="ghost-btn" onClick={() => setPlaying((v) => !v)}>
-            {playing ? "❚❚ pause" : "▷ play"}
-          </button>
-          <button
-            className="ghost-btn"
-            onClick={() => {
-              setPlaying(false);
-              setI((v) => Math.min(total - 1, v + 1));
-            }}
-            disabled={i >= total - 1}
-          >
-            next ›
-          </button>
-          <div className="spacer" />
-          <button className="ghost-btn" onClick={onClose}>
-            close
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DrawPad({ initialStrokes = [], accent = "#2f5d8a", onChange }) {
-  const canvasRef = useRef(null);
-  const [strokes, setStrokes] = useState(() => initialStrokes || []);
-  const [color, setColor] = useState("#20201d");
-  const [size, setSize] = useState(8);
-  const [erasing, setErasing] = useState(false);
-  const drawingRef = useRef(null);
-
-  function paintStroke(ctx, stroke) {
-    if (!stroke.points.length) return;
-    ctx.globalCompositeOperation = stroke.erase ? "destination-out" : "source-over";
-    ctx.strokeStyle = stroke.color;
-    ctx.fillStyle = stroke.color;
-    ctx.lineWidth = stroke.size;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    const pts = stroke.points;
-    if (pts.length === 1) {
-      ctx.beginPath();
-      ctx.arc(pts[0].x, pts[0].y, stroke.size / 2, 0, Math.PI * 2);
-      ctx.fill();
-      return;
-    }
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-    ctx.stroke();
-  }
-
-  function redraw(allStrokes) {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
-    for (const s of allStrokes) paintStroke(ctx, s);
-    ctx.globalCompositeOperation = "source-over";
-  }
-
-  useEffect(() => {
-    redraw(strokes);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function commit(next) {
-    setStrokes(next);
-    redraw(next);
-    const hasInk = next.some((s) => !s.erase && s.points.length);
-    const image = hasInk ? canvasRef.current.toDataURL("image/png") : null;
-    onChange?.(image, next);
-  }
-
-  function toCanvasCoords(e) {
-    const rect = canvasRef.current.getBoundingClientRect();
-    return {
-      x: ((e.clientX - rect.left) / rect.width) * CANVAS_SIZE,
-      y: ((e.clientY - rect.top) / rect.height) * CANVAS_SIZE,
-    };
-  }
-
-  function onPointerDown(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    canvasRef.current.setPointerCapture(e.pointerId);
-    const stroke = { color, size, erase: erasing, points: [toCanvasCoords(e)] };
-    drawingRef.current = stroke;
-    const ctx = canvasRef.current.getContext("2d");
-    paintStroke(ctx, stroke);
-    ctx.globalCompositeOperation = "source-over";
-  }
-  function onPointerMove(e) {
-    if (!drawingRef.current) return;
-    drawingRef.current.points.push(toCanvasCoords(e));
-    redraw([...strokes, drawingRef.current]);
-  }
-  function onPointerUp() {
-    if (!drawingRef.current) return;
-    const next = [...strokes, drawingRef.current];
-    drawingRef.current = null;
-    commit(next);
-  }
-
-  return (
-    <div className="drawpad">
-      <div className="drawpad-canvas-wrap" style={{ "--accent": accent }}>
-        <canvas
-          ref={canvasRef}
-          width={CANVAS_SIZE}
-          height={CANVAS_SIZE}
-          className="drawpad-canvas"
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerLeave={onPointerUp}
-        />
-        {strokes.length === 0 && <div className="drawpad-placeholder">draw here</div>}
-      </div>
-
-      <div className="drawpad-tools">
-        <div className="pen-colors">
-          {PEN_COLORS.map((c) => (
-            <button
-              key={c}
-              className={"pen-dot" + (!erasing && color === c ? " on" : "")}
-              style={{ background: c }}
-              onClick={() => {
-                setColor(c);
-                setErasing(false);
-              }}
-            />
-          ))}
-        </div>
-        <div className="drawpad-row">
-          <button className={"orb-btn tiny" + (erasing ? " on" : "")} onClick={() => setErasing((v) => !v)}>
-            {erasing ? "erasing" : "eraser"}
-          </button>
-          <input
-            className="size-slider"
-            type="range"
-            min="2"
-            max="40"
-            value={size}
-            onChange={(e) => setSize(Number(e.target.value))}
-          />
-          <button className="orb-btn tiny" onClick={() => commit(strokes.slice(0, -1))} disabled={!strokes.length}>
-            undo
-          </button>
-          <button className="orb-btn tiny" onClick={() => commit([])} disabled={!strokes.length}>
-            clear
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SymbolEditor({ symbol, onSave, onDelete, onClose }) {
-  const [draft, setDraft] = useState({ ...symbol });
-  const valid = draft.name.trim() && draft.prompt.trim();
-
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{symbol.__isNew ? "form an operator" : "edit operator"}</h2>
-
-        <label className="field">
-          <span>name</span>
-          <input
-            autoFocus
-            value={draft.name}
-            placeholder="e.g. Distill"
-            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-          />
-        </label>
-
-        <div className="field">
-          <span>draw its glyph</span>
-          <DrawPad
-            initialStrokes={draft.strokes}
-            accent={draft.color}
-            onChange={(image, strokes) => setDraft((d) => ({ ...d, image, strokes }))}
-          />
-          <small className="muted">draw a mark, or leave blank to use the emoji below</small>
-        </div>
-
-        <div className="field-row">
-          <div className="field">
-            <span>aura color</span>
-            <div className="color-grid">
-              {COLOR_CHOICES.map((c) => (
-                <button
-                  key={c}
-                  className={"color-opt" + (draft.color === c ? " on" : "")}
-                  style={{ background: c }}
-                  onClick={() => setDraft({ ...draft, color: c })}
-                />
-              ))}
-            </div>
-          </div>
-          <div className="field">
-            <span>emoji fallback</span>
-            <div className="emoji-grid">
-              {EMOJI_CHOICES.map((em) => (
-                <button
-                  key={em}
-                  className={"emoji-opt" + (draft.emoji === em ? " on" : "")}
-                  onClick={() => setDraft({ ...draft, emoji: em })}
-                >
-                  {em}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="field">
-          <span>seeds spawned per run</span>
-          <div className="stepper-row">
-            <div className="stepper">
-              <button
-                className="stepper-btn"
-                onClick={() => setDraft((d) => ({ ...d, count: Math.max(1, (d.count || 1) - 1) }))}
-                disabled={(draft.count || 1) <= 1}
-              >
-                −
-              </button>
-              <span className="stepper-value">{draft.count || 1}</span>
-              <button
-                className="stepper-btn"
-                onClick={() =>
-                  setDraft((d) => ({ ...d, count: Math.min(MAX_RESPONSES, (d.count || 1) + 1) }))
-                }
-                disabled={(draft.count || 1) >= MAX_RESPONSES}
-              >
-                +
-              </button>
-            </div>
-            <span className="muted small">each run scatters this many new seeds.</span>
-          </div>
-        </div>
-
-        <label className="field">
-          <span>prompt</span>
-          <textarea
-            rows={4}
-            value={draft.prompt}
-            placeholder="what does this operator do to a seed?"
-            onChange={(e) => setDraft({ ...draft, prompt: e.target.value })}
-          />
-          <small className="muted">the seed's text is attached automatically.</small>
-        </label>
-
-        <div className="modal-actions">
-          {onDelete && (
-            <button
-              className="ghost-btn danger"
-              onClick={() => {
-                onDelete(symbol.id);
-                onClose();
-              }}
-            >
-              delete
-            </button>
-          )}
-          <div className="spacer" />
-          <button className="ghost-btn" onClick={onClose}>
-            cancel
-          </button>
-          <button className="orb-btn solid" disabled={!valid} onClick={() => {
-            const { __isNew, ...clean } = draft;
-            onSave(clean);
-          }}>
-            save
-          </button>
-        </div>
-      </div>
+      {children.map((child) => (
+        <FunctionPreviewTreeFromOps key={child.id} root={child} opMap={opMap} depth={depth + 1} />
+      ))}
     </div>
   );
 }

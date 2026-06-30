@@ -35,7 +35,7 @@ function imageBlock(image) {
 }
 
 // Run a saved prompt against text and/or an image (Claude vision).
-export async function runPrompt({ prompt, text, count = 1, image = null }) {
+export async function runPrompt({ prompt, text, count = 1, image = null, system = null, maxTokens = null }) {
   const anthropic = getClient();
   if (!anthropic) {
     const err = new Error(
@@ -65,11 +65,15 @@ export async function runPrompt({ prompt, text, count = 1, image = null }) {
   if (img) blocks.push(img);
   blocks.push({ type: "text", text: userText });
 
+  const max_tokens = Math.min(Math.max(parseInt(maxTokens, 10) || 4096, 256), 8192);
+  const sys = system && typeof system === "string" ? system : undefined;
+
   const makeOne = () =>
     anthropic.messages
       .create({
         model: MODEL,
-        max_tokens: 4096,
+        max_tokens,
+        ...(sys ? { system: sys } : {}),
         // Higher temperature when asking for several options, so they differ.
         temperature: n > 1 ? 1 : 0.7,
         messages: [{ role: "user", content: blocks }],
