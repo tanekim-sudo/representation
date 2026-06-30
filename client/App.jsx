@@ -20,27 +20,79 @@ const COLOR_CHOICES = [
 ];
 const PEN_COLORS = ["#ffffff", "#8ab4ff", "#a78bfa", "#22d3ee", "#f0abfc", "#fcd34d", "#5eead4", "#fb7185"];
 
-const PROMPTS = {
-  evolve:
-    "Evolve and deepen this idea into a more developed, more interesting form. Keep it a single idea. Return only the evolved idea, no preamble.",
-  branch:
-    "Given this idea, propose ONE new idea that branches off it in a fresh, related but distinct direction. Return only the new idea, no preamble.",
-  split:
-    "Break this idea into 2 to 4 distinct sub-ideas. Return each sub-idea on its own line as a short phrase or sentence. No numbering, no bullets, no preamble.",
-  combine:
-    "Synthesize these two ideas into a single new idea that captures the essence of both. Return only the combined idea, no preamble.",
+// The primitive grammar of idea-operations. Arities:
+//   1            unary — transforms the selected idea into one child
+//   "many"       unary fan-out — produces several children
+//   2            binary — needs a second idea picked on the canvas
+//   "many-select" collapses several picked ideas into one
+//   "analysis"   a perceptual lens — emits an analysis node, doesn't alter meaning
+const OPS = {
+  // ── primitives (the + - x / of ideas) ──
+  reorient: { sym: "↺", name: "reorient", arity: 1, group: "primitive", color: "#8ab4ff",
+    prompt: "Reorient this idea: shift its frame of reference or vantage point so the same thing is seen from a fundamentally different angle. Return only the reoriented idea, no preamble." },
+  integrate: { sym: "⊕", name: "integrate", arity: 2, group: "primitive", color: "#34d399",
+    prompt: "Integrate these two ideas into one unified idea that fuses their structures into a single coherent whole. Return only the integrated idea, no preamble." },
+  release: { sym: "⊖", name: "release", arity: 1, group: "primitive", color: "#fca5a5",
+    prompt: "Release this idea: identify its central constraint, assumption, or excess and strip it away — return what remains, lighter and freer, once that is let go. Return only the resulting idea, no preamble." },
+  reciprocate: { sym: "⇄", name: "reciprocate", arity: 2, group: "primitive", color: "#f0abfc",
+    prompt: "Reciprocate: articulate the mutual, two-way exchange between these two ideas — what each gives to and receives from the other, as a single relational idea. Return only that idea, no preamble." },
+  amplify: { sym: "↑", name: "amplify", arity: 1, group: "primitive", color: "#fcd34d",
+    prompt: "Amplify this idea: intensify it, raise its stakes, push it toward its boldest and most extreme form. Return only the amplified idea, no preamble." },
+  reduce: { sym: "↓", name: "reduce", arity: 1, group: "primitive", color: "#7dd3fc",
+    prompt: "Reduce this idea to its minimal essential core — the smallest form that still carries its full meaning. Return only the reduced idea, no preamble." },
+  harmonize: { sym: "≈", name: "harmonize", arity: 2, group: "primitive", color: "#5eead4",
+    prompt: "Harmonize these two ideas: resolve their tension into a balanced form in which both coexist without contradiction. Return only the harmonized idea, no preamble." },
+  differentiate: { sym: "✦", name: "differentiate", arity: "many", group: "primitive", color: "#c084fc",
+    prompt: "Differentiate this idea into its distinct facets — the meaningfully different forms or aspects latent within it. Return each on its own line, no numbering, no bullets, no preamble." },
+  iterate: { sym: "⟳", name: "iterate", arity: 1, group: "primitive", color: "#60a5fa",
+    prompt: "Iterate this idea: apply one more refining pass, tightening and improving it as if producing the next draft. Return only the iterated idea, no preamble." },
+  transcend: { sym: "⤴", name: "transcend", arity: 1, group: "primitive", color: "#a78bfa",
+    prompt: "Transcend this idea: rise one level of abstraction to the larger principle or paradigm it is an instance of. Return only the transcendent idea, no preamble." },
+
+  // ── maps (perceptual lenses) ──
+  map: { sym: "❋", name: "map", arity: "analysis", group: "map", color: "#22d3ee",
+    prompt: "Search across ALL domains (physics, biology, economics, art, theology, engineering, social systems, mathematics...) for problems and structures with the SAME deep structure as this idea. Return, with short headers:\n• Deep structure: the abstract pattern in one line\n• Isomorphisms: 3-5 concrete structural matches in other domains\n• Solution families: the kinds of solutions those domains already use\n• Latent equivalences: non-obvious things this idea is secretly the same as\nBe specific and concrete." },
+  spacemap: { sym: "◎", name: "spacemap", arity: "analysis", group: "map", color: "#fb7185",
+    prompt: "Locate this idea within the cultural solution manifold — how explored this region already is. Return, with short headers:\n• Novelty: how closely it resembles what has already been done (low/med/high + one line)\n• Nearest neighbors: the closest prior art or existing analogues\n• Density: how crowded / well-trodden this region of idea-space is\n• Gradient to novelty: the specific direction that is most unexplored from here\nBe specific and concrete." },
+
+  // ── interactions (composed moves) ──
+  extend: { sym: "⟿", name: "extend", arity: 1, group: "interaction", color: "#34d399",
+    prompt: "Continue this idea forward: carry its line of thought one decisive step further, as the natural next move along the same trajectory. Return only the continued idea, no preamble." },
+  split: { sym: "⨁", name: "split", arity: "many", group: "interaction", color: "#fcd34d",
+    prompt: "Find the central tension inside this idea and fork it there into 2-3 divergent ideas, each fully committing to one side of that tension. Return each on its own line, no numbering, no bullets, no preamble." },
+  resonate: { sym: "∿", name: "resonate", arity: 1, group: "interaction", color: "#f0abfc",
+    prompt: "Take the deep structure of this idea and re-embody it in a COMPLETELY different domain (e.g. recast a social idea as biology, music, or geology). Start by naming the target domain, then state the resonant idea in one or two sentences. Return only that, no preamble." },
+  stabilize: { sym: "⊙", name: "stabilize", arity: "many-select", group: "interaction", color: "#9fb4ff",
+    prompt: "Collapse these branches into the shared structure they hold in common — the stable invariant underneath all of them. Return only that shared structure, as a single idea, no preamble." },
 };
+
+const OP_GROUPS = [
+  { key: "primitive", label: "primitives" },
+  { key: "interaction", label: "interactions" },
+  { key: "map", label: "maps" },
+];
+
+function opsIn(group) {
+  return Object.entries(OPS)
+    .filter(([, o]) => o.group === group)
+    .map(([k, o]) => ({ key: k, ...o }));
+}
 
 // Provenance / formation metadata for replay (invisible until a node is replayed)
 const VERB_META = {
   plant: { label: "planted", color: "#9fb4ff", symbol: "✦" },
   write: { label: "written", color: "#cbd5ff", symbol: "✎" },
+  operator: { label: "operator", color: "#8ab4ff", symbol: "◈" },
+  // legacy kinds from earlier versions
   evolve: { label: "evolved", color: "#a78bfa", symbol: "❂" },
   branch: { label: "branched", color: "#5eead4", symbol: "❧" },
-  split: { label: "split", color: "#fcd34d", symbol: "✸" },
-  combine: { label: "combined", color: "#fb7185", symbol: "⧉" },
-  operator: { label: "operator", color: "#8ab4ff", symbol: "◈" },
+  combine: { label: "integrated", color: "#34d399", symbol: "⊕" },
 };
+Object.entries(OPS).forEach(([k, o]) => {
+  VERB_META[k] = { label: o.name, color: o.color, symbol: o.sym };
+});
+
+const BINARY_ARITIES = new Set([2]);
 
 function lastText(h) {
   return h && h.length ? h[h.length - 1].to ?? "" : "";
@@ -183,7 +235,8 @@ export default function App() {
     return Array.isArray(s) ? s : DEFAULT_SYMBOLS;
   });
   const [selected, setSelected] = useState(null);
-  const [combineFrom, setCombineFrom] = useState(null);
+  // pending multi-node operation: { opKey, fromId, picks: [ids] }
+  const [pending, setPending] = useState(null);
   const [busyIds, setBusyIds] = useState([]);
   const [toast, setToast] = useState(null);
   const [editing, setEditing] = useState(null);
@@ -205,7 +258,7 @@ export default function App() {
     function onKey(e) {
       if (e.key === "Escape") {
         setSelected(null);
-        setCombineFrom(null);
+        setPending(null);
       }
     }
     window.addEventListener("keydown", onKey);
@@ -249,7 +302,7 @@ export default function App() {
     panRef.current = null;
     if (p && p.moved < 4) {
       setSelected(null);
-      setCombineFrom(null);
+      setPending(null);
     }
   }
   function onWheel(e) {
@@ -294,7 +347,7 @@ export default function App() {
     setSeeds((p) => p.filter((s) => s.id !== id));
     setEdges((p) => p.filter((e) => e.a !== id && e.b !== id));
     if (selected === id) setSelected(null);
-    if (combineFrom === id) setCombineFrom(null);
+    if (pending && (pending.fromId === id || pending.picks.includes(id))) setPending(null);
   }
   function connect(a, b) {
     setEdges((p) => [...p, { id: uid(), a, b }]);
@@ -310,40 +363,6 @@ export default function App() {
     return { x: seed.x + Math.cos(angle) * radius, y: seed.y + Math.sin(angle) * radius };
   }
 
-  async function evolve(seed) {
-    if (!seed.text.trim()) return showToast("This seed is still empty.");
-    setBusy(seed.id, true);
-    try {
-      const baseH = withWrite(seed);
-      const out = await ask(PROMPTS.evolve, seed.text);
-      const history = [...baseH, { kind: "evolve", op: null, to: out }];
-      updateSeed(seed.id, { text: out, color: pickColor(), history });
-    } catch (e) {
-      showToast(e.message);
-    } finally {
-      setBusy(seed.id, false);
-    }
-  }
-
-  async function branch(seed) {
-    if (!seed.text.trim()) return showToast("This seed is still empty.");
-    setBusy(seed.id, true);
-    try {
-      const baseH = withWrite(seed);
-      const out = await ask(PROMPTS.branch, seed.text);
-      const pos = placeNear(seed);
-      const child = makeSeed(pos.x, pos.y, out, {
-        history: [...baseH, { kind: "branch", op: null, to: out }],
-      });
-      setSeeds((p) => [...p, child]);
-      connect(seed.id, child.id);
-    } catch (e) {
-      showToast(e.message);
-    } finally {
-      setBusy(seed.id, false);
-    }
-  }
-
   function parseLines(out) {
     const parts = out
       .split("\n")
@@ -352,60 +371,116 @@ export default function App() {
     return parts.length ? parts : [out];
   }
 
-  async function split(seed) {
-    if (!seed.text.trim()) return showToast("This seed is still empty.");
-    setBusy(seed.id, true);
+  function midOf(nodes) {
+    const n = nodes.length || 1;
+    return {
+      x: nodes.reduce((s, m) => s + m.x, 0) / n,
+      y: nodes.reduce((s, m) => s + m.y, 0) / n - 40,
+    };
+  }
+
+  // The single entry point for the whole primitive grammar.
+  // `extra` holds the other node ids for binary / many-select ops.
+  async function applyOp(opKey, seed, extra = []) {
+    const op = OPS[opKey];
+    if (!op) return;
+    const others = extra.map((id) => seeds.find((s) => s.id === id)).filter(Boolean);
+    const meta = { name: op.name, sym: op.sym, color: op.color };
+
+    if (op.arity === 2 && others.length < 1) return;
+    if (op.arity === "many-select" && others.length < 1)
+      return showToast("Pick at least one more idea to stabilize.");
+    if (op.arity !== "many-select" && op.arity !== 2 && !(seed.text || "").trim() && seed.type !== "sketch")
+      return showToast("This seed is still empty.");
+
+    const involved = [seed, ...others];
+    involved.forEach((n) => setBusy(n.id, true));
+
     try {
-      const baseH = withWrite(seed);
-      const out = await ask(PROMPTS.split, seed.text);
-      const list = parseLines(out);
-      const children = list.map((t, i) => {
-        const pos = placeNear(seed, i, list.length);
-        return makeSeed(pos.x, pos.y, t, {
-          history: [...baseH, { kind: "split", op: null, to: t }],
+      // ---- build the input text + history scaffolding by arity ----
+      if (op.arity === 2 || op.arity === "many-select") {
+        const input = involved
+          .map((n, i) => `Idea ${String.fromCharCode(65 + i)}:\n${n.text || "(a sketch)"}`)
+          .join("\n\n");
+        const out = (await runClaude(op.prompt, input, 1))[0] || "";
+        const mid = midOf(involved);
+        const child = makeSeed(mid.x, mid.y, out, {
+          color: op.color,
+          history: [
+            {
+              kind: opKey,
+              op: meta,
+              to: out,
+              parents: involved.map((n) => ({ text: n.text, history: n.history })),
+            },
+          ],
         });
-      });
-      setSeeds((p) => [...p, ...children]);
-      setEdges((p) => [...p, ...children.map((c) => ({ id: uid(), a: seed.id, b: c.id }))]);
+        setSeeds((p) => [...p, child]);
+        setEdges((p) => [...p, ...involved.map((n) => ({ id: uid(), a: n.id, b: child.id }))]);
+        setSelected(child.id);
+        pulse(child.id);
+      } else if (op.arity === "many") {
+        const baseH = withWrite(seed);
+        const out = (await runClaude(op.prompt, seed.text, 1))[0] || "";
+        const list = parseLines(out);
+        const children = list.map((t, i) => {
+          const pos = placeNear(seed, i, list.length);
+          return makeSeed(pos.x, pos.y, t, {
+            color: op.color,
+            history: [...baseH, { kind: opKey, op: meta, to: t }],
+          });
+        });
+        setSeeds((p) => [...p, ...children]);
+        setEdges((p) => [...p, ...children.map((c) => ({ id: uid(), a: seed.id, b: c.id }))]);
+      } else {
+        // unary (1) and analysis
+        const baseH = withWrite(seed);
+        const out = (await runClaude(op.prompt, seed.text, 1))[0] || "";
+        const pos = placeNear(seed);
+        const child = makeSeed(pos.x, pos.y, out, {
+          color: op.color,
+          analysis: op.group === "map",
+          history: [...baseH, { kind: opKey, op: meta, to: out }],
+        });
+        setSeeds((p) => [...p, child]);
+        connect(seed.id, child.id);
+        setSelected(child.id);
+        pulse(child.id);
+      }
     } catch (e) {
       showToast(e.message);
     } finally {
-      setBusy(seed.id, false);
+      involved.forEach((n) => setBusy(n.id, false));
     }
   }
 
-  async function combine(a, b) {
-    setBusy(a.id, true);
-    setBusy(b.id, true);
-    try {
-      const out = await ask(PROMPTS.combine, `Idea A:\n${a.text}\n\nIdea B:\n${b.text}`);
-      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 40 };
-      const child = makeSeed(mid.x, mid.y, out, {
-        history: [
-          {
-            kind: "combine",
-            op: null,
-            to: out,
-            parents: [
-              { text: a.text, history: a.history },
-              { text: b.text, history: b.history },
-            ],
-          },
-        ],
-      });
-      setSeeds((p) => [...p, child]);
-      setEdges((p) => [
-        ...p,
-        { id: uid(), a: a.id, b: child.id },
-        { id: uid(), a: b.id, b: child.id },
-      ]);
-      setSelected(child.id);
-    } catch (e) {
-      showToast(e.message);
-    } finally {
-      setBusy(a.id, false);
-      setBusy(b.id, false);
+  function pulse(id) {
+    setSeeds((p) => p.map((s) => (s.id === id ? { ...s, flash: true } : s)));
+    setTimeout(
+      () => setSeeds((p) => p.map((s) => (s.id === id ? { ...s, flash: false } : s))),
+      900
+    );
+  }
+
+  // Begin / advance / run a multi-node operation from the panel.
+  function startOp(opKey, seed) {
+    const op = OPS[opKey];
+    if (op.arity === 2) {
+      setPending({ opKey, fromId: seed.id, picks: [] });
+      showToast(`pick another idea to ${op.name}`);
+    } else if (op.arity === "many-select") {
+      setPending({ opKey, fromId: seed.id, picks: [] });
+      showToast(`pick the branches to ${op.name}, then confirm`);
+    } else {
+      applyOp(opKey, seed);
     }
+  }
+
+  function runPending() {
+    if (!pending) return;
+    const seed = seeds.find((s) => s.id === pending.fromId);
+    if (seed) applyOp(pending.opKey, seed, pending.picks);
+    setPending(null);
   }
 
   // ---- custom operator applied to a seed ----
@@ -457,12 +532,22 @@ export default function App() {
   }
 
   function onSeedActivate(id) {
-    if (combineFrom && combineFrom !== id) {
-      const a = seeds.find((s) => s.id === combineFrom);
-      const b = seeds.find((s) => s.id === id);
-      setCombineFrom(null);
-      if (a && b) combine(a, b);
-      return;
+    if (pending) {
+      const op = OPS[pending.opKey];
+      if (id === pending.fromId) return; // ignore source
+      if (op.arity === 2) {
+        const seed = seeds.find((s) => s.id === pending.fromId);
+        setPending(null);
+        if (seed) applyOp(pending.opKey, seed, [id]);
+        return;
+      }
+      if (op.arity === "many-select") {
+        setPending((p) => ({
+          ...p,
+          picks: p.picks.includes(id) ? p.picks.filter((x) => x !== id) : [...p.picks, id],
+        }));
+        return;
+      }
     }
     setSelected(id);
   }
@@ -508,8 +593,9 @@ export default function App() {
               seed={s}
               scale={camera.scale}
               selected={selected === s.id}
-              combineFrom={combineFrom === s.id}
-              combineMode={Boolean(combineFrom)}
+              pendingFrom={pending?.fromId === s.id}
+              picked={pending?.picks.includes(s.id)}
+              pickMode={Boolean(pending)}
               busy={busyIds.includes(s.id)}
               onActivate={() => onSeedActivate(s.id)}
               onMoveBy={(dx, dy) => moveSeedBy(s.id, dx, dy)}
@@ -565,9 +651,23 @@ export default function App() {
         </div>
       )}
 
-      {combineFrom && (
+      {pending && (
         <div className="combine-banner">
-          choose another seed to combine · <em>esc to cancel</em>
+          {OPS[pending.opKey].arity === "many-select" ? (
+            <>
+              <span className="banner-sym">{OPS[pending.opKey].sym}</span> {OPS[pending.opKey].name}:{" "}
+              {pending.picks.length + 1} selected · click ideas to add ·{" "}
+              <button className="banner-go" disabled={pending.picks.length < 1} onClick={runPending}>
+                {OPS[pending.opKey].name} now
+              </button>{" "}
+              · <em>esc to cancel</em>
+            </>
+          ) : (
+            <>
+              <span className="banner-sym">{OPS[pending.opKey].sym}</span> choose another idea to{" "}
+              {OPS[pending.opKey].name} · <em>esc to cancel</em>
+            </>
+          )}
         </div>
       )}
 
@@ -575,13 +675,10 @@ export default function App() {
         <SeedPanel
           seed={selectedSeed}
           pos={screenPos}
-          flip={screenPos.x > window.innerWidth - 340}
+          flip={screenPos.x > window.innerWidth - 360}
           busy={busyIds.includes(selectedSeed.id)}
           onChange={(patch) => updateSeed(selectedSeed.id, patch)}
-          onEvolve={() => evolve(selectedSeed)}
-          onBranch={() => branch(selectedSeed)}
-          onSplit={() => split(selectedSeed)}
-          onCombine={() => setCombineFrom(selectedSeed.id)}
+          onOp={(opKey) => startOp(opKey, selectedSeed)}
           onDelete={() => deleteSeed(selectedSeed.id)}
           onReplay={() => setReplaySeed(selectedSeed)}
           onClose={() => setSelected(null)}
@@ -845,7 +942,7 @@ function Synapses({ seeds, edges }) {
   );
 }
 
-function Seed({ seed, scale, selected, combineFrom, combineMode, busy, onActivate, onMoveBy, onDropOperator }) {
+function Seed({ seed, scale, selected, pendingFrom, picked, pickMode, busy, onActivate, onMoveBy, onDropOperator }) {
   const drag = useRef(null);
   const [over, setOver] = useState(false);
   const isSketch = seed.type === "sketch";
@@ -876,8 +973,11 @@ function Seed({ seed, scale, selected, combineFrom, combineMode, busy, onActivat
       className={
         "seed" +
         (selected ? " selected" : "") +
-        (combineFrom ? " combine-from" : "") +
-        (combineMode ? " targetable" : "") +
+        (pendingFrom ? " combine-from" : "") +
+        (picked ? " picked" : "") +
+        (pickMode ? " targetable" : "") +
+        (seed.analysis ? " analysis" : "") +
+        (seed.flash ? " flash" : "") +
         (busy || seed.loading ? " busy" : "") +
         (seed.loading ? " forming" : "") +
         (over ? " op-over" : "")
@@ -912,11 +1012,13 @@ function Seed({ seed, scale, selected, combineFrom, combineMode, busy, onActivat
   );
 }
 
-function SeedPanel({ seed, pos, flip, busy, onChange, onEvolve, onBranch, onSplit, onCombine, onDelete, onReplay, onClose }) {
+function SeedPanel({ seed, pos, flip, busy, onChange, onOp, onDelete, onReplay, onClose }) {
   const ref = useRef(null);
   const isSketch = seed.type === "sketch";
-  const ops = ["evolve", "branch", "split", "combine", "operator"];
-  const hasFormation = (seed.history || []).some((s) => ops.includes(s.kind));
+  const legacy = ["evolve", "branch", "split", "combine", "operator"];
+  const hasFormation = (seed.history || []).some(
+    (s) => OPS[s.kind] || legacy.includes(s.kind)
+  );
   useEffect(() => {
     const el = ref.current;
     if (el) {
@@ -951,19 +1053,33 @@ function SeedPanel({ seed, pos, flip, busy, onChange, onEvolve, onBranch, onSpli
       )}
 
       {!isSketch && (
-        <div className="seed-actions">
-          <button className="orb-btn" onClick={onBranch} disabled={busy}>
-            branch
-          </button>
-          <button className="orb-btn" onClick={onEvolve} disabled={busy}>
-            evolve
-          </button>
-          <button className="orb-btn" onClick={onSplit} disabled={busy}>
-            split
-          </button>
-          <button className="orb-btn" onClick={onCombine} disabled={busy}>
-            combine
-          </button>
+        <div className="grammar">
+          {OP_GROUPS.map((g) => (
+            <div className="op-group" key={g.key}>
+              <span className="op-group-label">{g.label}</span>
+              <div className={"op-row " + g.key}>
+                {opsIn(g.key).map((op) => (
+                  <button
+                    key={op.key}
+                    className={"op-btn" + (op.arity === 2 || op.arity === "many-select" ? " dual" : "")}
+                    style={{ "--c": op.color }}
+                    onClick={() => onOp(op.key)}
+                    disabled={busy}
+                    title={`${op.name}${
+                      op.arity === 2
+                        ? " (needs a second idea)"
+                        : op.arity === "many-select"
+                        ? " (collapses several ideas)"
+                        : ""
+                    }`}
+                  >
+                    <span className="op-sym">{op.sym}</span>
+                    <span className="op-name">{op.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -972,7 +1088,7 @@ function SeedPanel({ seed, pos, flip, busy, onChange, onEvolve, onBranch, onSpli
           className="ghost-btn replay"
           onClick={onReplay}
           disabled={!hasFormation}
-          title={hasFormation ? "replay formation" : "no operations yet — branch, evolve, split, combine, or apply an operator"}
+          title={hasFormation ? "replay formation" : "no operations yet — apply a primitive, interaction, or operator first"}
         >
           ▷ replay
         </button>
