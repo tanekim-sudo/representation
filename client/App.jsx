@@ -3,9 +3,14 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 const ITEMS_KEY = "lens.board.items.v1";
 const CAMERA_KEY = "lens.board.camera.v1";
 const OPERATORS_KEY = "lens.board.operators.v1";
+const STRUCTURES_KEY = "lens.structures.v1";
+const STRUCTSEQ_KEY = "lens.structseq.v1";
+const OLD_NODES_KEY = "lens.savednodes.v1";
 const ARTIFACT_KEY = "lens.artifact.v1";
 const OLD_SEEDS_KEY = "lens.seeds.v2";
 const OP_MIME = "application/lens-op";
+const STRUCT_MIME = "application/lens-structure";
+const RAIL_W = 280;
 
 const INK = "#20201d";
 const PEN_W = 2.4; // world units
@@ -44,22 +49,47 @@ function parseJSON(raw) {
   return JSON.parse(s);
 }
 
-// The system prompt teaches Claude exactly how lens works, so every function
-// it designs is composable, realistic, and decomposed down to editable primitives.
-const LENS_SYSTEM = `You are the function-architect for "lens", an infinite thinking whiteboard where a person operates on their own notes with AI.
-- The user selects some material on the board (text, or an image) and applies a FUNCTION to it. The function transforms that material and writes the result back onto the board. Material flows in; transformed material flows out.
-- A FUNCTION is a COMPOSITION, never a monolith. It is built from smaller functions, which are built from smaller functions, all the way down to PRIMITIVE OPERATORS. Functions comprise functions comprise functions.
-- A FUNCTION is executed as a PIPELINE: the output of each step becomes the input to the very next step. Therefore a decomposition is an ORDERED sequence in which each step does real work on the result of the previous one. Order matters; later steps may assume earlier steps already ran.
-- A PRIMITIVE OPERATOR is a LEAF: one atomic transformation, expressed as a precise instruction ("prompt") to you, the model. It receives the running text as its material and returns ONLY the transformed result — no preamble, no labels, no commentary, no meta-talk.
-- The user can open any function in a toolbox, see every sub-function and primitive nested inside it, and EDIT any primitive's prompt by hand. So every layer must be legible and self-explanatory, and every leaf must be a genuinely reusable, expertly engineered prompt that stands on its own.
+// The master system prompt — teaches Claude exactly what lens is and how to architect operators.
+const LENS_SYSTEM = `You are the function-architect for "lens", an infinite thinking whiteboard where a person operates on their own notes, ideas, drafts, images, and sketches with AI.
 
-YOUR STANDARDS — non-negotiable:
-- TRUE USEFULNESS: design for the operations this specific person actually repeats in their real workflow, the high-leverage moves that save real time or raise real quality. No filler, no generic "brainstorm ideas" fluff.
-- REALISTIC: the pipeline should mirror how a sharp practitioner actually does the work, step by step, in the right order.
-- DECOMPOSE TO PRIMITIVES: keep breaking steps down until each leaf does exactly ONE clear thing. Prefer more, smaller, sharper primitives over a few vague mega-steps. A leaf that does two things must be split.
-- MAX-STRENGTH PROMPTS: write each leaf prompt to use Claude at full power — specific, demanding, role-aware instructions that produce expert-grade output. State exactly what to do with the input and exactly what to return. Bake in the relevant expertise, criteria, and format.
-- CLOSED PIPELINE: a leaf may only rely on "the input text" (whatever the previous step produced). Never require information the pipeline hasn't yet created.
-- STRUCTURE: composite nodes have "steps" and NO "prompt". Leaf nodes have "prompt" and NO "steps".
+WHAT LENS IS
+- An infinite canvas (pan, zoom, free placement) where the user writes text, draws ink strokes, and drops images anywhere.
+- A left rail of TRANSFORMATIONS (functions/operators) the user drags onto selected material or clicks to apply.
+- Each transformation is a COMPOSITION: functions made of sub-functions made of sub-functions, recursively, down to PRIMITIVE LEAVES.
+- The user selects material on the board → applies a function → Claude executes a pipeline → the result replaces or spawns new text on the board.
+- Saved IDEA STRUCTURES: the user can save any selection (text, images, strokes) as a reusable structure in their library, then drag it back onto the canvas later.
+- Discovery: the user can select multiple disparate items and find their hidden structural sameness — producing numbered STRUCTURE objects.
+
+HOW FUNCTIONS EXECUTE
+- A FUNCTION runs as an ORDERED PIPELINE. Output of step N becomes input to step N+1.
+- Composite nodes have "steps" (array of child nodes) and NO "prompt".
+- Leaf/primitive nodes have "prompt" (one precise instruction) and NO "steps".
+- The user can expand any function in the rail to see nested sub-functions at infinite depth, drag any level onto the canvas, or edit any leaf prompt by hand.
+
+NAMING — CRITICAL
+- Names must be EXTREMELY ABSTRACT and SUCCINCT — the minimum signal, like mathematical operators.
+- Top-level functions: ONE word preferred, TWO words absolute max (e.g. "thesis", "redflags", "memo", "comps", "signal").
+- Sub-functions: ONE word only (e.g. "extract", "stress", "map", "draft", "compress").
+- NEVER use verbose phrases like "Extract investment thesis" or "Identify red flags". Use "thesis", "flags".
+- Descriptions are optional and only shown on expand — keep to one short sentence if present.
+
+DECOMPOSITION — INFINITE DEPTH
+- Every composite bundles more than one cognitive move → split it.
+- Recurse 3–5 layers deep minimum for top-level functions. Sub-functions that still do two things must split again.
+- There is no depth limit — keep decomposing until each leaf does exactly ONE atomic transformation.
+- Order matters: later steps may assume earlier steps ran. Mirror how an expert actually performs the work.
+
+LEAF PROMPTS — MAX STRENGTH
+- Each leaf is a standalone, expert-grade instruction to Claude.
+- State exactly what to do with "the input text" (previous step's output) and exactly what to return.
+- Return ONLY the transformed result — no preamble, labels, commentary, or meta-talk.
+- NEVER refuse, ask for more data, or say "insufficient material". Work with whatever fragments exist — keywords, rough notes, single phrases.
+- A closed pipeline: leaves may only rely on input text, never on information not yet created.
+
+YOUR STANDARDS
+- TRUE USEFULNESS: high-leverage moves this person repeats in real work. No generic brainstorm fluff.
+- REALISTIC: mirror how a sharp practitioner actually thinks, step by step.
+- COMPLEMENT the user's existing library — do not duplicate names or purposes.
 - OUTPUT: return ONLY valid JSON. No markdown fences, no explanation outside the JSON.`;
 
 // summarize the user's personal library so Claude can tailor every prompt
@@ -112,7 +142,7 @@ ${summary}`;
 function executionSystem(operators, opMap, activeOp) {
   const compact = summarizeLibrary(operators, opMap, { compact: true });
   let sys =
-    "You execute a transformation on the user's thinking whiteboard. Return ONLY the transformed result — no preamble, labels, or commentary. Work with whatever material is given, even brief fragments, keywords, or rough notes. Never refuse or ask for more data; do the best possible transform on what's provided.";
+    "You execute a transformation on the user's thinking whiteboard. Return ONLY the transformed result — no preamble, labels, headings, or commentary. Work with whatever material is given: brief fragments, keywords, rough notes, single phrases, partial sentences. NEVER refuse, NEVER say insufficient data, NEVER ask for more information, NEVER output meta-analysis about what's missing. Always produce the best possible transform on what's provided.";
   if (activeOp?.name) {
     sys += `\n\nActive transform: "${activeOp.name}"`;
     if (activeOp.description) sys += ` — ${activeOp.description}`;
@@ -126,7 +156,7 @@ function executionSystem(operators, opMap, activeOp) {
 function boardSystem(operators, opMap) {
   const compact = summarizeLibrary(operators, opMap, { compact: true });
   let sys =
-    "You operate on selected material from the user's thinking whiteboard. Return ONLY the requested result. Work with whatever is given — fragments, keywords, rough notes — never refuse for insufficient data.";
+    "You operate on selected material from the user's thinking whiteboard. Return ONLY the requested result. Work with whatever is given — fragments, keywords, rough notes. NEVER refuse, NEVER say insufficient data, NEVER ask for more information.";
   if (compact) {
     sys += `\n\nThis user's personal library of functions and transformations — align your output with their established patterns:\n${compact}`;
   }
@@ -138,11 +168,11 @@ async function generateFunctionList(role, operators, opMap) {
   const hasLib = operators?.length > 0;
   const prompt = `The user is a: ${role}.
 
-Design the 10 single most valuable FUNCTIONS this person would want on their lens whiteboard — the repeated, high-leverage cognitive operations they perform on notes, ideas, drafts, data, or documents in their real day-to-day work. Think about their actual workflow and where AI gives the biggest lift.
-${hasLib ? "\nThey already have a personal library (see system context). Design NEW functions that complement it — do not duplicate existing names or purposes.\n" : ""}
-For each function give:
-- "name": 2-4 words, the verb-led operation (e.g. "Stress-test thesis", "Draft cold outreach").
-- "description": one plain sentence a beginner instantly understands, stating what material goes in and what comes out.
+Design the 10 single most valuable FUNCTIONS for their lens whiteboard — the repeated, high-leverage cognitive operations they perform on notes, ideas, drafts, data, or documents.
+${hasLib ? "\nThey already have a personal library (see system context). Design NEW functions that complement it — do not duplicate existing names.\n" : ""}
+For each function:
+- "name": ONE word preferred, TWO words absolute max. Extremely abstract and succinct (e.g. "thesis", "flags", "memo", "signal", "comps"). NOT verbose phrases.
+- "description": one short sentence (optional, for expand view only).
 
 Return ONLY JSON: {"functions":[{"name":"...","description":"..."}]} with exactly 10 functions, ordered from most to least frequently used.`;
   const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 2000 });
@@ -154,23 +184,36 @@ Return ONLY JSON: {"functions":[{"name":"...","description":"..."}]} with exactl
 async function decomposeFunction(role, fn, operators, opMap) {
   const prompt = `The user is a: ${role}.
 
-Decompose this ONE function into a deep tree of smaller functions, ending in primitive operators, exactly as lens executes them (a pipeline where each step's output feeds the next).
-Tailor every name, description, and leaf prompt to the user's personal library in the system context — reuse their vocabulary and match their existing transformation patterns where relevant.
+Decompose this ONE function into a deep tree ending in primitive operators. Go 3–5 layers deep minimum. Each sub-layer should be ONE word. Tailor to the user's library in system context.
 
 FUNCTION
 name: ${fn.name}
-description: ${fn.description}
+description: ${fn.description || fn.name}
 
 Requirements:
-- Break it into 2-5 ordered sub-functions that mirror how an expert ${role} actually performs this, in sequence.
-- Recursively decompose sub-functions wherever they still bundle more than one operation, going 2-4 layers deep, until every leaf is a PRIMITIVE that does exactly one thing.
-- Every LEAF must have a "prompt": a precise, max-strength instruction tailored to this user's library that transforms "the input text" (the previous step's output) and returns ONLY the result.
-- Composite nodes have "steps" and NO "prompt". Leaf nodes have "prompt" and NO "steps".
-- Names: 1-4 words. Descriptions: one short, clear sentence each.
+- 2–5 ordered sub-functions at each level, mirroring how an expert ${role} performs this.
+- Recurse until every leaf is a PRIMITIVE doing exactly one thing.
+- Names: ONE word only at every level. Extremely abstract (e.g. "extract", "stress", "map", "compress", "draft").
+- Every LEAF has a max-strength "prompt". Composites have "steps" and NO "prompt".
+- Descriptions: optional, one short sentence max.
 
-Return ONLY JSON for THIS function:
+Return ONLY JSON:
 {"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}`;
-  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 6000 });
+  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 8000 });
+  return parseJSON(out);
+}
+
+// expand an existing operator subtree with more layers via Claude
+async function expandOperatorSubtree(op, opMap, operators) {
+  const current = serializeTree(op, opMap);
+  const prompt = `Expand this function with MORE sub-layers of abstraction. Add deeper decomposition where steps still bundle multiple operations. Go at least 2 layers deeper. Keep ONE-word names at every level.
+
+CURRENT:
+${current}
+
+Return ONLY JSON for the COMPLETE expanded function (same shape):
+{"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}`;
+  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 8000 });
   return parseJSON(out);
 }
 
@@ -383,6 +426,70 @@ function migrateOldSeeds() {
     .filter(Boolean);
 }
 
+function migrateOldSavedNodes() {
+  const old = load(OLD_NODES_KEY, null);
+  if (!Array.isArray(old) || !old.length) return [];
+  return old
+    .map((n) => {
+      const items = [];
+      if (n.type === "image" && n.image) {
+        items.push(normalizeItem({ type: "image", x: 0, y: 0, w: 220, h: 165, src: n.image }));
+      } else if (n.text?.trim()) {
+        items.push(normalizeItem({ type: "text", x: 0, y: 0, text: n.text.trim(), w: 360 }));
+      }
+      for (const s of n.strokes || []) {
+        if (s.points?.length) items.push(normalizeItem({ type: "stroke", ...s }));
+      }
+      if (!items.length) return null;
+      return {
+        id: n.id || uid(),
+        title: n.title || n.text?.trim().split("\n")[0].slice(0, 48) || "untitled",
+        kind: n.kind || "idea",
+        structNum: n.struct || null,
+        items,
+        savedAt: n.savedAt || Date.now(),
+      };
+    })
+    .filter(Boolean);
+}
+
+function nextStructNumber() {
+  const cur = parseInt(localStorage.getItem(STRUCTSEQ_KEY) || "283", 10) || 283;
+  const n = cur + 1;
+  localStorage.setItem(STRUCTSEQ_KEY, String(n));
+  return n;
+}
+
+function samenessPrompt(labels) {
+  const body = labels.map((t, i) => `(${i + 1}) ${t}`).join("\n");
+  return `Find the HIDDEN SAMENESS — the deep structural isomorphism shared by these ${labels.length} things. Ignore surface similarity.
+
+${body}
+
+Return EXACTLY:
+NAME: <2-4 word name for the structure>
+STRUCTURE: <1-2 sentences stating the shared deep pattern>
+WHY: <one sentence on what this unlocks>`;
+}
+
+function parseSameness(out) {
+  const name = (out.match(/NAME:\s*(.+)/i) || [])[1]?.trim() || "pattern";
+  const structure = (out.match(/STRUCTURE:\s*([\s\S]+?)(?:\nWHY:|$)/i) || [])[1]?.trim() || out.trim();
+  return { name, body: structure };
+}
+
+function structurePreview(struct) {
+  const texts = (struct.items || []).filter((it) => it.type === "text" && it.text?.trim()).map((it) => it.text.trim());
+  if (texts.length) return texts[0].split("\n")[0].slice(0, 60);
+  const imgs = (struct.items || []).filter((it) => it.type === "image").length;
+  const strokes = (struct.items || []).filter((it) => it.type === "stroke").length;
+  const parts = [];
+  if (texts.length) parts.push(`${texts.length} text`);
+  if (imgs) parts.push(`${imgs} image`);
+  if (strokes) parts.push(`${strokes} stroke`);
+  return parts.join(" · ") || struct.title || "empty";
+}
+
 async function runClaude(prompt, text, opts = {}) {
   const { image = null, system = null, maxTokens = null } = opts;
   const res = await fetch("/api/run", {
@@ -444,6 +551,11 @@ export default function App() {
     const s = load(OPERATORS_KEY, null);
     return Array.isArray(s) ? s : DEFAULT_OPERATORS;
   });
+  const [structures, setStructures] = useState(() => {
+    const saved = load(STRUCTURES_KEY, null);
+    if (Array.isArray(saved) && saved.length) return saved;
+    return migrateOldSavedNodes();
+  });
 
   const [tool, setTool] = useState("select"); // select | text | pen | marker | eraser | hand
   const [selection, setSelection] = useState([]);
@@ -456,6 +568,7 @@ export default function App() {
   const [spaceDown, setSpaceDown] = useState(false);
   const [expanded, setExpanded] = useState({});
   const [dropReady, setDropReady] = useState(false);
+  const [railTab, setRailTab] = useState("functions"); // functions | structures
   const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
 
   const viewportRef = useRef(null);
@@ -475,6 +588,7 @@ export default function App() {
   useEffect(() => localStorage.setItem(ITEMS_KEY, JSON.stringify(items)), [items]);
   useEffect(() => localStorage.setItem(CAMERA_KEY, JSON.stringify(camera)), [camera]);
   useEffect(() => localStorage.setItem(OPERATORS_KEY, JSON.stringify(operators)), [operators]);
+  useEffect(() => localStorage.setItem(STRUCTURES_KEY, JSON.stringify(structures)), [structures]);
 
   function showToast(msg) {
     setToast(msg);
@@ -876,10 +990,19 @@ export default function App() {
   function saveFunctionTree(oldRootId, newOps) {
     setOperators((arr) => {
       let next = arr;
+      const newRootId = newOps.length ? newOps.find((o) => o.top || o.kind === "pipeline")?.id || newOps[0]?.id : null;
       if (oldRootId) {
         const map = Object.fromEntries(arr.map((o) => [o.id, o]));
         const removeIds = collectSubtreeIds(oldRootId, map);
         next = arr.filter((o) => !removeIds.has(o.id));
+        if (newRootId && newRootId !== oldRootId) {
+          next = next.map((o) => {
+            if (o.kind === "pipeline" && o.steps?.includes(oldRootId)) {
+              return { ...o, steps: o.steps.map((sid) => (sid === oldRootId ? newRootId : sid)) };
+            }
+            return o;
+          });
+        }
       }
       return [...next, ...newOps];
     });
@@ -910,6 +1033,142 @@ export default function App() {
     setOperators((arr) => arr.filter((o) => !removeIds.has(o.id)));
     setOpEditor(null);
     showToast("function deleted");
+  }
+
+  async function expandFunction(op) {
+    setAiBusy(true);
+    try {
+      const tree = await expandOperatorSubtree(op, opMap, operators);
+      const { rootId, ops } = treeToOperators(tree, { role: op.role || null, top: !!op.top });
+      setOperators((arr) => {
+        const map = Object.fromEntries(arr.map((o) => [o.id, o]));
+        const removeIds = collectSubtreeIds(op.id, map);
+        let next = arr.filter((o) => !removeIds.has(o.id));
+        next = next.map((o) => {
+          if (o.kind === "pipeline" && o.steps?.includes(op.id)) {
+            return { ...o, steps: o.steps.map((sid) => (sid === op.id ? rootId : sid)) };
+          }
+          return o;
+        });
+        return [...next, ...ops];
+      });
+      setExpanded((e) => ({ ...e, [rootId]: true, [op.id]: undefined }));
+      showToast(`expanded · ${op.name}`);
+    } catch (err) {
+      showToast(err.message || "could not expand");
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  // ---- saved idea structures ----
+  function captureSelectionAsStructure(extra = {}) {
+    const ids = new Set(selRef.current);
+    const sel = itemsRef.current.filter((it) => ids.has(it.id));
+    if (!sel.length) {
+      showToast("select material to save");
+      return null;
+    }
+    const bb = selectionWorldBBox();
+    const anchor = bb ? { x: bb.minx, y: bb.miny } : viewportCenterWorld();
+    const relativeItems = sel.map((it) => {
+      const base = { ...it, id: uid() };
+      if (it.type === "stroke") {
+        return { ...base, points: it.points.map((p) => ({ x: p.x - anchor.x, y: p.y - anchor.y })) };
+      }
+      return { ...base, x: it.x - anchor.x, y: it.y - anchor.y };
+    });
+    const titleFromText = sel
+      .filter((it) => it.type === "text" && it.text?.trim())
+      .map((it) => it.text.trim().split("\n")[0].slice(0, 48))
+      .join(" · ");
+    const struct = {
+      id: uid(),
+      title: extra.title || titleFromText || "untitled",
+      kind: extra.kind || "idea",
+      structNum: extra.structNum || null,
+      items: relativeItems,
+      savedAt: Date.now(),
+    };
+    setStructures((arr) => [struct, ...arr]);
+    setRailTab("structures");
+    showToast(extra.toast || "saved structure");
+    return struct;
+  }
+
+  function deleteStructure(id) {
+    setStructures((arr) => arr.filter((s) => s.id !== id));
+  }
+
+  function plantStructure(struct, atWorld) {
+    if (!struct?.items?.length) return;
+    const center = atWorld || viewportCenterWorld();
+    const newIds = [];
+    const newItems = struct.items.map((it) => {
+      const id = uid();
+      newIds.push(id);
+      if (it.type === "stroke") {
+        return normalizeItem({
+          ...it,
+          id,
+          points: it.points.map((p) => ({ x: p.x + center.x, y: p.y + center.y })),
+        });
+      }
+      return normalizeItem({ ...it, id, x: it.x + center.x, y: it.y + center.y });
+    });
+    setItems((arr) => [...arr, ...newItems]);
+    setSelection(newIds);
+    showToast(`planted · ${struct.title || "structure"}`);
+  }
+
+  function applyStructureDrop(structId, atClient) {
+    const struct = structures.find((s) => s.id === structId);
+    if (!struct) return;
+    const at = atClient ? clientToWorld(atClient.x, atClient.y) : viewportCenterWorld();
+    plantStructure(struct, at);
+  }
+
+  async function runSamenessDiscovery() {
+    const ids = selRef.current;
+    const idSet = new Set(ids);
+    const nodes = itemsRef.current.filter((it) => idSet.has(it.id) && ((it.type === "text" && it.text?.trim()) || it.type === "image"));
+    if (nodes.length < 2) {
+      showToast("select at least two items");
+      return;
+    }
+    const labels = nodes.map((n) =>
+      n.type === "text" ? n.text.trim() : "[image]"
+    );
+    setAiBusy(true);
+    try {
+      const out = await runClaude(samenessPrompt(labels), "", { system: boardSystem(operators, opMap), maxTokens: 2000 });
+      const parsed = parseSameness(out);
+      const num = nextStructNumber();
+      const title = `#${num} · ${parsed.name}`;
+      const center = viewportCenterWorld();
+      const textId = uid();
+      const body = `${parsed.name.toUpperCase()}\n\n${parsed.body}`;
+      setItems((arr) => [
+        ...arr,
+        normalizeItem({ id: textId, type: "text", x: center.x, y: center.y, text: body, w: 420 }),
+      ]);
+      setSelection([textId]);
+      const struct = {
+        id: uid(),
+        title,
+        kind: "structure",
+        structNum: num,
+        items: [normalizeItem({ type: "text", x: 0, y: 0, text: body, w: 420 })],
+        savedAt: Date.now(),
+      };
+      setStructures((arr) => [struct, ...arr]);
+      setRailTab("structures");
+      showToast(`discovered · ${title}`);
+    } catch (err) {
+      showToast(err.message || "discovery failed");
+    } finally {
+      setAiBusy(false);
+    }
   }
 
   const topFunctions = operators.filter((o) => o.top);
@@ -969,7 +1228,7 @@ export default function App() {
   // ---- pointer gestures on the board ----
   function onPointerDown(e) {
     if (e.button !== 0) return;
-    if (e.target.closest?.(".xform-handle, .xform-screen-layer, .board-rail, .dock, .zoom, .palette, .op-drag-grip")) return;
+    if (e.target.closest?.(".xform-handle, .xform-screen-layer, .board-rail, .dock, .zoom, .palette, .op-drag-grip, .struct-card")) return;
     const cx = e.clientX;
     const cy = e.clientY;
     const panning = spaceRef.current || toolRef.current === "hand";
@@ -1174,17 +1433,33 @@ export default function App() {
     split: () =>
       runAI("Break the material into its distinct underlying sub-ideas. Return a short list, one idea per line, no numbering.", { multi: true }),
     ask: (q) => runAI(`Using only the material provided, answer this question clearly and concretely.\n\nQuestion: ${q}`),
-    sameness: () =>
-      runAI(
-        "These are distinct things from different domains. Find the hidden structural sameness — the deep invariant pattern they all share beneath their surface differences. Name the structure in a short phrase, then explain it in 2-3 sentences. Return only that."
-      ),
+    sameness: () => runSamenessDiscovery(),
+    saveStructure: () => captureSelectionAsStructure(),
   };
 
   // ---- render ----
   const selBBox = selection.length ? selectionWorldBBox() : null;
   const selItem = selection.length === 1 ? items.find((it) => it.id === selection[0]) : null;
   const canTransform = selItem && (selItem.type === "text" || selItem.type === "image");
-  const aiMenuPos = selBBox && !editing && !gesture.current ? worldToClient(selBBox.minx, selBBox.miny) : null;
+  const selScreenBBox = selBBox && selection.length ? (() => {
+    const ids = new Set(selection);
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    for (const it of items.filter((i) => ids.has(i.id))) {
+      const bb = itemScreenBBox(it);
+      left = Math.min(left, bb.left);
+      top = Math.min(top, bb.top);
+      right = Math.max(right, bb.right);
+      bottom = Math.max(bottom, bb.bottom);
+    }
+    return { left, top, right, bottom, cx: (left + right) / 2 };
+  })() : null;
+  const aiMenuPos = selScreenBBox && !editing && !gesture.current
+    ? {
+        x: clamp(selScreenBBox.cx, RAIL_W + 120, window.innerWidth - 120),
+        y: selScreenBBox.top < 100 ? selScreenBBox.bottom + 14 : selScreenBBox.top - 14,
+        below: selScreenBBox.top < 100,
+      }
+    : null;
   const cursorClass =
     spaceDown || tool === "hand"
       ? "cur-grab"
@@ -1208,66 +1483,108 @@ export default function App() {
       <aside
         className="board-rail"
         onDragOver={(e) => {
-          if (e.dataTransfer.types.includes(OP_MIME)) e.preventDefault();
+          if (e.dataTransfer.types.includes(OP_MIME) || e.dataTransfer.types.includes(STRUCT_MIME)) e.preventDefault();
         }}
         onDrop={(e) => {
           e.preventDefault();
           const opId = e.dataTransfer.getData(OP_MIME);
-          if (opId) applyOpDrop(opId);
+          if (opId) {
+            applyOpDrop(opId);
+            return;
+          }
+          const structId = e.dataTransfer.getData(STRUCT_MIME);
+          if (structId) applyStructureDrop(structId);
         }}
       >
         <div className="rail-head">
-          <div className="rail-title">Transformations</div>
-          <div className="rail-sub">{topFunctions.length ? `${topFunctions.length} functions · drag onto canvas` : "build your toolbox"}</div>
+          <div className="rail-title">lens</div>
           <button className="rail-icon" title="set up for role" onClick={() => setOnboard({ step: "role" })}>
             ↻
           </button>
         </div>
-        <button className="rail-create" onClick={openCreateFunction}>
-          + create function
-        </button>
-        <div className="rail-scroll">
-          {topFunctions.length > 0 && (
-            <>
-              <div className="rail-section">your functions</div>
-              {topFunctions.map((op) => (
-                <DraggableOpCard
-                  key={op.id}
-                  op={op}
-                  opMap={opMap}
-                  expanded={expanded}
-                  onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
-                  onApply={(o) => runOperator(o)}
-                  onEdit={openEditFunction}
-                  busy={aiBusy}
-                />
-              ))}
-            </>
-          )}
-          {basics.length > 0 && (
-            <>
-              <div className="rail-section">basics</div>
-              {basics.map((op) => (
-                <DraggableOpCard
-                  key={op.id}
-                  op={op}
-                  opMap={opMap}
-                  expanded={expanded}
-                  onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
-                  onApply={(o) => runOperator(o)}
-                  onEdit={openEditFunction}
-                  busy={aiBusy}
-                  flat
-                />
-              ))}
-            </>
-          )}
-          {basics.length === 0 && topFunctions.length === 0 && (
-            <p className="rail-empty">Tap ↻ to generate 10 functions for your role.</p>
-          )}
+        <div className="rail-tabs">
+          <button className={"rail-tab" + (railTab === "functions" ? " on" : "")} onClick={() => setRailTab("functions")}>
+            functions
+          </button>
+          <button className={"rail-tab" + (railTab === "structures" ? " on" : "")} onClick={() => setRailTab("structures")}>
+            structures {structures.length ? `(${structures.length})` : ""}
+          </button>
         </div>
-        {selection.length > 0 && (
-          <div className="rail-hint">{selection.length} selected · drop a transform here or on canvas</div>
+        {railTab === "functions" ? (
+          <>
+            <button className="rail-create" onClick={openCreateFunction}>
+              + function
+            </button>
+            <div className="rail-scroll">
+              {topFunctions.length > 0 && (
+                <>
+                  <div className="rail-section">yours</div>
+                  {topFunctions.map((op) => (
+                    <DraggableOpCard
+                      key={op.id}
+                      op={op}
+                      opMap={opMap}
+                      expanded={expanded}
+                      onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
+                      onApply={(o) => runOperator(o)}
+                      onEdit={openEditFunction}
+                      onExpand={expandFunction}
+                      busy={aiBusy}
+                    />
+                  ))}
+                </>
+              )}
+              {basics.length > 0 && (
+                <>
+                  <div className="rail-section">basics</div>
+                  {basics.map((op) => (
+                    <DraggableOpCard
+                      key={op.id}
+                      op={op}
+                      opMap={opMap}
+                      expanded={expanded}
+                      onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
+                      onApply={(o) => runOperator(o)}
+                      onEdit={openEditFunction}
+                      onExpand={expandFunction}
+                      busy={aiBusy}
+                      flat
+                    />
+                  ))}
+                </>
+              )}
+              {basics.length === 0 && topFunctions.length === 0 && (
+                <p className="rail-empty">Tap ↻ to generate functions for your role.</p>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            <button
+              className="rail-create"
+              disabled={!selection.length}
+              onClick={() => captureSelectionAsStructure()}
+            >
+              + save selection
+            </button>
+            <div className="rail-scroll">
+              {structures.length === 0 ? (
+                <p className="rail-empty">Save selections from the canvas, or discover structures via sameness.</p>
+              ) : (
+                structures.map((struct) => (
+                  <StructureCard
+                    key={struct.id}
+                    struct={struct}
+                    onPlant={() => plantStructure(struct)}
+                    onDelete={() => deleteStructure(struct.id)}
+                  />
+                ))
+              )}
+            </div>
+          </>
+        )}
+        {selection.length > 0 && railTab === "functions" && (
+          <div className="rail-hint">{selection.length} selected · drag ⠿ onto canvas</div>
         )}
       </aside>
 
@@ -1278,7 +1595,11 @@ export default function App() {
         onPointerDown={onPointerDown}
         onDoubleClick={onDoubleClick}
         onDragOver={(e) => {
-          if (e.dataTransfer.types.includes(OP_MIME) || e.dataTransfer.types.includes("Files")) {
+          if (
+            e.dataTransfer.types.includes(OP_MIME) ||
+            e.dataTransfer.types.includes(STRUCT_MIME) ||
+            e.dataTransfer.types.includes("Files")
+          ) {
             e.preventDefault();
             setDropReady(true);
           }
@@ -1290,6 +1611,11 @@ export default function App() {
           const opId = e.dataTransfer.getData(OP_MIME);
           if (opId) {
             applyOpDrop(opId, { x: e.clientX, y: e.clientY });
+            return;
+          }
+          const structId = e.dataTransfer.getData(STRUCT_MIME);
+          if (structId) {
+            applyStructureDrop(structId, { x: e.clientX, y: e.clientY });
             return;
           }
           if (e.dataTransfer.files?.length) {
@@ -1416,13 +1742,12 @@ export default function App() {
         />
       )}
 
-      {/* brand */}
-      <div className="brand">lens</div>
+      {/* brand moved to rail — canvas stays clean */}
 
       {/* empty hint */}
       {items.length === 0 && (
         <div className="empty-hint">
-          double-click to write · pen & marker · drag transforms from the left rail
+          double-click to write · drag functions ⠿ or structures onto canvas
         </div>
       )}
 
@@ -1434,6 +1759,7 @@ export default function App() {
           operators={paletteOps}
           opMap={opMap}
           textCount={selectedTextMaterial().length}
+          selectionCount={selection.length}
           onAction={AI}
           onDelete={deleteSelection}
           onNewOperator={openCreateFunction}
@@ -1441,7 +1767,7 @@ export default function App() {
         />
       )}
 
-      {/* bottom tool dock */}
+      {/* bottom tool dock — centered on canvas area */}
       <div className="dock">
         {[
           ["select", "↖", "select / move (V)"],
@@ -1596,17 +1922,24 @@ function ScreenTransformHandles({ bbox, onRotateStart, onResizeStart, onScaleSta
 }
 
 function startOpDrag(e, op) {
+  e.stopPropagation();
   e.dataTransfer.setData(OP_MIME, op.id);
   e.dataTransfer.effectAllowed = "copy";
 }
 
-function DraggableOpCard({ op, opMap, expanded, onToggle, onApply, onEdit, busy, flat }) {
+function startStructDrag(e, struct) {
+  e.stopPropagation();
+  e.dataTransfer.setData(STRUCT_MIME, struct.id);
+  e.dataTransfer.effectAllowed = "copy";
+}
+
+function DraggableOpCard({ op, opMap, expanded, onToggle, onApply, onEdit, onExpand, busy, flat }) {
   if (!op) return null;
   const steps = op.kind === "pipeline" && op.steps ? op.steps.map((id) => opMap[id]).filter(Boolean) : [];
   const open = expanded[op.id];
   return (
     <div className="op-card-wrap">
-      <div className="op-card" title="click to apply · drag ⠿ onto canvas">
+      <div className="op-card" title="click apply · drag ⠿ onto canvas">
         <div className="op-card-row">
           <span
             className="op-drag-grip"
@@ -1618,11 +1951,16 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onApply, onEdit, busy,
           </span>
           <button className="op-card-apply" disabled={busy} onClick={() => onApply(op)}>
             <span className="op-card-name">{op.name}</span>
-            {op.description && <span className="op-card-desc">{op.description}</span>}
+            {open && op.description && <span className="op-card-desc">{op.description}</span>}
           </button>
           {!flat && steps.length > 0 && (
-            <button className="op-card-toggle" onClick={() => onToggle(op.id)} title="show steps">
+            <button className="op-card-toggle" onClick={() => onToggle(op.id)} title={`${steps.length} steps`}>
               {open ? "▾" : "▸"}
+            </button>
+          )}
+          {onExpand && !flat && (
+            <button className="op-card-expand" onClick={() => onExpand(op)} disabled={busy} title="expand layers">
+              +
             </button>
           )}
           <button className="op-card-edit" onClick={() => onEdit(op)} title="edit">
@@ -1633,7 +1971,7 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onApply, onEdit, busy,
       {open && steps.length > 0 && (
         <div className="op-card-steps">
           {steps.map((step) => (
-            <DraggableStep key={step.id} step={step} opMap={opMap} expanded={expanded} onToggle={onToggle} onApply={onApply} onEdit={onEdit} busy={busy} depth={1} />
+            <DraggableStep key={step.id} step={step} opMap={opMap} expanded={expanded} onToggle={onToggle} onApply={onApply} onEdit={onEdit} onExpand={onExpand} busy={busy} depth={1} />
           ))}
         </div>
       )}
@@ -1641,16 +1979,13 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onApply, onEdit, busy,
   );
 }
 
-function DraggableStep({ step, opMap, expanded, onToggle, onApply, onEdit, busy, depth }) {
+function DraggableStep({ step, opMap, expanded, onToggle, onApply, onEdit, onExpand, busy, depth }) {
   const sub = step.kind === "pipeline" && step.steps ? step.steps.map((id) => opMap[id]).filter(Boolean) : [];
   const open = expanded[step.id];
   const isLeaf = !sub.length;
   return (
-    <div className="op-step" style={{ paddingLeft: depth * 10 }}>
-      <div
-        className={"op-step-chip" + (isLeaf ? " leaf" : "")}
-        title="click to apply · drag ⠿ onto canvas"
-      >
+    <div className="op-step" style={{ paddingLeft: depth * 8 }}>
+      <div className={"op-step-chip" + (isLeaf ? " leaf" : "")} title="click apply · drag ⠿">
         <span
           className="op-drag-grip"
           draggable={!busy}
@@ -1661,19 +1996,53 @@ function DraggableStep({ step, opMap, expanded, onToggle, onApply, onEdit, busy,
         </span>
         <button className="op-step-apply" disabled={busy} onClick={() => onApply(step)}>
           <span className="op-step-name">{step.name}</span>
-          {step.description && <span className="op-step-desc">{step.description}</span>}
+          {open && step.description && <span className="op-step-desc">{step.description}</span>}
         </button>
         {!isLeaf && (
           <button className="op-step-toggle" onClick={() => onToggle(step.id)}>
             {open ? "▾" : "▸"}
           </button>
         )}
+        {onExpand && !isLeaf && (
+          <button className="op-step-expand" onClick={() => onExpand(step)} disabled={busy} title="expand">
+            +
+          </button>
+        )}
         <button className="op-step-edit" onClick={() => onEdit(step)}>⚙</button>
       </div>
       {open &&
         sub.map((child) => (
-          <DraggableStep key={child.id} step={child} opMap={opMap} expanded={expanded} onToggle={onToggle} onApply={onApply} onEdit={onEdit} busy={busy} depth={depth + 1} />
+          <DraggableStep key={child.id} step={child} opMap={opMap} expanded={expanded} onToggle={onToggle} onApply={onApply} onEdit={onEdit} onExpand={onExpand} busy={busy} depth={depth + 1} />
         ))}
+    </div>
+  );
+}
+
+function StructureCard({ struct, onPlant, onDelete }) {
+  const preview = structurePreview(struct);
+  const label = struct.structNum ? `#${struct.structNum}` : struct.kind || "idea";
+  return (
+    <div className="struct-card-wrap">
+      <div className="struct-card" title="click to plant · drag ⠿ onto canvas">
+        <div className="struct-card-row">
+          <span
+            className="op-drag-grip"
+            draggable
+            onDragStart={(e) => startStructDrag(e, struct)}
+            title="drag onto canvas"
+          >
+            ⠿
+          </span>
+          <button className="struct-card-plant" onClick={onPlant}>
+            <span className="struct-kind">{label}</span>
+            <span className="struct-title">{struct.title || preview}</span>
+            <span className="struct-preview">{preview}</span>
+          </button>
+          <button className="struct-card-del" onClick={onDelete} title="delete">
+            ×
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1686,10 +2055,11 @@ function escapeHtml(s) {
     .replace(/\n/g, "<br>");
 }
 
-function AIPalette({ pos, busy, operators, opMap, textCount, onAction, onDelete, onNewOperator, onEditOperator }) {
+function AIPalette({ pos, busy, operators, opMap, textCount, selectionCount, onAction, onDelete, onNewOperator, onEditOperator }) {
   const [mode, setMode] = useState(null); // null | 'transform' | 'ask' | 'custom'
   const [q, setQ] = useState("");
-  const style = { left: clamp(pos.x, 90, window.innerWidth - 90), top: Math.max(70, pos.y - 16) };
+  const transform = pos.below ? "translate(-50%, 0)" : "translate(-50%, -100%)";
+  const style = { left: pos.x, top: pos.y, transform };
 
   if (busy) {
     return (
@@ -1778,6 +2148,9 @@ function AIPalette({ pos, busy, operators, opMap, textCount, onAction, onDelete,
       </button>
       <button className="p-btn" onClick={onAction.sameness} disabled={textCount < 2}>
         sameness
+      </button>
+      <button className="p-btn" onClick={onAction.saveStructure} disabled={!selectionCount} title="save to structures">
+        save
       </button>
       <span className="p-sep" />
       <button className="p-btn danger" onClick={onDelete} title="delete selection">
