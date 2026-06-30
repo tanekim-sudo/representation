@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { jsonrepair } from "jsonrepair";
 
 const ITEMS_KEY = "lens.board.items.v1";
 const CAMERA_KEY = "lens.board.camera.v1";
@@ -50,21 +51,83 @@ const ROLES = [
 const uid = () => Math.random().toString(36).slice(2, 10);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
-function parseJSON(raw) {
-  let s = (raw || "").trim();
-  s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "");
-  const objStart = s.indexOf("{");
-  const objEnd = s.lastIndexOf("}");
-  const arrStart = s.indexOf("[");
-  const arrEnd = s.lastIndexOf("]");
-  if (objStart !== -1 && objEnd > objStart) s = s.slice(objStart, objEnd + 1);
-  else if (arrStart !== -1 && arrEnd > arrStart) s = s.slice(arrStart, arrEnd + 1);
-  s = s.replace(/,\s*([}\]])/g, "$1");
-  try {
-    return JSON.parse(s);
-  } catch (e) {
-    throw new Error(`Could not parse AI response (${e.message}). Try again.`);
+function extractBalancedJSON(s, open, close) {
+  const start = s.indexOf(open);
+  if (start === -1) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (esc) {
+      esc = false;
+      continue;
+    }
+    if (inStr) {
+      if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = true;
+      continue;
+    }
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return s.slice(start, i + 1);
+    }
   }
+  return null;
+}
+
+function normalizeJSONText(s) {
+  return s
+    .replace(/^\uFEFF/, "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/,\s*([}\]])/g, "$1");
+}
+
+function tryParseJSONCandidate(candidate) {
+  const c = normalizeJSONText(candidate.trim());
+  if (!c) return null;
+  try {
+    return JSON.parse(c);
+  } catch {
+    try {
+      return JSON.parse(jsonrepair(c));
+    } catch {
+      return null;
+    }
+  }
+}
+
+function parseJSON(raw) {
+  const text = (raw || "").trim();
+  if (!text) throw new Error("Empty AI response. Try again.");
+
+  const candidates = [];
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) candidates.push(fenced[1].trim());
+  const obj = extractBalancedJSON(text, "{", "}");
+  if (obj) candidates.push(obj);
+  const arr = extractBalancedJSON(text, "[", "]");
+  if (arr) candidates.push(arr);
+  candidates.push(text);
+
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const key = candidate.trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const parsed = tryParseJSONCandidate(key);
+    if (parsed != null) return parsed;
+  }
+
+  throw new Error("AI returned invalid JSON. Tap ↻ to rebuild, or try again.");
 }
 
 // The master system prompt — teaches Claude exactly what lens is and how to architect operators.
@@ -210,10 +273,12 @@ For each function:
 
 Investor examples: thesis → full investment thesis with sections; memo → investment memo; comps → comparable companies analysis.
 
-Return ONLY JSON: {"functions":[{"name":"...","description":"..."}]} — exactly 10, ordered by frequency.`;
+Return ONLY JSON: {"functions":[{"name":"...","description":"..."}]} — exactly 10, ordered by frequency. No markdown, no commentary outside the JSON object.`;
   const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 2000 });
   const j = parseJSON(out);
-  return Array.isArray(j.functions) ? j.functions.slice(0, 10) : [];
+  if (Array.isArray(j.functions) && j.functions.length) return j.functions.slice(0, 10);
+  if (Array.isArray(j) && j.length) return j.slice(0, 10);
+  return [];
 }
 
 // decompose one function into a deep tree of sub-functions ending in primitives
@@ -239,9 +304,20 @@ Requirements:
 - ONE word names at every level.
 
 Return ONLY JSON:
-{"name":"...","description":"...","steps":[{"name":"parse","prompt":"..."},{"name":"research","research":true,"prompt":"..."},...]}`;
+{"name":"...","description":"...","steps":[{"name":"parse","prompt":"..."},{"name":"research","research":true,"prompt":"..."},...]}
+
+Escape quotes and newlines inside all string values. No markdown fences.`;
   const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 8000 });
-  return parseJSON(out);
+  try {
+    return parseJSON(out);
+  } catch {
+    const retry = await runClaude(
+      `${prompt}\n\nYour previous reply was not valid JSON. Return ONLY a single minified JSON object. Escape all quotes inside strings with backslash.`,
+      "",
+      { system: librarySystem(operators, opMap), maxTokens: 8000 }
+    );
+    return parseJSON(retry);
+  }
 }
 
 // expand an existing operator subtree with more layers via Claude
@@ -253,9 +329,20 @@ CURRENT:
 ${current}
 
 Return ONLY JSON for the COMPLETE expanded function (same shape):
-{"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}`;
+{"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}
+
+Escape quotes and newlines inside strings. No markdown fences.`;
   const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 8000 });
-  return parseJSON(out);
+  try {
+    return parseJSON(out);
+  } catch {
+    const retry = await runClaude(
+      `${prompt}\n\nPrevious reply was invalid JSON. Return ONLY one minified JSON object.`,
+      "",
+      { system: librarySystem(operators, opMap), maxTokens: 8000 }
+    );
+    return parseJSON(retry);
+  }
 }
 
 // flatten a decomposition tree into flat operators; returns the root id
@@ -345,9 +432,20 @@ Requirements:
 - Do not duplicate functions already in their library unless the user explicitly asks to recreate one.
 
 Return ONLY JSON:
-{"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}`;
+{"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}
+
+Escape quotes and newlines inside strings. No markdown fences.`;
   const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 6000 });
-  return parseJSON(out);
+  try {
+    return parseJSON(out);
+  } catch {
+    const retry = await runClaude(
+      `${prompt}\n\nPrevious reply was invalid JSON. Return ONLY one minified JSON object.`,
+      "",
+      { system: librarySystem(operators, opMap), maxTokens: 6000 }
+    );
+    return parseJSON(retry);
+  }
 }
 
 // edit an existing function tree from the user's prose instruction
@@ -370,9 +468,20 @@ Return ONLY JSON for the COMPLETE updated function (same shape as create):
 {"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}
 
 If this should become a single primitive with no sub-steps, return a leaf:
-{"name":"...","description":"...","prompt":"..."}`;
+{"name":"...","description":"...","prompt":"..."}
+
+Escape quotes and newlines inside strings. No markdown fences.`;
   const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 6000 });
-  return parseJSON(out);
+  try {
+    return parseJSON(out);
+  } catch {
+    const retry = await runClaude(
+      `${prompt}\n\nPrevious reply was invalid JSON. Return ONLY one minified JSON object.`,
+      "",
+      { system: librarySystem(operators, opMap), maxTokens: 6000 }
+    );
+    return parseJSON(retry);
+  }
 }
 
 // turn a Claude JSON node into flat operators; returns root id
@@ -681,7 +790,15 @@ async function runClaude(prompt, text, opts = {}) {
     try {
       data = JSON.parse(raw);
     } catch {
-      throw new Error("Server returned invalid response. Try again.");
+      const snippet = raw.trim().slice(0, 80);
+      if (snippet.startsWith("<!") || snippet.toLowerCase().startsWith("<html")) {
+        throw new Error("Could not reach the API server. Refresh and try again.");
+      }
+      try {
+        data = JSON.parse(jsonrepair(raw));
+      } catch {
+        throw new Error("Server returned invalid JSON. Check your API key and retry.");
+      }
     }
     if (!res.ok) throw new Error(data.error || "Claude did not answer.");
     return (data.outputs || [])[0] || "";
