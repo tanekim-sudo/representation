@@ -1584,3 +1584,233 @@ body {
   font-size: 13px;
   color: var(--faint);
 }
+
+/* ============ THE HIGHLIGHTER (experimentation layer) ============ */
+
+/* selectable reading surface in the seed panel */
+.seed-read-wrap {
+  position: relative;
+}
+
+.seed-read {
+  font-family: var(--serif);
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+  padding-right: 22px;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.seed-read::selection {
+  background: rgba(160, 190, 255, 0.4);
+  color: #fff;
+}
+.seed-read ::selection {
+  background: rgba(160, 190, 255, 0.4);
+  color: #fff;
+}
+
+.read-edit {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--faint);
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+.read-edit:hover {
+  opacity: 1;
+  color: var(--ink);
+}
+
+.read-hint {
+  margin-top: 8px;
+  font-size: 10.5px;
+  letter-spacing: 0.3px;
+  color: var(--faint);
+  opacity: 0.65;
+  font-style: italic;
+}
+
+/* floating selection toolbar */
+.sel-toolbar {
+  position: fixed;
+  z-index: 70;
+  display: flex;
+  gap: 4px;
+  padding: 5px;
+  border-radius: 13px;
+  background: rgba(12, 14, 28, 0.86);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6), 0 0 30px rgba(120, 150, 255, 0.18);
+  animation: toolpop 0.16s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes toolpop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.sel-toolbar::after {
+  content: "";
+  position: absolute;
+  bottom: -5px;
+  left: 50%;
+  transform: translateX(-50%) rotate(45deg);
+  width: 9px;
+  height: 9px;
+  background: rgba(12, 14, 28, 0.86);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.sel-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 10px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.13s ease, box-shadow 0.18s ease, transform 0.1s ease;
+}
+
+.sel-btn:hover {
+  background: color-mix(in srgb, var(--c) 20%, transparent);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--c) 55%, transparent);
+}
+
+.sel-btn:active {
+  transform: scale(0.94);
+}
+
+.sel-sym {
+  font-size: 16px;
+  line-height: 1;
+  color: var(--c);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--c) 60%, transparent);
+}
+
+.sel-name {
+  font-size: 8.5px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.sel-btn.confirm {
+  flex-direction: row;
+  gap: 7px;
+  padding: 8px 14px;
+  border-color: var(--c);
+  background: color-mix(in srgb, var(--c) 18%, transparent);
+}
+.sel-btn.confirm .sel-name {
+  font-size: 11px;
+  text-transform: none;
+  color: var(--ink);
+}
+
+.combine-banner.frag {
+  border-color: rgba(255, 220, 140, 0.4);
+}
+
+/* particle seeds (extracted thought-matter) */
+.seed.particle .seed-core {
+  clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+  border-radius: 0;
+  background: radial-gradient(circle at 40% 35%, #fff 0%, var(--glow) 55%, transparent 85%);
+  box-shadow: 0 0 16px var(--glow), 0 0 34px var(--glow);
+}
+.seed.particle .seed-core::after {
+  display: none;
+}
+.seed.particle .seed-label {
+  color: color-mix(in srgb, var(--glow) 55%, var(--faint));
+}
+
+/* 3-layer indicator */
+.layers {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 16;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  border-radius: 14px;
+  background: var(--glass);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(12px);
+  pointer-events: none;
+}
+
+.layer {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 6px;
+  border-radius: 9px;
+  opacity: 0.4;
+  transition: opacity 0.25s ease, background 0.25s ease;
+}
+
+.layer.on {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.layer-n {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--faint);
+  width: 20px;
+  text-align: center;
+}
+
+.layer.on .layer-n {
+  color: var(--ink);
+  text-shadow: 0 0 12px rgba(150, 180, 255, 0.7);
+}
+
+.layer-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+
+.layer-label {
+  font-size: 11.5px;
+  letter-spacing: 0.4px;
+  color: var(--ink);
+}
+
+.layer-sub {
+  font-size: 9px;
+  letter-spacing: 0.3px;
+  color: var(--faint);
+}

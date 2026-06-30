@@ -92,6 +92,29 @@ Object.entries(OPS).forEach(([k, o]) => {
   VERB_META[k] = { label: o.name, color: o.color, symbol: o.sym };
 });
 
+// ── Highlighter grammar: operations on extracted thought-particles ──
+// kind: extract (instant, no AI) | one | fan | binary | analysis-binary
+const FRAG_OPS = {
+  isolate: { sym: "⟐", name: "isolate", kind: "extract", color: "#9fb4ff",
+    hint: "pull this fragment out as its own particle" },
+  collide: { sym: "⚡", name: "collide", kind: "binary", color: "#fcd34d",
+    hint: "crash this into another fragment",
+    prompt: "These two thought-fragments collide. Return the single new idea that emerges from their collision — the spark, friction, or fusion produced when they crash together. Return only that idea, no preamble." },
+  synthesize: { sym: "⊕", name: "synthesize", kind: "one", color: "#34d399",
+    hint: "grow this fragment into a fuller idea",
+    prompt: "Synthesize this fragment into a single fuller, realized idea — develop what it is reaching toward without padding. Return only the idea, no preamble." },
+  mutate: { sym: "✦", name: "mutate", kind: "fan", color: "#c084fc",
+    hint: "spawn mutations of this fragment",
+    prompt: "Mutate this fragment into 3 distinct variations — each a different mutation of the same seed-thought, pushing it in a different direction. Return each on its own line, no numbering, no bullets, no preamble." },
+  compare: { sym: "⇄", name: "compare", kind: "analysis-binary", color: "#22d3ee",
+    hint: "compare this with another fragment",
+    prompt: "Compare these two thought-fragments. Return, with short headers:\n• Shared structure\n• Key differences\n• The tension between them\n• What each reveals about the other\nBe concrete." },
+};
+const FRAG_ORDER = ["isolate", "collide", "synthesize", "mutate", "compare"];
+Object.entries(FRAG_OPS).forEach(([k, o]) => {
+  VERB_META[k] = { label: o.name, color: o.color, symbol: o.sym };
+});
+
 const BINARY_ARITIES = new Set([2]);
 
 function lastText(h) {
@@ -242,6 +265,10 @@ export default function App() {
   const [editing, setEditing] = useState(null);
   const [toolboxOpen, setToolboxOpen] = useState(true);
   const [replaySeed, setReplaySeed] = useState(null);
+  // highlighter: current text selection -> { text, rect, sourceId }
+  const [highlight, setHighlight] = useState(null);
+  // a two-fragment op waiting for its second fragment -> { opKey, fragA, sourceA }
+  const [pendingFrag, setPendingFrag] = useState(null);
 
   const viewportRef = useRef(null);
   const panRef = useRef(null);
@@ -259,10 +286,49 @@ export default function App() {
       if (e.key === "Escape") {
         setSelected(null);
         setPending(null);
+        setHighlight(null);
+        setPendingFrag(null);
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // ---- the highlighter: capture any selection inside a [data-selectable] surface ----
+  useEffect(() => {
+    function capture() {
+      const sel = window.getSelection();
+      const text = sel && !sel.isCollapsed ? sel.toString().trim() : "";
+      if (!text || text.length < 2 || sel.rangeCount === 0) {
+        // don't drop a pending second-fragment prompt just because selection collapsed
+        setHighlight((h) => (h ? null : h));
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      let node = range.startContainer;
+      if (node.nodeType === 3) node = node.parentElement;
+      const surface = node && node.closest ? node.closest("[data-selectable]") : null;
+      if (!surface) {
+        setHighlight(null);
+        return;
+      }
+      const rect = range.getBoundingClientRect();
+      setHighlight({
+        text,
+        sourceId: surface.getAttribute("data-seed-id") || null,
+        rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width },
+      });
+    }
+    function onUp(e) {
+      if (e.target.closest && e.target.closest(".sel-toolbar")) return; // keep selection while clicking toolbar
+      setTimeout(capture, 0);
+    }
+    document.addEventListener("mouseup", onUp);
+    document.addEventListener("touchend", onUp);
+    return () => {
+      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("touchend", onUp);
+    };
   }, []);
 
   function showToast(msg) {
@@ -483,6 +549,120 @@ export default function App() {
     setPending(null);
   }
 
+  // ---- the highlighter engine: operate on extracted thought-particles ----
+  function spawnAnchor(sourceId) {
+    const src = seeds.find((s) => s.id === sourceId);
+    if (src) return src;
+    const c = viewCenterWorld();
+    return { id: null, x: c.x, y: c.y };
+  }
+
+  function onFragmentOp(opKey) {
+    if (!highlight) return;
+    const op = FRAG_OPS[opKey];
+    if (op.kind === "binary" || op.kind === "analysis-binary") {
+      setPendingFrag({ opKey, fragA: highlight.text, sourceA: highlight.sourceId });
+      setHighlight(null);
+      window.getSelection()?.removeAllRanges();
+      showToast(`${op.sym} highlight the fragment to ${op.name} with`);
+      return;
+    }
+    applyFragmentOp(opKey, highlight.text, highlight.sourceId);
+    setHighlight(null);
+    window.getSelection()?.removeAllRanges();
+  }
+
+  function runPendingFrag() {
+    if (!pendingFrag || !highlight) return;
+    applyFragmentOp(pendingFrag.opKey, pendingFrag.fragA, pendingFrag.sourceA, highlight.text, highlight.sourceId);
+    setPendingFrag(null);
+    setHighlight(null);
+    window.getSelection()?.removeAllRanges();
+  }
+
+  async function applyFragmentOp(opKey, frag, sourceId, frag2, source2Id) {
+    const op = FRAG_OPS[opKey];
+    const meta = { name: op.name, sym: op.sym, color: op.color };
+    const anchor = spawnAnchor(sourceId);
+
+    if (op.kind === "extract") {
+      const pos = placeNear(anchor);
+      const baseH = sourceId
+        ? withWrite(seeds.find((s) => s.id === sourceId))
+        : [{ kind: "plant", op: null, to: frag }];
+      const child = makeSeed(pos.x, pos.y, frag, {
+        color: op.color,
+        particle: true,
+        history: [...baseH, { kind: "isolate", op: meta, to: frag }],
+      });
+      setSeeds((p) => [...p, child]);
+      if (sourceId) connect(sourceId, child.id);
+      setSelected(child.id);
+      pulse(child.id);
+      return;
+    }
+
+    if (sourceId) setBusy(sourceId, true);
+    if (source2Id) setBusy(source2Id, true);
+    try {
+      if (op.kind === "binary" || op.kind === "analysis-binary") {
+        const input = `Fragment A:\n${frag}\n\nFragment B:\n${frag2}`;
+        const out = (await runClaude(op.prompt, input, 1))[0] || "";
+        const a = seeds.find((s) => s.id === sourceId);
+        const b = seeds.find((s) => s.id === source2Id);
+        const anchors = [a, b].filter(Boolean);
+        const mid = anchors.length ? midOf(anchors) : placeNear(anchor);
+        const child = makeSeed(mid.x, mid.y, out, {
+          color: op.color,
+          particle: true,
+          analysis: op.kind === "analysis-binary",
+          history: [{ kind: opKey, op: meta, to: out, parents: [{ text: frag }, { text: frag2 }] }],
+        });
+        setSeeds((p) => [...p, child]);
+        if (anchors.length) setEdges((p) => [...p, ...anchors.map((n) => ({ id: uid(), a: n.id, b: child.id }))]);
+        setSelected(child.id);
+        pulse(child.id);
+      } else if (op.kind === "fan") {
+        const out = (await runClaude(op.prompt, frag, 1))[0] || "";
+        const list = parseLines(out);
+        const baseH = sourceId
+          ? withWrite(seeds.find((s) => s.id === sourceId))
+          : [{ kind: "plant", op: null, to: frag }];
+        const children = list.map((t, i) => {
+          const pos = placeNear(anchor, i, list.length);
+          return makeSeed(pos.x, pos.y, t, {
+            color: op.color,
+            particle: true,
+            history: [...baseH, { kind: opKey, op: meta, to: t }],
+          });
+        });
+        setSeeds((p) => [...p, ...children]);
+        if (sourceId) setEdges((p) => [...p, ...children.map((c) => ({ id: uid(), a: sourceId, b: c.id }))]);
+      } else {
+        // one
+        const out = (await runClaude(op.prompt, frag, 1))[0] || "";
+        const pos = placeNear(anchor);
+        const baseH = sourceId
+          ? withWrite(seeds.find((s) => s.id === sourceId))
+          : [{ kind: "plant", op: null, to: frag }];
+        const child = makeSeed(pos.x, pos.y, out, {
+          color: op.color,
+          particle: true,
+          history: [...baseH, { kind: opKey, op: meta, to: out }],
+        });
+        setSeeds((p) => [...p, child]);
+        if (sourceId) connect(sourceId, child.id);
+        setSelected(child.id);
+        pulse(child.id);
+      }
+    } catch (e) {
+      showToast(e.message);
+    } finally {
+      if (sourceId) setBusy(sourceId, false);
+      if (source2Id) setBusy(source2Id, false);
+    }
+  }
+
   // ---- custom operator applied to a seed ----
   async function applyOperator(opId, seed) {
     const op = symbols.find((s) => s.id === opId);
@@ -566,6 +746,9 @@ export default function App() {
 
   const selectedSeed = seeds.find((s) => s.id === selected) || null;
   const screenPos = selectedSeed ? worldToScreen(selectedSeed.x, selectedSeed.y) : null;
+
+  const activeLayer =
+    highlight || pendingFrag ? "exp" : busyIds.length || pending ? "branch" : "field";
 
   return (
     <div className="void-app">
@@ -696,7 +879,104 @@ export default function App() {
         />
       )}
 
+      {pendingFrag && (
+        <div className="combine-banner frag">
+          <span className="banner-sym">{FRAG_OPS[pendingFrag.opKey].sym}</span>
+          {FRAG_OPS[pendingFrag.opKey].name}: highlight the second fragment
+          {highlight ? (
+            <>
+              {" "}·{" "}
+              <button className="banner-go" onClick={runPendingFrag}>
+                {FRAG_OPS[pendingFrag.opKey].name} now
+              </button>
+            </>
+          ) : null}{" "}
+          · <em>esc to cancel</em>
+        </div>
+      )}
+
+      {highlight && (
+        <SelectionToolbar
+          rect={highlight.rect}
+          pendingFrag={pendingFrag}
+          onOp={onFragmentOp}
+          onConfirm={runPendingFrag}
+        />
+      )}
+
+      <LayersIndicator active={activeLayer} />
+
       {toast && <div className="void-toast">{toast}</div>}
+    </div>
+  );
+}
+
+const LAYERS = [
+  { key: "field", n: "I", label: "field", sub: "resonance space" },
+  { key: "branch", n: "II", label: "branching", sub: "collaborative growth" },
+  { key: "exp", n: "III", label: "experimentation", sub: "manipulable matter" },
+];
+
+function LayersIndicator({ active }) {
+  return (
+    <div className="layers">
+      {LAYERS.map((l) => (
+        <div key={l.key} className={"layer" + (l.key === active ? " on" : "")}>
+          <span className="layer-n">{l.n}</span>
+          <span className="layer-text">
+            <span className="layer-label">{l.label}</span>
+            <span className="layer-sub">{l.sub}</span>
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SelectionToolbar({ rect, pendingFrag, onOp, onConfirm }) {
+  const ref = useRef(null);
+  const [pos, setPos] = useState({ left: rect.left + rect.width / 2, top: rect.top - 8 });
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    let left = rect.left + rect.width / 2 - w / 2;
+    let top = rect.top - h - 10;
+    left = Math.max(10, Math.min(window.innerWidth - w - 10, left));
+    if (top < 10) top = rect.bottom + 10; // flip below if no room above
+    setPos({ left, top });
+  }, [rect]);
+
+  return (
+    <div className="sel-toolbar" ref={ref} style={{ left: pos.left, top: pos.top }}>
+      {pendingFrag ? (
+        <button
+          className="sel-btn confirm"
+          style={{ "--c": FRAG_OPS[pendingFrag.opKey].color }}
+          onClick={onConfirm}
+        >
+          <span className="sel-sym">{FRAG_OPS[pendingFrag.opKey].sym}</span>
+          <span className="sel-name">{FRAG_OPS[pendingFrag.opKey].name} with this</span>
+        </button>
+      ) : (
+        FRAG_ORDER.map((k) => {
+          const op = FRAG_OPS[k];
+          return (
+            <button
+              key={k}
+              className="sel-btn"
+              style={{ "--c": op.color }}
+              title={op.hint}
+              onClick={() => onOp(k)}
+            >
+              <span className="sel-sym">{op.sym}</span>
+              <span className="sel-name">{op.name}</span>
+            </button>
+          );
+        })
+      )}
     </div>
   );
 }
@@ -976,6 +1256,7 @@ function Seed({ seed, scale, selected, pendingFrom, picked, pickMode, busy, onAc
         (pendingFrom ? " combine-from" : "") +
         (picked ? " picked" : "") +
         (pickMode ? " targetable" : "") +
+        (seed.particle ? " particle" : "") +
         (seed.analysis ? " analysis" : "") +
         (seed.flash ? " flash" : "") +
         (busy || seed.loading ? " busy" : "") +
@@ -1019,13 +1300,17 @@ function SeedPanel({ seed, pos, flip, busy, onChange, onOp, onDelete, onReplay, 
   const hasFormation = (seed.history || []).some(
     (s) => OPS[s.kind] || legacy.includes(s.kind)
   );
+  const [editing, setEditing] = useState(!(seed.text || "").trim());
+  useEffect(() => {
+    setEditing(!(seed.text || "").trim());
+  }, [seed.id]);
   useEffect(() => {
     const el = ref.current;
-    if (el) {
+    if (el && editing) {
       el.style.height = "auto";
       el.style.height = Math.min(el.scrollHeight, 220) + "px";
     }
-  }, [seed.text]);
+  }, [seed.text, editing]);
 
   return (
     <div
@@ -1041,15 +1326,33 @@ function SeedPanel({ seed, pos, flip, busy, onChange, onOp, onDelete, onReplay, 
           accent={seed.color}
           onChange={(image, strokes) => onChange({ image, strokes })}
         />
-      ) : (
+      ) : editing ? (
         <textarea
           ref={ref}
           autoFocus
           className="seed-input"
           value={seed.text}
           placeholder="speak the thought into being…"
+          onBlur={() => {
+            if ((seed.text || "").trim()) setEditing(false);
+          }}
           onChange={(e) => onChange({ text: e.target.value })}
         />
+      ) : (
+        <div className="seed-read-wrap">
+          <div className="seed-read" data-selectable data-seed-id={seed.id}>
+            {seed.text}
+          </div>
+          <button
+            className="read-edit"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => setEditing(true)}
+            title="edit text"
+          >
+            ✎
+          </button>
+          <div className="read-hint">highlight any words to operate on them</div>
+        </div>
       )}
 
       {!isSketch && (
