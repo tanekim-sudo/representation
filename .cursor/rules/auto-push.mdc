@@ -1,0 +1,17 @@
+---
+description: Push to origin automatically after completing implementation work
+alwaysApply: true
+---
+
+# Auto-push after changes
+
+When you finish a task that modifies this repository:
+
+1. Commit the changes with a clear message (unless the user explicitly said not to commit).
+2. Push to `origin/main` (or the current branch) without waiting for the user to ask.
+3. Confirm the commit hash and that the push succeeded.
+
+Skip auto-push only if:
+- The user explicitly says not to push or commit in that turn.
+- There are no changes to commit.
+- Push fails due to auth or conflicts — report the error instead of retrying destructively.
