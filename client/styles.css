@@ -513,6 +513,9 @@ body {
 .cur-grab {
   cursor: grab;
 }
+.cur-highlight {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Crect x='4' y='14' width='14' height='6' rx='2' fill='%23E5C04A' opacity='0.85'/%3E%3Cpath d='M16 8 L20 4 L22 6 L18 10 Z' fill='%23c9a227'/%3E%3C/svg%3E") 4 20, crosshair;
+}
 
 .world {
   position: absolute;
@@ -528,15 +531,6 @@ body {
 .world .board-text,
 .world .board-img {
   pointer-events: none;
-}
-.board-main.highlight-mode .world .board-text {
-  pointer-events: auto;
-  user-select: text;
-  -webkit-user-select: text;
-  cursor: text;
-}
-.board-main.highlight-mode .world .board-text::selection {
-  background: color-mix(in srgb, #c9a227 35%, transparent);
 }
 .world .board-text.editing {
   pointer-events: auto;
@@ -555,6 +549,10 @@ body {
 .ink-layer polyline.sel {
   stroke-opacity: 1;
   filter: drop-shadow(0 0 0.5px var(--ink));
+}
+
+.ink-layer polyline.hl-stroke {
+  mix-blend-mode: multiply;
 }
 
 /* text written straight onto the board */
@@ -634,48 +632,183 @@ body {
   z-index: 1;
 }
 
-/* ---- bottom tool dock — centered on canvas, not full viewport ---- */
-.dock {
-  position: fixed;
-  bottom: 22px;
-  left: calc(280px + (100vw - 280px) / 2);
+/* ---- canvas HUD — active mode readout ---- */
+.canvas-hud {
+  position: absolute;
+  top: 14px;
+  left: 50%;
   transform: translateX(-50%);
+  z-index: 22;
   display: flex;
+  flex-direction: column;
   align-items: center;
   gap: 4px;
-  padding: 6px;
+  pointer-events: none;
+  max-width: min(520px, calc(100% - 48px));
+}
+.canvas-mode-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 10px;
   background: var(--card);
   border: 1px solid var(--line-2);
-  border-radius: 14px;
-  box-shadow: 0 6px 24px rgba(32, 32, 29, 0.12);
-  z-index: 30;
+  border-radius: 999px;
+  box-shadow: 0 4px 18px rgba(32, 32, 29, 0.1);
 }
-.dock .tool {
-  width: 38px;
-  height: 38px;
-  display: grid;
-  place-items: center;
-  font-size: 16px;
-  border: none;
-  background: transparent;
-  color: var(--ink-2);
-  border-radius: 9px;
-  cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
+.canvas-mode-pill.cognition {
+  border-color: color-mix(in srgb, #c9a227 45%, var(--line-2));
 }
-.dock .tool:hover {
-  background: color-mix(in srgb, var(--ink) 6%, transparent);
+.mode-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  box-shadow: inset 0 0 0 1px rgba(32, 32, 29, 0.12);
+}
+.mode-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+.mode-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
   color: var(--ink);
 }
-.dock .tool.on {
+.mode-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--faint);
+  text-align: center;
+  line-height: 1.35;
+  letter-spacing: 0.01em;
+}
+
+/* ---- input deck — driver's seat tool picker ---- */
+.input-deck {
+  position: fixed;
+  bottom: 18px;
+  left: calc(280px + (100vw - 280px) / 2);
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px 10px;
+  background: var(--card);
+  border: 1px solid var(--line-2);
+  border-radius: 16px;
+  box-shadow: 0 8px 32px rgba(32, 32, 29, 0.14);
+  max-width: calc(100vw - 320px);
+}
+.input-deck-head {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.input-deck-groups {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.input-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+}
+.input-group:not(:last-child) {
+  border-right: 1px solid var(--line);
+  padding-right: 10px;
+  margin-right: 2px;
+}
+.input-group-label {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.input-group-tools {
+  display: flex;
+  gap: 3px;
+}
+.input-tool {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-width: 52px;
+  height: 54px;
+  padding: 4px 6px 3px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, transform 0.1s ease;
+}
+.input-tool:hover {
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  border-color: var(--line);
+  color: var(--ink);
+}
+.input-tool.on {
   background: var(--ink);
+  border-color: var(--ink);
   color: var(--card);
 }
-.dock-sep {
-  width: 1px;
-  height: 22px;
-  background: var(--line-2);
-  margin: 0 3px;
+.input-tool.highlight-tool.on {
+  background: #e5c04a;
+  border-color: #c9a227;
+  color: #3d3410;
+}
+.tool-swatch {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px rgba(32, 32, 29, 0.15);
+}
+.input-tool.on .tool-swatch {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+.tool-icon {
+  font-size: 16px;
+  line-height: 1;
+  margin-top: 2px;
+}
+.input-tool.highlight-tool .tool-icon {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.08em;
+  color: #b8921f;
+}
+.input-tool.highlight-tool.on .tool-icon {
+  color: #3d3410;
+}
+.tool-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+/* legacy dock selectors — keep zoom compat */
+.dock {
+  display: none;
 }
 
 /* ---- zoom ---- */

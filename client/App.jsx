@@ -17,6 +17,8 @@ const COMBINE_THRESHOLD = 14; // px moved before drop-on-item triggers combine
 const INK = "#20201d";
 const PEN_W = 2.4; // world units
 const MARKER_W = 16;
+const HIGHLIGHT_INK = "#E5C04A";
+const HIGHLIGHT_W = 22;
 
 const DEFAULT_OPERATORS = [
   { id: "op-combine", name: "combine", kind: "prompt", primitive: true,
@@ -87,6 +89,78 @@ Format each as:
 Brief expression of the shared pattern
 
 Include 4–6 parallels from art, literature, history, science, personal life, myth, etc.`,
+  },
+};
+
+const TOOL_GROUPS = [
+  { id: "think", label: "think" },
+  { id: "canvas", label: "canvas" },
+  { id: "input", label: "input" },
+  { id: "draw", label: "draw" },
+  { id: "edit", label: "edit" },
+];
+
+const CANVAS_TOOLS = {
+  highlight: {
+    id: "highlight",
+    group: "think",
+    label: "Highlighter",
+    icon: "▬",
+    hint: "Draw over text to capture a thought particle — then isolate, mutate, compare…",
+    swatch: HIGHLIGHT_INK,
+  },
+  select: {
+    id: "select",
+    group: "canvas",
+    label: "Select",
+    icon: "↖",
+    hint: "Click or lasso to select. Drag to move. Drop on another idea to combine.",
+  },
+  hand: {
+    id: "hand",
+    group: "canvas",
+    label: "Pan",
+    icon: "✋",
+    hint: "Drag to move the canvas.",
+  },
+  text: {
+    id: "text",
+    group: "input",
+    label: "Text",
+    icon: "T",
+    hint: "Click to place text. Double-click empty space to write quickly.",
+  },
+  image: {
+    id: "image",
+    group: "input",
+    label: "Image",
+    icon: "▢",
+    hint: "Import an image — or drag & drop onto the canvas.",
+    action: "image",
+  },
+  pen: {
+    id: "pen",
+    group: "draw",
+    label: "Pen",
+    icon: "✎",
+    hint: "Precise ink lines.",
+    swatch: INK,
+  },
+  marker: {
+    id: "marker",
+    group: "draw",
+    label: "Marker",
+    icon: "▔",
+    hint: "Wide translucent strokes.",
+    swatch: INK,
+    swatchOpacity: 0.35,
+  },
+  eraser: {
+    id: "eraser",
+    group: "edit",
+    label: "Eraser",
+    icon: "⌫",
+    hint: "Click or drag over strokes and objects to remove.",
   },
 };
 
@@ -644,11 +718,11 @@ async function compositeItemsToImage(items) {
       ctx.beginPath();
       ctx.moveTo(it.points[0].x, it.points[0].y);
       for (let i = 1; i < it.points.length; i++) ctx.lineTo(it.points[i].x, it.points[i].y);
-      ctx.strokeStyle = it.color || INK;
+      ctx.strokeStyle = it.highlight ? HIGHLIGHT_INK : it.color || INK;
       ctx.lineWidth = it.width || PEN_W;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      ctx.globalAlpha = it.marker ? 0.35 : 0.95;
+      ctx.globalAlpha = it.highlight ? 0.45 : it.marker ? 0.35 : 0.95;
       ctx.stroke();
       ctx.globalAlpha = 1;
     } else if (it.type === "image" && it.src) {
@@ -855,6 +929,121 @@ function parseHighlightPortals(out) {
   return lines.length >= 2 ? lines : [out.trim()];
 }
 
+function strokeWorldBBox(points, pad = 0) {
+  if (!points?.length) return null;
+  const xs = points.map((p) => p.x);
+  const ys = points.map((p) => p.y);
+  return {
+    minx: Math.min(...xs) - pad,
+    miny: Math.min(...ys) - pad,
+    maxx: Math.max(...xs) + pad,
+    maxy: Math.max(...ys) + pad,
+  };
+}
+
+function bboxesOverlap(a, b) {
+  if (!a || !b) return false;
+  return a.minx <= b.maxx && a.maxx >= b.minx && a.miny <= b.maxy && a.maxy >= b.miny;
+}
+
+function sampleStrokePoints(points) {
+  const samples = [];
+  for (let i = 0; i < points.length; i++) {
+    samples.push(points[i]);
+    if (i + 1 < points.length) {
+      const a = points[i];
+      const b = points[i + 1];
+      const steps = Math.max(2, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 6));
+      for (let s = 1; s < steps; s++) {
+        samples.push({
+          x: a.x + ((b.x - a.x) * s) / steps,
+          y: a.y + ((b.y - a.y) * s) / steps,
+        });
+      }
+    }
+  }
+  return samples;
+}
+
+function extractTextFromHighlightStroke(points, strokeWidth, itemList, worldToClient) {
+  const bb = strokeWorldBBox(points, strokeWidth * 0.65);
+  const textItems = itemList.filter(
+    (it) => it.type === "text" && it.text?.trim() && bboxesOverlap(itemWorldBBox(it), bb)
+  );
+  if (!textItems.length) return null;
+
+  const samples = sampleStrokePoints(points);
+
+  for (const item of textItems) {
+    const el = document.querySelector(`[data-item="${item.id}"].board-text`);
+    if (!el) continue;
+    const full = el.innerText || item.text;
+    const charHits = new Map();
+
+    for (const p of samples) {
+      const client = worldToClient(p.x, p.y);
+      let range = null;
+      if (document.caretRangeFromPoint) {
+        range = document.caretRangeFromPoint(client.x, client.y);
+      } else if (document.caretPositionFromPoint) {
+        const pos = document.caretPositionFromPoint(client.x, client.y);
+        if (pos) {
+          range = document.createRange();
+          range.setStart(pos.offsetNode, pos.offset);
+          range.setEnd(pos.offsetNode, pos.offset);
+        }
+      }
+      if (!range || !el.contains(range.startContainer)) continue;
+      const pre = document.createRange();
+      pre.selectNodeContents(el);
+      pre.setEnd(range.startContainer, range.startOffset);
+      const offset = pre.toString().length;
+      charHits.set(offset, (charHits.get(offset) || 0) + 1);
+    }
+
+    if (!charHits.size) continue;
+
+    const hitOffsets = [...charHits.keys()].sort((a, b) => a - b);
+    let start = hitOffsets[0];
+    let end = hitOffsets[hitOffsets.length - 1] + 1;
+    while (start > 0 && /\S/.test(full[start - 1])) start--;
+    while (end < full.length && /\S/.test(full[end])) end++;
+    const quote = full.slice(start, end).trim();
+    if (quote.length < 2) continue;
+
+    let rect;
+    try {
+      const textNode = el.firstChild;
+      if (textNode?.nodeType === Node.TEXT_NODE) {
+        const tr = document.createRange();
+        tr.setStart(textNode, Math.min(start, textNode.length));
+        tr.setEnd(textNode, Math.min(end, textNode.length));
+        const r = tr.getBoundingClientRect();
+        if (r.width || r.height) {
+          rect = {
+            left: r.left,
+            top: r.top,
+            bottom: r.bottom,
+            right: r.right,
+            width: r.width,
+            height: r.height,
+          };
+        }
+      }
+    } catch {
+      /* fall through */
+    }
+    if (!rect) {
+      const r = el.getBoundingClientRect();
+      rect = { left: r.left, top: r.top, bottom: r.bottom, right: r.right, width: r.width, height: r.height };
+    }
+
+    return { itemId: item.id, quote, context: item.text, rect };
+  }
+
+  return null;
+}
+
 function formatJobEta(ms) {
   if (ms <= 0) return "finishing…";
   const s = Math.ceil(ms / 1000);
@@ -1026,7 +1215,7 @@ export default function App() {
     return migrateOldSavedNodes();
   });
 
-  const [tool, setTool] = useState("select"); // select | text | pen | marker | eraser | hand
+  const [tool, setTool] = useState("highlight"); // highlight | select | text | pen | marker | eraser | hand
   const [selection, setSelection] = useState([]);
   const [editing, setEditing] = useState(null);
   const [draft, setDraft] = useState(null);
@@ -1034,7 +1223,6 @@ export default function App() {
   const [jobs, setJobs] = useState([]); // background operations
   const [toast, setToast] = useState(null);
   const [opEditor, setOpEditor] = useState(null);
-  const [spaceDown, setSpaceDown] = useState(false);
   const [expanded, setExpanded] = useState({});
   const [dropReady, setDropReady] = useState(false);
   const [dropTargetId, setDropTargetId] = useState(null);
@@ -1048,7 +1236,6 @@ export default function App() {
   const itemsRef = useRef(items);
   const toolRef = useRef(tool);
   const selRef = useRef(selection);
-  const spaceRef = useRef(false);
   const editingRef = useRef(editing);
   const combineRef = useRef(null);
   camRef.current = camera;
@@ -1066,10 +1253,9 @@ export default function App() {
   useEffect(() => {
     function onSelectionChange() {
       const t = toolRef.current;
-      if (t !== "highlight" && t !== "select") return;
+      if (t !== "select") return;
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed) {
-        if (t === "highlight") setHighlight(null);
         return;
       }
       const quote = sel.toString().trim();
@@ -1112,7 +1298,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (tool !== "highlight" && tool !== "select") setHighlight(null);
+    if (tool !== "select") setHighlight(null);
   }, [tool]);
 
   function showToast(msg) {
@@ -1199,7 +1385,7 @@ export default function App() {
       } else if (g.mode === "draw") {
         const w = clientToWorld(cx, cy);
         g.points.push(w);
-        setDraft({ points: g.points.slice(), marker: g.marker });
+        setDraft({ points: g.points.slice(), marker: g.marker, highlight: g.highlight });
       } else if (g.mode === "erase") {
         const hit = itemAtPoint(cx, cy);
         if (hit) setItems((arr) => arr.filter((it) => it.id !== hit.id));
@@ -1268,10 +1454,33 @@ export default function App() {
 
       if (g.mode === "draw") {
         if (g.points.length > 1) {
+          const isHighlight = !!g.highlight;
           setItems((arr) => [
             ...arr,
-            { id: uid(), type: "stroke", points: g.points, color: INK, width: g.marker ? MARKER_W : PEN_W, marker: g.marker },
+            {
+              id: uid(),
+              type: "stroke",
+              points: g.points,
+              color: isHighlight ? HIGHLIGHT_INK : INK,
+              width: isHighlight ? HIGHLIGHT_W : g.marker ? MARKER_W : PEN_W,
+              marker: g.marker || isHighlight,
+              highlight: isHighlight,
+            },
           ]);
+          if (isHighlight) {
+            const pts = g.points.slice();
+            requestAnimationFrame(() => {
+              requestAnimationFrame(() => {
+                const extracted = extractTextFromHighlightStroke(
+                  pts,
+                  HIGHLIGHT_W,
+                  itemsRef.current,
+                  worldToClient
+                );
+                if (extracted) setHighlight(extracted);
+              });
+            });
+          }
         }
         setDraft(null);
       } else if (g.mode === "lasso") {
@@ -1334,16 +1543,10 @@ export default function App() {
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
 
-  // keyboard: tools, space-pan, delete, escape
+  // keyboard: escape, delete while not typing in a field
   useEffect(() => {
     function down(e) {
       const typing = e.target.isContentEditable || /^(INPUT|TEXTAREA)$/.test(e.target.tagName || "");
-      if (e.code === "Space" && !typing) {
-        spaceRef.current = true;
-        setSpaceDown(true);
-        e.preventDefault();
-        return;
-      }
       if (typing) return;
       if (e.key === "Escape") {
         finishEditing();
@@ -1354,32 +1557,9 @@ export default function App() {
         e.preventDefault();
         deleteSelection();
       }
-      if (e.key === "v" || e.key === "1") setTool("select");
-      if (e.key === "g" || e.key === "7") setTool("highlight");
-      if (e.key === "t" || e.key === "2") setTool("text");
-      if (e.key === "p" || e.key === "3") setTool("pen");
-      if (e.key === "m" || e.key === "4") setTool("marker");
-      if (e.key === "e" || e.key === "5") setTool("eraser");
-      if (e.key === "h" || e.key === "6") setTool("hand");
-      if (e.key === "r" && selRef.current.length === 1) {
-        const it = itemsRef.current.find((i) => i.id === selRef.current[0]);
-        if (it && (it.type === "text" || it.type === "image")) {
-          updateItem(it.id, { rotation: ((it.rotation || 0) + 15) % 360 });
-        }
-      }
-    }
-    function up(e) {
-      if (e.code === "Space") {
-        spaceRef.current = false;
-        setSpaceDown(false);
-      }
     }
     window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
-    return () => {
-      window.removeEventListener("keydown", down);
-      window.removeEventListener("keyup", up);
-    };
+    return () => window.removeEventListener("keydown", down);
   }, []);
 
   // paste image or text
@@ -1846,10 +2026,10 @@ export default function App() {
   // ---- pointer gestures on the board ----
   function onPointerDown(e) {
     if (e.button !== 0) return;
-    if (!e.target.closest?.(".xform-handle, .xform-screen-layer, .board-rail, .dock, .zoom, .palette, .op-drag-grip, .struct-card, .highlight-toolbar")) return;
+    if (e.target.closest?.(".xform-handle, .xform-screen-layer, .board-rail, .input-deck, .canvas-hud, .zoom, .palette, .op-drag-grip, .struct-card, .highlight-toolbar")) return;
     const cx = e.clientX;
     const cy = e.clientY;
-    const panning = spaceRef.current || toolRef.current === "hand";
+    const panning = toolRef.current === "hand";
     const t = toolRef.current;
 
     if (!e.target.closest?.(".board-text.editing")) finishEditing();
@@ -1870,6 +2050,13 @@ export default function App() {
       return;
     }
 
+    if (t === "highlight") {
+      gesture.current = { mode: "draw", highlight: true, points: [w] };
+      setDraft({ points: [w], highlight: true });
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+      return;
+    }
+
     if (t === "eraser") {
       gesture.current = { mode: "erase" };
       const hit = itemAtPoint(cx, cy);
@@ -1884,24 +2071,6 @@ export default function App() {
       setSelection([id]);
       setEditing(id);
       setTool("select");
-      return;
-    }
-
-    if (t === "highlight") {
-      const hit = itemAtPoint(cx, cy);
-      if (hit?.type === "text") {
-        setSelection([hit.id]);
-        return;
-      }
-      setHighlight(null);
-      if (!e.shiftKey) setSelection([]);
-      gesture.current = { mode: "lasso", x0: lp.x, y0: lp.y, x1: lp.x, y1: lp.y };
-      setLasso({ x0: lp.x, y0: lp.y, x1: lp.x, y1: lp.y });
-      try {
-        e.currentTarget.setPointerCapture(e.pointerId);
-      } catch {
-        /* ignore */
-      }
       return;
     }
 
@@ -1974,7 +2143,7 @@ export default function App() {
 
   // double-click: edit an existing text, or write a new one
   function onDoubleClick(e) {
-    if (e.target.closest?.(".board-rail, .dock, .zoom, .palette")) return;
+    if (e.target.closest?.(".board-rail, .input-deck, .canvas-hud, .zoom, .palette")) return;
     finishEditing();
     const hit = itemAtPoint(e.clientX, e.clientY);
     if (hit) {
@@ -2188,10 +2357,10 @@ export default function App() {
       }
     : null;
   const cursorClass =
-    spaceDown || tool === "hand"
+    tool === "hand"
       ? "cur-grab"
       : tool === "highlight"
-      ? "cur-text"
+      ? "cur-highlight"
       : tool === "text"
       ? "cur-text"
       : tool === "pen" || tool === "marker"
@@ -2332,7 +2501,7 @@ export default function App() {
         )}
       </aside>
 
-      <div className={"board-main" + (dropReady ? " drop-ready" : "") + (tool === "highlight" ? " highlight-mode" : "")}>
+      <div className={"board-main" + (dropReady ? " drop-ready" : "")}>
       <div
         ref={viewportRef}
         className={"viewport " + cursorClass}
@@ -2391,21 +2560,21 @@ export default function App() {
                   data-item={it.id}
                   points={it.points.map((p) => `${p.x},${p.y}`).join(" ")}
                   fill="none"
-                  stroke={it.color}
+                  stroke={it.highlight ? HIGHLIGHT_INK : it.color}
                   strokeWidth={it.width}
-                  strokeOpacity={it.marker ? 0.32 : 0.95}
+                  strokeOpacity={it.highlight ? 0.45 : it.marker ? 0.32 : 0.95}
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  className={selection.includes(it.id) ? "sel" : ""}
+                  className={(selection.includes(it.id) ? "sel" : "") + (it.highlight ? " hl-stroke" : "")}
                 />
               ))}
             {draft && draft.points.length > 1 && (
               <polyline
                 points={draft.points.map((p) => `${p.x},${p.y}`).join(" ")}
                 fill="none"
-                stroke={INK}
-                strokeWidth={draft.marker ? MARKER_W : PEN_W}
-                strokeOpacity={draft.marker ? 0.32 : 0.95}
+                stroke={draft.highlight ? HIGHLIGHT_INK : INK}
+                strokeWidth={draft.highlight ? HIGHLIGHT_W : draft.marker ? MARKER_W : PEN_W}
+                strokeOpacity={draft.highlight ? 0.45 : draft.marker ? 0.32 : 0.95}
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
@@ -2501,8 +2670,13 @@ export default function App() {
       {/* empty hint */}
       {items.length === 0 && (
         <div className="empty-hint">
-          double-click to write · ✦ highlight text to operate on thought particles
+          choose a mode below · double-click empty space to write
         </div>
+      )}
+
+      {/* driver's seat — mode HUD + input deck */}
+      {!editing && (
+        <CanvasHud tool={tool} selectionCount={selection.length} />
       )}
 
       {highlight && !editing && (
@@ -2528,31 +2702,7 @@ export default function App() {
         />
       )}
 
-      {/* bottom tool dock — centered on canvas area */}
-      <div className="dock">
-        {[
-          ["select", "↖", "select / move (V)"],
-          ["highlight", "✦", "highlight cognition (G)"],
-          ["hand", "✋", "pan (H)"],
-          ["text", "T", "text (T)"],
-          ["pen", "✎", "pen (P)"],
-          ["marker", "▔", "marker (M)"],
-          ["eraser", "⌫", "eraser (E)"],
-        ].map(([id, glyph, title]) => (
-          <button
-            key={id}
-            className={"tool" + (tool === id ? " on" : "")}
-            title={title}
-            onClick={() => setTool(id)}
-          >
-            {glyph}
-          </button>
-        ))}
-        <span className="dock-sep" />
-        <button className="tool" title="add image" onClick={pickImage}>
-          ▢
-        </button>
-      </div>
+      <InputDeck tool={tool} onSelectTool={setTool} onPickImage={pickImage} />
 
       {/* zoom controls */}
       <div className="zoom">
@@ -2693,6 +2843,83 @@ function startStructDrag(e, struct) {
   e.stopPropagation();
   e.dataTransfer.setData(STRUCT_MIME, struct.id);
   e.dataTransfer.effectAllowed = "copy";
+}
+
+function CanvasHud({ tool, selectionCount }) {
+  const meta = CANVAS_TOOLS[tool] || CANVAS_TOOLS.select;
+  let hint = meta.hint;
+  if (selectionCount > 0 && tool === "select") {
+    hint = `${selectionCount} selected · drag to move · drop on another idea to combine`;
+  }
+
+  return (
+    <div className="canvas-hud" onPointerDown={(e) => e.stopPropagation()}>
+      <div className={"canvas-mode-pill" + (tool === "highlight" ? " cognition" : "")}>
+        {meta.swatch && (
+          <span
+            className="mode-swatch"
+            style={{
+              background: meta.swatch,
+              opacity: meta.swatchOpacity ?? (tool === "highlight" ? 0.85 : 1),
+            }}
+          />
+        )}
+        <span className="mode-icon">{meta.icon}</span>
+        <span className="mode-label">{meta.label}</span>
+      </div>
+      <p className="mode-hint">{hint}</p>
+    </div>
+  );
+}
+
+function InputDeck({ tool, onSelectTool, onPickImage }) {
+  return (
+    <div className="input-deck" onPointerDown={(e) => e.stopPropagation()}>
+      <div className="input-deck-head">input</div>
+      <div className="input-deck-groups">
+        {TOOL_GROUPS.map((group) => {
+          const tools = Object.values(CANVAS_TOOLS).filter((t) => t.group === group.id);
+          if (!tools.length) return null;
+          return (
+            <div key={group.id} className="input-group">
+              <span className="input-group-label">{group.label}</span>
+              <div className="input-group-tools">
+                {tools.map((t) => {
+                  const active = tool === t.id;
+                  const isImage = t.action === "image";
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      className={
+                        "input-tool" +
+                        (active && !isImage ? " on" : "") +
+                        (t.id === "highlight" ? " highlight-tool" : "")
+                      }
+                      title={t.label}
+                      onClick={() => (isImage ? onPickImage() : onSelectTool(t.id))}
+                    >
+                      {t.swatch && (
+                        <span
+                          className="tool-swatch"
+                          style={{
+                            background: t.swatch,
+                            opacity: t.swatchOpacity ?? (t.id === "highlight" ? 0.85 : 0.95),
+                          }}
+                        />
+                      )}
+                      <span className="tool-icon">{t.icon}</span>
+                      <span className="tool-label">{t.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function HighlightToolbar({ highlight, collideReady, onOp, onDismiss }) {
