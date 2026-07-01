@@ -783,18 +783,43 @@ function parseApiResponse(res, raw) {
   return data;
 }
 
-async function runExecutionOnServer({ op, opMap, operators, material, image, onProgress }) {
+function estimatePlanMs(plan) {
+  if (!plan?.phases?.length) return 90000;
+  return plan.phases.reduce((sum, p) => sum + (p.timeoutMs || 55000) + 5000, 8000);
+}
+
+function formatJobEta(ms) {
+  if (ms <= 0) return "finishing…";
+  const s = Math.ceil(ms / 1000);
+  if (s < 60) return `~${s}s remaining`;
+  return `~${Math.ceil(s / 60)}m remaining`;
+}
+
+async function fetchExecutionPlan(op, opMap, material) {
   const ids = collectSubtreeIds(op.id, opMap);
   const subset = {};
   for (const id of ids) subset[id] = opMap[id];
-
   const planRes = await fetch("/api/plan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ op, opMap: subset, material }),
   });
-  const planRaw = await planRes.text();
-  const { plan } = parseApiResponse(planRes, planRaw);
+  const { plan } = parseApiResponse(planRes, await planRes.text());
+  return { plan, opMap: subset };
+}
+
+async function runExecutionOnServer({ op, opMap, operators, material, image, onProgress, plan: planIn }) {
+  let plan = planIn;
+  let subset;
+  if (!plan) {
+    const fetched = await fetchExecutionPlan(op, opMap, material);
+    plan = fetched.plan;
+    subset = fetched.opMap;
+  } else {
+    const ids = collectSubtreeIds(op.id, opMap);
+    subset = {};
+    for (const id of ids) subset[id] = opMap[id];
+  }
 
   const context = { material, subject: material, research: "", resolveRaw: "" };
   const phases = plan.phases || [];
@@ -803,7 +828,7 @@ async function runExecutionOnServer({ op, opMap, operators, material, image, onP
   for (let i = 0; i < phases.length; i++) {
     const phase = phases[i];
     const timeoutMs = (phase.timeoutMs || 55000) + 8000;
-    onProgress?.(`${phase.label} (${i + 1}/${phases.length})`, (i + 0.15) / phases.length);
+    onProgress?.(`${phase.label} (${i + 1}/${phases.length})`);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -833,12 +858,11 @@ async function runExecutionOnServer({ op, opMap, operators, material, image, onP
       if (phase.id === "synthesize") {
         output = data.output || "";
       }
-      onProgress?.(`${phase.label} ✓`, (i + 1) / phases.length);
     } catch (err) {
       if (phase.id === "research") {
         context.research = "";
         context.researchFallback = true;
-        onProgress?.("research skipped — synthesizing", (i + 1) / phases.length);
+        onProgress?.("research skipped — synthesizing");
         continue;
       }
       if (err.name === "AbortError") {
@@ -1305,14 +1329,19 @@ export default function App() {
   async function executeOperatorJob(jobId, op, targetIds, atClient) {
     const idSet = new Set(targetIds);
     const itemList = itemsRef.current.filter((it) => idSet.has(it.id));
-    patchJob(jobId, { step: "reading material…", progress: 0.05 });
+    patchJob(jobId, { step: "reading material…" });
     const { text, image } = await gatherMaterialFromItems(itemList);
     if (!text?.trim() && !image) throw new Error("no readable content");
 
-    const researching = shouldEnableResearch(op, opMap, text);
-    patchJob(jobId, { step: researching ? "researching…" : `running · ${op.name}`, progress: 0.15 });
+    const { plan } = await fetchExecutionPlan(op, opMap, text);
+    const estimatedMs = estimatePlanMs(plan);
+    patchJob(jobId, {
+      step: `running · ${op.name}`,
+      startedAt: Date.now(),
+      estimatedMs,
+    });
 
-    const onProgress = (step, progress) => patchJob(jobId, { step, progress });
+    const onProgress = (step) => patchJob(jobId, { step });
 
     const out = await runExecutionOnServer({
       op,
@@ -1321,6 +1350,7 @@ export default function App() {
       material: text,
       image,
       onProgress,
+      plan,
     });
 
     // primitive: split → multiple objects
@@ -1344,7 +1374,7 @@ export default function App() {
     }
 
     if (!out?.trim()) throw new Error("empty output");
-    patchJob(jobId, { step: "spawning object…", progress: 0.95 });
+    patchJob(jobId, { step: "spawning object…", progress: 0.98 });
     const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
     applyTransformResult(out, targetIds, atWorld);
   }
@@ -1369,6 +1399,7 @@ export default function App() {
       step: "starting…",
       progress: 0,
       startedAt: Date.now(),
+      estimatedMs: 90000,
     });
     executeOperatorJob(jobId, op, ids, atClient)
       .then(() => finishJob(jobId, "done", `done · ${op.name}`))
@@ -1392,7 +1423,7 @@ export default function App() {
   }
 
   async function expandFunction(op) {
-    const jobId = pushJob({ id: uid(), label: `expand · ${op.name}`, type: "expand", status: "running", step: "expanding…", progress: 0.2, startedAt: Date.now() });
+    const jobId = pushJob({ id: uid(), label: `expand · ${op.name}`, type: "expand", status: "running", step: "expanding…", startedAt: Date.now(), estimatedMs: 60000 });
     try {
       const tree = await expandOperatorSubtree(op, opMap, operators);
       const { rootId, ops } = treeToOperators(tree, { role: op.role || null, top: !!op.top });
@@ -1590,7 +1621,7 @@ export default function App() {
     const labels = nodes.map((n) =>
       n.type === "text" ? n.text.trim() : "[image]"
     );
-    const jobId = pushJob({ label: "discover sameness", kind: "sameness", total: 1 });
+    const jobId = pushJob({ label: "discover sameness", kind: "sameness", status: "running", step: "starting…", startedAt: Date.now(), estimatedMs: 45000 });
     try {
       patchJob(jobId, { status: "running", step: "finding shared structure" });
       const out = await runClaude(samenessPrompt(labels), "", { system: boardSystem(operators, opMap), maxTokens: 2000 });
@@ -2449,28 +2480,79 @@ function startStructDrag(e, struct) {
   e.dataTransfer.effectAllowed = "copy";
 }
 
+function JobRow({ job, onDismiss }) {
+  const [displayProgress, setDisplayProgress] = useState(0);
+  const [etaMs, setEtaMs] = useState(null);
+
+  useEffect(() => {
+    if (job.status === "done") {
+      setDisplayProgress(1);
+      setEtaMs(0);
+      return;
+    }
+    if (job.status !== "running") return;
+
+    const start = job.startedAt || Date.now();
+    const total = job.estimatedMs || 90000;
+
+    const tick = () => {
+      const elapsed = Date.now() - start;
+      const timeRatio = Math.min(1, elapsed / total);
+      const target = Math.min(0.96, timeRatio * 0.96);
+      setDisplayProgress((prev) => {
+        const eased = prev + (target - prev) * 0.12;
+        return Math.max(prev, Math.min(0.96, eased));
+      });
+      setEtaMs(Math.max(0, total - elapsed));
+    };
+
+    tick();
+    const id = setInterval(tick, 80);
+    return () => clearInterval(id);
+  }, [job.id, job.status, job.startedAt, job.estimatedMs]);
+
+  useEffect(() => {
+    if (typeof job.progress === "number" && job.progress > displayProgress) {
+      setDisplayProgress(job.progress);
+    }
+  }, [job.progress, displayProgress]);
+
+  const pct = Math.round((job.status === "done" ? 1 : displayProgress) * 100);
+  const eta =
+    job.status === "running" && etaMs != null
+      ? formatJobEta(etaMs)
+      : job.status === "done"
+      ? "done"
+      : null;
+
+  return (
+    <div className={"job-row" + (job.status === "error" ? " error" : job.status === "done" ? " done" : "")}>
+      <div className="job-row-top">
+        <span className="job-label">{job.label}</span>
+        {job.status === "running" && eta && <span className="job-eta">{eta}</span>}
+        {job.status === "error" && (
+          <button className="job-dismiss" onClick={() => onDismiss(job.id)} title="dismiss">
+            ×
+          </button>
+        )}
+      </div>
+      {job.step && <div className="job-step">{job.step}</div>}
+      {job.status === "running" && (
+        <div className="job-bar">
+          <div className="job-bar-fill" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function JobPanel({ jobs, onDismiss }) {
   if (!jobs.length) return null;
   return (
     <div className="job-panel">
       <div className="job-panel-head">running</div>
       {jobs.map((job) => (
-        <div key={job.id} className={"job-row" + (job.status === "error" ? " error" : job.status === "done" ? " done" : "")}>
-          <div className="job-row-top">
-            <span className="job-label">{job.label}</span>
-            {job.status === "error" && (
-              <button className="job-dismiss" onClick={() => onDismiss(job.id)} title="dismiss">
-                ×
-              </button>
-            )}
-          </div>
-          {job.step && <div className="job-step">{job.step}</div>}
-          {job.status === "running" && (
-            <div className="job-bar">
-              <div className="job-bar-fill" style={{ width: `${Math.round((job.progress ?? 0.1) * 100)}%` }} />
-            </div>
-          )}
-        </div>
+        <JobRow key={job.id} job={job} onDismiss={onDismiss} />
       ))}
     </div>
   );

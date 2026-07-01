@@ -210,7 +210,13 @@ body {
   height: 100%;
   background: var(--ink);
   border-radius: 2px;
-  transition: width 0.25s ease;
+  transition: width 0.08s linear;
+}
+.job-eta {
+  font-size: 10px;
+  color: var(--faint);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .job-dismiss {
   border: none;
