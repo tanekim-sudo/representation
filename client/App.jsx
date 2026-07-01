@@ -146,39 +146,29 @@ function parseJSON(raw) {
   throw new Error("AI returned invalid JSON. Tap ↻ to rebuild, or try again.");
 }
 
-// The master system prompt — teaches Claude exactly what lens is and how to architect operators.
-const LENS_SYSTEM = `You are the function-architect for "lens", an infinite thinking whiteboard where a person drags AI FUNCTIONS onto sparse notes and gets professional deliverables back as NEW objects.
+// The master system prompt — teaches Claude how to architect lens functions.
+const LENS_SYSTEM = `You are the function-architect for "lens" — an infinite thinking whiteboard where users drag FUNCTIONS onto sparse notes and get professional deliverables.
 
-HOW EXECUTION WORKS — CRITICAL
-- At runtime, EVERY function (no matter how many sub-steps) is COMPILED into ONE prompt and runs in a SINGLE Claude call (~30 seconds max).
-- Sub-steps are an organizational/UI structure only. Write leaf prompts knowing they will be merged into one execution prompt.
-- The compiler meta-prompt tells Claude: follow all steps internally, output ONLY the final deliverable.
-- Mark at most ONE step with "research": true for web search (1–2 quick queries). Do not chain multiple API calls.
+LENS EXECUTION ARCHITECTURE (design functions for this)
+Functions can have infinite nested sub-steps in the UI, but at runtime a PLAN COMPILER flattens them into 1–3 PHASES:
 
-WHAT LENS IS
-- User writes minimal fragments: "bobyard ai startup", a poem, a sketch.
-- User DRAGS a function ONTO that fragment → one fast call → new object with a real deliverable.
+PHASE 1 — RESOLVE (~15s): Identify the subject entity from sparse input. Output: ENTITY, SEARCH_TERMS.
+PHASE 2 — RESEARCH (~45s, if needed): Dedicated web_search pass using SEARCH_TERMS. Mark ONE leaf with "research": true.
+PHASE 3 — SYNTHESIZE (~90s): ALL remaining steps compiled into one prompt. Uses research findings. Outputs final deliverable.
 
-HOW FUNCTIONS MUST WORK
-- Sparse input = the SUBJECT. Produce full professional output ABOUT it.
-- Example: "bobyard ai startup" + thesis → complete investment thesis about Bobyard — never meta-commentary about missing data.
-- NEVER design functions that refuse, lament gaps, or discuss the evaluation process.
+Design implications:
+- Sub-steps are organizational — write leaf prompts as instructions that will be MERGED into the synthesize phase.
+- Only ONE "research" leaf per function — it powers the research phase.
+- parse step: extract entity name and search terms.
+- analyze/draft steps: specify exact output sections — they run in synthesize phase.
+- NEVER design functions that refuse, discuss missing data, or meta-comment on the process.
 
-RECOMMENDED PIPELINE SHAPE (compiled into one prompt at runtime)
-1. parse — identify the entity from input
-2. research — "research": true — one step only; prompt: quick web search for entity facts
-3. analyze — apply the function framework
-4. draft — final formatted deliverable with clear sections
+RECOMMENDED SHAPE: parse → research (research:true) → analyze → draft
 
-EXECUTION RULES
-- Composites: "steps" array, NO "prompt". Leaves: "prompt" string. Optional "research": true on ONE leaf max.
-- Return ONLY valid JSON. No markdown fences.
+JSON RULES: composites have "steps", leaves have "prompt". Optional "research": true on ONE leaf.
+ONE-word names. Return ONLY valid JSON.
 
-NAMING: ONE word at every level (thesis, parse, research, draft).
-
-LEAF PROMPTS: expert-grade, specify exact output format. For thesis: Thesis, Market, Product, Traction, Team, Risks, Upside, Recommendation.
-
-OUTPUT: valid JSON only.`;
+For thesis deliverables specify: Thesis, Market, Product, Traction, Team, Risks, Upside, Recommendation.`;
 
 // summarize the user's personal library so Claude can tailor every prompt
 function summarizeLibrary(operators, opMap, { compact = false } = {}) {
@@ -289,15 +279,15 @@ Return ONLY JSON: {"functions":[{"name":"...","description":"..."}]} — exactly
 async function decomposeFunction(role, fn, operators, opMap) {
   const prompt = `The user is a: ${role}.
 
-Decompose this function into a pipeline that will be COMPILED INTO ONE PROMPT at runtime (single ~30s Claude call).
+Decompose this function for lens's 3-phase runtime: resolve → research → synthesize.
 
 FUNCTION: ${fn.name}
 ${fn.description ? `Description: ${fn.description}` : ""}
 
-Shape: parse → research (research:true, ONE quick search step) → analyze → draft
-- Each leaf prompt must be concise — they merge into one execution prompt.
-- research step: "research": true, prompt asks for 1–2 web searches then continues.
-- draft step: specifies final output sections.
+Shape: parse → research (research:true, exactly ONE research leaf) → analyze → draft
+- parse: extract ENTITY and SEARCH_TERMS from sparse input like "bobyard ai startup"
+- research: "research": true — web search using SEARCH_TERMS; return structured facts
+- analyze + draft: specify sections for final deliverable — these compile into synthesize phase
 - For "thesis": output sections — Thesis Statement, Market, Product, Traction, Team, Risks, Upside, Recommendation.
 - ONE word names at every level.
 
@@ -793,45 +783,74 @@ function parseApiResponse(res, raw) {
   return data;
 }
 
-async function runPipelineOnServer({ op, opMap, operators, material, image, onProgress }) {
+async function runExecutionOnServer({ op, opMap, operators, material, image, onProgress }) {
   const ids = collectSubtreeIds(op.id, opMap);
   const subset = {};
   for (const id of ids) subset[id] = opMap[id];
 
-  const controller = new AbortController();
-  const timeoutMs = 32000;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  let elapsed = 0;
-  onProgress?.(`${op.name}…`, 0.2);
-  const progressTimer = setInterval(() => {
-    elapsed += 2;
-    onProgress?.(`${op.name} · ${elapsed}s`, Math.min(0.85, 0.2 + elapsed / 28));
-  }, 2000);
+  const planRes = await fetch("/api/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ op, opMap: subset, material }),
+  });
+  const planRaw = await planRes.text();
+  const { plan } = parseApiResponse(planRes, planRaw);
 
-  try {
-    const res = await fetch("/api/pipeline", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ op, opMap: subset, operators, material, image }),
-      signal: controller.signal,
-    });
-    const raw = await res.text();
-    const data = parseApiResponse(res, raw);
-    onProgress?.(`done · ${op.name}`, 0.95);
-    return data.output || "";
-  } catch (err) {
-    if (err.name === "AbortError") throw new Error("Timed out after 30s — try a simpler function or shorter input.");
-    throw err;
-  } finally {
-    clearTimeout(timer);
-    clearInterval(progressTimer);
+  const context = { material, subject: material, research: "", resolveRaw: "" };
+  const phases = plan.phases || [];
+  let output = "";
+
+  for (let i = 0; i < phases.length; i++) {
+    const phase = phases[i];
+    const timeoutMs = (phase.timeoutMs || 60000) + 4000;
+    onProgress?.(`${phase.label} (${i + 1}/${phases.length})`, (i + 0.15) / phases.length);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch("/api/phase", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          phaseId: phase.id,
+          plan,
+          op,
+          opMap: subset,
+          operators,
+          context,
+          image: phase.id === "synthesize" ? image : null,
+        }),
+        signal: controller.signal,
+      });
+      const data = parseApiResponse(res, await res.text());
+      if (phase.id === "resolve") {
+        context.subject = data.subject || data.output || context.subject;
+        context.resolveRaw = data.resolveRaw || data.output || "";
+      }
+      if (phase.id === "research") {
+        context.research = data.research || data.output || "";
+      }
+      if (phase.id === "synthesize") {
+        output = data.output || "";
+      }
+      onProgress?.(`${phase.label} ✓`, (i + 1) / phases.length);
+    } catch (err) {
+      if (err.name === "AbortError") {
+        throw new Error(`${phase.label} timed out — try again.`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
   }
+
+  return output;
 }
 
 async function runClaude(prompt, text, opts = {}) {
   const { image = null, system = null, maxTokens = null, research = false } = opts;
   const controller = new AbortController();
-  const timeoutMs = 32000;
+  const timeoutMs = 95000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch("/api/run", {
@@ -844,7 +863,7 @@ async function runClaude(prompt, text, opts = {}) {
     const data = parseApiResponse(res, raw);
     return (data.outputs || [])[0] || "";
   } catch (err) {
-    if (err.name === "AbortError") throw new Error("Timed out after 30s — try again.");
+    if (err.name === "AbortError") throw new Error("Request timed out — try again.");
     throw err;
   } finally {
     clearTimeout(timer);
@@ -1289,7 +1308,7 @@ export default function App() {
 
     const onProgress = (step, progress) => patchJob(jobId, { step, progress });
 
-    const out = await runPipelineOnServer({
+    const out = await runExecutionOnServer({
       op,
       opMap,
       operators,

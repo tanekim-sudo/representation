@@ -1,13 +1,12 @@
 import Anthropic from "@anthropic-ai/sdk";
 
 export const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-5-20250929";
-export const REQUEST_TIMEOUT_MS = 28000;
 
-const WEB_SEARCH_TOOL = {
+const WEB_SEARCH_TOOL = (maxUses) => ({
   type: "web_search_20250305",
   name: "web_search",
-  max_uses: 2,
-};
+  max_uses: maxUses,
+});
 
 let client = null;
 function getClient() {
@@ -31,6 +30,14 @@ function extractText(message) {
   return parts.join("\n").trim();
 }
 
+function countWebSearches(message) {
+  let n = 0;
+  for (const block of message.content || []) {
+    if (block.type === "server_tool_use" && block.name === "web_search") n++;
+  }
+  return n;
+}
+
 function imageBlock(image) {
   if (!image || typeof image !== "string") return null;
   const m = image.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]*)$/);
@@ -38,22 +45,12 @@ function imageBlock(image) {
   return { type: "image", source: { type: "base64", media_type: m[1], data: m[2] } };
 }
 
-function buildUserText(prompt, text, research) {
-  const content = text && String(text).trim().length > 0 ? String(text) : "";
-  const materialBlock = content
-    ? `SUBJECT (transform THIS):\n"""\n${content}\n"""`
-    : "SUBJECT: the attached image from the whiteboard.";
-
-  let header = prompt || "";
-  if (research) {
-    header += `\n\nUse web_search once or twice with the company/entity name, then immediately write the deliverable. Do not over-research.`;
-  }
-  return `${header}\n\n---\n${materialBlock}`;
-}
-
 function withTimeout(promise, ms) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(Object.assign(new Error("Timed out — try again."), { status: 504 })), ms);
+    const timer = setTimeout(
+      () => reject(Object.assign(new Error("Request timed out."), { status: 504 })),
+      ms
+    );
     promise.then(
       (v) => {
         clearTimeout(timer);
@@ -75,6 +72,8 @@ export async function runPrompt({
   system = null,
   maxTokens = null,
   research = false,
+  maxSearchUses = 5,
+  timeoutMs = 60000,
 }) {
   const anthropic = getClient();
   if (!anthropic) {
@@ -90,15 +89,12 @@ export async function runPrompt({
 
   const n = Math.min(Math.max(parseInt(count, 10) || 1, 1), MAX_RESPONSES);
   const img = imageBlock(image);
-  const userText = buildUserText(prompt, text, research);
   const blocks = [];
   if (img) blocks.push(img);
-  blocks.push({ type: "text", text: userText });
+  blocks.push({ type: "text", text: `${prompt}\n\n---\n${text || ""}` });
 
   const max_tokens = Math.min(Math.max(parseInt(maxTokens, 10) || 4096, 256), 8192);
-  const sys =
-    (system && typeof system === "string" ? system : "Return only the deliverable.") +
-    (research ? " Use web_search sparingly (1–2 queries max) then answer." : "");
+  const sys = system && typeof system === "string" ? system : "Return only the requested output.";
 
   const makeOne = async () => {
     const params = {
@@ -106,10 +102,27 @@ export async function runPrompt({
       max_tokens,
       system: sys,
       messages: [{ role: "user", content: blocks }],
-      temperature: research ? 0.3 : 0.6,
+      temperature: research ? 0.25 : 0.5,
     };
-    if (research) params.tools = [WEB_SEARCH_TOOL];
-    const message = await withTimeout(anthropic.messages.create(params), REQUEST_TIMEOUT_MS);
+    if (research) params.tools = [WEB_SEARCH_TOOL(maxSearchUses)];
+
+    let message = await withTimeout(anthropic.messages.create(params), timeoutMs);
+
+    if (research && countWebSearches(message) === 0) {
+      params.messages = [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `Use web_search now on the entity in the material, then answer:\n\n${prompt}\n\n---\n${text || ""}`,
+            },
+          ],
+        },
+      ];
+      message = await withTimeout(anthropic.messages.create(params), timeoutMs);
+    }
+
     return extractText(message);
   };
 

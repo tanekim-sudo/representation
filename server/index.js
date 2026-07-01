@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import { runPrompt, hasKey, MODEL } from "./claude.js";
 import { runPipeline } from "./pipeline.js";
+import { compileExecutionPlan } from "./plan.js";
+import { runPhase } from "./executor.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 8787;
@@ -34,6 +36,30 @@ app.post("/api/run", async (req, res) => {
     res.status(err?.status || 500).json({
       error: err?.error?.error?.message || err?.message || "Something went wrong calling Claude.",
     });
+  }
+});
+
+app.post("/api/plan", async (req, res) => {
+  try {
+    const { op, opMap, material } = req.body ?? {};
+    if (!op) return res.status(400).json({ error: "op is required" });
+    res.json({ plan: compileExecutionPlan(op, opMap || {}, material || "") });
+  } catch (err) {
+    console.error("[lens] /api/plan failed:", err?.message || err);
+    res.status(500).json({ error: err?.message || "Failed to compile plan." });
+  }
+});
+
+app.post("/api/phase", async (req, res) => {
+  try {
+    const { phaseId, plan, op, opMap, operators, context, image } = req.body ?? {};
+    if (!phaseId) return res.status(400).json({ error: "phaseId is required" });
+    const executionPlan = plan || compileExecutionPlan(op, opMap || {}, context?.material || "");
+    const result = await runPhase(phaseId, executionPlan, context || {}, { operators, op, image });
+    res.json({ phaseId, ...result });
+  } catch (err) {
+    console.error("[lens] /api/phase failed:", err?.message || err);
+    res.status(err?.status || 500).json({ error: err?.message || "Phase failed." });
   }
 });
 
