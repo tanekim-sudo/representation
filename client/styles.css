@@ -80,8 +80,9 @@ body {
   position: relative;
   min-width: 0;
   height: 100%;
+  overflow: hidden;
 }
-.board-main.drop-ready .viewport {
+.board-main.drop-ready .canvas-input-layer {
   box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--ink) 18%, transparent);
 }
 
@@ -458,6 +459,7 @@ body {
   border-radius: 3px;
   opacity: 0.5;
   pointer-events: none;
+  z-index: 24;
 }
 .xform-frame {
   z-index: 5;
@@ -472,7 +474,7 @@ body {
   pointer-events: none;
 }
 .xform-handle {
-  position: absolute;
+  position: fixed;
   width: 10px;
   height: 10px;
   background: var(--card);
@@ -480,7 +482,7 @@ body {
   border-radius: 2px;
   pointer-events: auto;
   cursor: nwse-resize;
-  z-index: 6;
+  z-index: 25;
 }
 .xform-handle.rotate {
   border-radius: 50%;
@@ -495,8 +497,20 @@ body {
 .viewport {
   position: absolute;
   inset: 0;
+  z-index: 0;
+  overflow: hidden;
+}
+
+.canvas-input-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
   touch-action: none;
   user-select: none;
+  background: transparent;
+}
+.board-main.editing-text .canvas-input-layer {
+  pointer-events: none;
 }
 .cur-select {
   cursor: default;
@@ -536,6 +550,7 @@ body {
   pointer-events: auto;
   user-select: text;
   -webkit-user-select: text;
+  z-index: 10;
 }
 
 .ink-layer {

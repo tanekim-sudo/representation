@@ -2026,13 +2026,12 @@ export default function App() {
   // ---- pointer gestures on the board ----
   function onPointerDown(e) {
     if (e.button !== 0) return;
-    if (e.target.closest?.(".xform-handle, .xform-screen-layer, .board-rail, .input-deck, .canvas-hud, .zoom, .palette, .op-drag-grip, .struct-card, .highlight-toolbar")) return;
     const cx = e.clientX;
     const cy = e.clientY;
     const panning = toolRef.current === "hand";
     const t = toolRef.current;
 
-    if (!e.target.closest?.(".board-text.editing")) finishEditing();
+    finishEditing();
 
     const w = clientToWorld(cx, cy);
     const lp = vpLocal(cx, cy);
@@ -2143,7 +2142,6 @@ export default function App() {
 
   // double-click: edit an existing text, or write a new one
   function onDoubleClick(e) {
-    if (e.target.closest?.(".board-rail, .input-deck, .canvas-hud, .zoom, .palette")) return;
     finishEditing();
     const hit = itemAtPoint(e.clientX, e.clientY);
     if (hit) {
@@ -2501,50 +2499,17 @@ export default function App() {
         )}
       </aside>
 
-      <div className={"board-main" + (dropReady ? " drop-ready" : "")}>
+      <div className={"board-main" + (dropReady ? " drop-ready" : "") + (editing ? " editing-text" : "")}>
       <div
         ref={viewportRef}
-        className={"viewport " + cursorClass}
-        onPointerDown={onPointerDown}
-        onDoubleClick={onDoubleClick}
-        onDragOver={(e) => {
-          if (
-            e.dataTransfer.types.includes(OP_MIME) ||
-            e.dataTransfer.types.includes(STRUCT_MIME) ||
-            e.dataTransfer.types.includes("Files")
-          ) {
-            e.preventDefault();
-            setDropReady(true);
-            if (e.dataTransfer.types.includes(OP_MIME)) {
-              e.dataTransfer.dropEffect = "copy";
-              const hit = itemAtPoint(e.clientX, e.clientY);
-              setDropTargetId(hit?.id || null);
-            }
-          }
-        }}
-        onDragLeave={() => {
-          setDropReady(false);
-          setDropTargetId(null);
-        }}
-        onDrop={(e) => {
-          setDropReady(false);
-          setDropTargetId(null);
-          e.preventDefault();
-          const opId = e.dataTransfer.getData(OP_MIME);
-          if (opId) {
-            applyOpDrop(opId, { x: e.clientX, y: e.clientY });
-            return;
-          }
-          const structId = e.dataTransfer.getData(STRUCT_MIME);
-          if (structId) {
-            applyStructureDrop(structId, { x: e.clientX, y: e.clientY });
-            return;
-          }
-          if (e.dataTransfer.files?.length) {
-            const w = clientToWorld(e.clientX, e.clientY);
-            addImage(e.dataTransfer.files[0], w);
-          }
-        }}
+        className="viewport"
+        onPointerDown={
+          editing
+            ? (e) => {
+                if (!e.target.closest?.(".board-text.editing")) finishEditing();
+              }
+            : undefined
+        }
       >
         <div
           className="world"
@@ -2635,6 +2600,51 @@ export default function App() {
         )}
       </div>
 
+      {/* dedicated input surface — all canvas tools attach here */}
+      <div
+        className={"canvas-input-layer " + cursorClass}
+        onPointerDown={onPointerDown}
+        onDoubleClick={onDoubleClick}
+        onDragOver={(e) => {
+          if (
+            e.dataTransfer.types.includes(OP_MIME) ||
+            e.dataTransfer.types.includes(STRUCT_MIME) ||
+            e.dataTransfer.types.includes("Files")
+          ) {
+            e.preventDefault();
+            setDropReady(true);
+            if (e.dataTransfer.types.includes(OP_MIME)) {
+              e.dataTransfer.dropEffect = "copy";
+              const hit = itemAtPoint(e.clientX, e.clientY);
+              setDropTargetId(hit?.id || null);
+            }
+          }
+        }}
+        onDragLeave={() => {
+          setDropReady(false);
+          setDropTargetId(null);
+        }}
+        onDrop={(e) => {
+          setDropReady(false);
+          setDropTargetId(null);
+          e.preventDefault();
+          const opId = e.dataTransfer.getData(OP_MIME);
+          if (opId) {
+            applyOpDrop(opId, { x: e.clientX, y: e.clientY });
+            return;
+          }
+          const structId = e.dataTransfer.getData(STRUCT_MIME);
+          if (structId) {
+            applyStructureDrop(structId, { x: e.clientX, y: e.clientY });
+            return;
+          }
+          if (e.dataTransfer.files?.length) {
+            const w = clientToWorld(e.clientX, e.clientY);
+            addImage(e.dataTransfer.files[0], w);
+          }
+        }}
+      />
+
       {/* screen-space transform handles (outside zoomed world) */}
       {canTransform && !editing && (
         <ScreenTransformHandles
@@ -2705,7 +2715,7 @@ export default function App() {
       <InputDeck tool={tool} onSelectTool={setTool} onPickImage={pickImage} />
 
       {/* zoom controls */}
-      <div className="zoom">
+      <div className="zoom" onPointerDown={(e) => e.stopPropagation()}>
         <button onClick={() => setCamera((c) => zoomCamera(c, 1 / 1.2))}>−</button>
         <button className="zoom-pct" onClick={() => setCamera((c) => ({ ...c, scale: 1 }))}>
           {Math.round(camera.scale * 100)}%
@@ -2804,7 +2814,7 @@ function ScreenTransformHandles({ bbox, onRotateStart, onResizeStart, onScaleSta
     ["sw", bbox.left, bbox.bottom],
   ];
   return (
-    <div className="xform-screen-layer">
+    <>
       <div
         className="xform-outline-screen"
         style={{ left: bbox.left, top: bbox.top, width: w, height: h }}
@@ -2829,7 +2839,7 @@ function ScreenTransformHandles({ bbox, onRotateStart, onResizeStart, onScaleSta
         onPointerDown={onScaleStart}
         title="scale"
       />
-    </div>
+    </>
   );
 }
 
