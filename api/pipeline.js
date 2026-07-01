@@ -26,8 +26,8 @@ export default async function handler(req, res) {
     console.error("[lens] /api/pipeline failed:", err?.message || err);
     const status = err?.status || 500;
     const message = err?.message || "Pipeline failed.";
-    if (message.includes("timeout") || message.includes("timed out")) {
-      res.status(504).json({ error: "Research took too long. Try again — the pipeline runs as one request now." });
+    if (message.includes("timeout") || message.includes("Timed out")) {
+      res.status(504).json({ error: "Timed out after 30s. Try again." });
       return;
     }
     res.status(status).json({

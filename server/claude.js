@@ -1,12 +1,12 @@
 import Anthropic from "@anthropic-ai/sdk";
 
 export const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-5-20250929";
+export const REQUEST_TIMEOUT_MS = 28000;
 
-// Prefer newer web search with higher search budget; falls back in tool config
 const WEB_SEARCH_TOOL = {
-  type: "web_search_20260209",
+  type: "web_search_20250305",
   name: "web_search",
-  max_uses: 10,
+  max_uses: 2,
 };
 
 let client = null;
@@ -26,19 +26,9 @@ export const MAX_RESPONSES = 6;
 function extractText(message) {
   const parts = [];
   for (const block of message.content || []) {
-    if (block.type === "text" && block.text) {
-      parts.push(block.text);
-    }
+    if (block.type === "text" && block.text) parts.push(block.text);
   }
   return parts.join("\n").trim();
-}
-
-function countWebSearches(message) {
-  let n = 0;
-  for (const block of message.content || []) {
-    if (block.type === "server_tool_use" && block.name === "web_search") n++;
-  }
-  return n;
 }
 
 function imageBlock(image) {
@@ -48,23 +38,35 @@ function imageBlock(image) {
   return { type: "image", source: { type: "base64", media_type: m[1], data: m[2] } };
 }
 
-function buildUserText(prompt, text, { research = false, forceSearch = false } = {}) {
+function buildUserText(prompt, text, research) {
   const content = text && String(text).trim().length > 0 ? String(text) : "";
   const materialBlock = content
-    ? `MATERIAL TO TRANSFORM (transform THIS specific subject — produce a substantive deliverable, never meta-commentary about missing data):\n"""\n${content}\n"""`
-    : "MATERIAL TO TRANSFORM: the attached image/sketch from the user's whiteboard.";
+    ? `SUBJECT (transform THIS):\n"""\n${content}\n"""`
+    : "SUBJECT: the attached image from the whiteboard.";
 
   let header = prompt || "";
-  if (research || forceSearch) {
-    header = `${header}
-
-WEB SEARCH REQUIRED: Use the web_search tool before writing. Search for the exact company, product, or entity named in the material. Run multiple searches if needed. Do not answer from memory alone — verify with current web sources.`;
+  if (research) {
+    header += `\n\nUse web_search once or twice with the company/entity name, then immediately write the deliverable. Do not over-research.`;
   }
-
   return `${header}\n\n---\n${materialBlock}`;
 }
 
-// Run a saved prompt against text and/or an image. Optional web search for research workflows.
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(Object.assign(new Error("Timed out — try again."), { status: 504 })), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      }
+    );
+  });
+}
+
 export async function runPrompt({
   prompt,
   text,
@@ -73,17 +75,13 @@ export async function runPrompt({
   system = null,
   maxTokens = null,
   research = false,
-  forceSearch = false,
 }) {
   const anthropic = getClient();
   if (!anthropic) {
-    const err = new Error(
-      "Server is missing ANTHROPIC_API_KEY. Set it in your environment (or Vercel project settings)."
-    );
+    const err = new Error("Server is missing ANTHROPIC_API_KEY.");
     err.status = 500;
     throw err;
   }
-
   if (!prompt || typeof prompt !== "string") {
     const err = new Error("A 'prompt' string is required.");
     err.status = 400;
@@ -92,65 +90,31 @@ export async function runPrompt({
 
   const n = Math.min(Math.max(parseInt(count, 10) || 1, 1), MAX_RESPONSES);
   const img = imageBlock(image);
-  const userText = buildUserText(prompt, text, { research, forceSearch });
+  const userText = buildUserText(prompt, text, research);
   const blocks = [];
   if (img) blocks.push(img);
   blocks.push({ type: "text", text: userText });
 
-  const max_tokens = Math.min(Math.max(parseInt(maxTokens, 10) || (research ? 8192 : 4096), 256), 8192);
-  let sys = system && typeof system === "string" ? system : undefined;
-  if ((research || forceSearch) && sys) {
-    sys += `\n\nYou have the web_search tool. You MUST use it when researching companies, startups, products, or people. Search before claiming you lack information.`;
-  } else if (research || forceSearch) {
-    sys = `You have the web_search tool. You MUST use it to find current facts. Search before answering.`;
-  }
-
-  const useSearch = research || forceSearch;
+  const max_tokens = Math.min(Math.max(parseInt(maxTokens, 10) || 4096, 256), 8192);
+  const sys =
+    (system && typeof system === "string" ? system : "Return only the deliverable.") +
+    (research ? " Use web_search sparingly (1–2 queries max) then answer." : "");
 
   const makeOne = async () => {
     const params = {
       model: MODEL,
       max_tokens,
-      ...(sys ? { system: sys } : {}),
+      system: sys,
       messages: [{ role: "user", content: blocks }],
-      temperature: n > 1 ? 1 : useSearch ? 0.3 : 0.7,
+      temperature: research ? 0.3 : 0.6,
     };
-    if (useSearch) {
-      params.tools = [WEB_SEARCH_TOOL];
-    }
-    const message = await anthropic.messages.create(params);
-    const searches = countWebSearches(message);
-    if (useSearch && searches === 0) {
-      console.warn("[lens] web search enabled but Claude made 0 searches — retrying with force prompt");
-      const retryParams = {
-        ...params,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: `You did not search the web. STOP. Use web_search NOW to look up: "${(text || prompt).slice(0, 200)}"\n\nThen complete the task:\n\n${userText}`,
-              },
-            ],
-          },
-        ],
-      };
-      const retry = await anthropic.messages.create(retryParams);
-      const retrySearches = countWebSearches(retry);
-      console.log(`[lens] research retry: ${retrySearches} web searches`);
-      return extractText(retry);
-    }
-    if (useSearch) {
-      console.log(`[lens] web search: ${searches} searches performed`);
-    }
+    if (research) params.tools = [WEB_SEARCH_TOOL];
+    const message = await withTimeout(anthropic.messages.create(params), REQUEST_TIMEOUT_MS);
     return extractText(message);
   };
 
   const settled = await Promise.allSettled(Array.from({ length: n }, makeOne));
-  const outputs = settled
-    .filter((s) => s.status === "fulfilled" && s.value)
-    .map((s) => s.value);
+  const outputs = settled.filter((s) => s.status === "fulfilled" && s.value).map((s) => s.value);
 
   if (outputs.length === 0) {
     const reason = settled.find((s) => s.status === "rejected")?.reason;
@@ -159,5 +123,5 @@ export async function runPrompt({
     throw err;
   }
 
-  return { outputs, model: MODEL, research: !!useSearch };
+  return { outputs, model: MODEL, research: !!research };
 }

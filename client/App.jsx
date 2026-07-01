@@ -34,7 +34,7 @@ const DEFAULT_OPERATORS = [
 ];
 
 const RESEARCH_STEP_PROMPT =
-  'Use web_search to research the subject. Search: "[entity name] startup", "[entity name] funding Series A", "[entity name] product construction AI". Return: ENTITY, WEBSITE, PRODUCT, FUNDING, TEAM, TRACTION, SOURCES with URLs. Never skip searching.';
+  "Quick web search: find the entity name, product, funding, and team. Use 1–2 searches max. Then continue to analyze and draft the final deliverable in the same response.";
 
 function migrateOperators(ops) {
   if (!Array.isArray(ops)) return ops;
@@ -147,50 +147,38 @@ function parseJSON(raw) {
 }
 
 // The master system prompt — teaches Claude exactly what lens is and how to architect operators.
-const LENS_SYSTEM = `You are the function-architect for "lens", an infinite thinking whiteboard where a person drags AI FUNCTIONS onto sparse notes (a company name, a phrase, a sketch) and gets professional deliverables back as NEW objects on the canvas.
+const LENS_SYSTEM = `You are the function-architect for "lens", an infinite thinking whiteboard where a person drags AI FUNCTIONS onto sparse notes and gets professional deliverables back as NEW objects.
+
+HOW EXECUTION WORKS — CRITICAL
+- At runtime, EVERY function (no matter how many sub-steps) is COMPILED into ONE prompt and runs in a SINGLE Claude call (~30 seconds max).
+- Sub-steps are an organizational/UI structure only. Write leaf prompts knowing they will be merged into one execution prompt.
+- The compiler meta-prompt tells Claude: follow all steps internally, output ONLY the final deliverable.
+- Mark at most ONE step with "research": true for web search (1–2 quick queries). Do not chain multiple API calls.
 
 WHAT LENS IS
-- User writes minimal fragments on a canvas: "efference ai startup", a poem, a sketch, a thesis bullet.
-- User DRAGS a function from the left rail ONTO that fragment.
-- The function runs as a PIPELINE and spawns a NEW object with a real deliverable — never meta-commentary.
-- Functions can use WEB SEARCH (research:true) to look up real-world facts about subjects named in the input.
+- User writes minimal fragments: "bobyard ai startup", a poem, a sketch.
+- User DRAGS a function ONTO that fragment → one fast call → new object with a real deliverable.
 
-HOW FUNCTIONS MUST WORK — USABILITY IS EVERYTHING
-- Input is often ONE LINE or a few words. Functions must treat that as the SUBJECT and produce full professional output about IT.
-- Example: input "efference ai startup" + function "thesis" → a complete investment thesis ABOUT Efference AI (market, product, team, traction, risks, upside, recommendation) — NOT an essay about insufficient documentation.
-- NEVER design functions that critique the evaluation process, lament missing data, or discuss information gaps. Always DELIVER substantive work product.
-- For investor functions: thesis, memo, comps, flags, diligence — always RESEARCH the named entity via web search when input is sparse.
+HOW FUNCTIONS MUST WORK
+- Sparse input = the SUBJECT. Produce full professional output ABOUT it.
+- Example: "bobyard ai startup" + thesis → complete investment thesis about Bobyard — never meta-commentary about missing data.
+- NEVER design functions that refuse, lament gaps, or discuss the evaluation process.
 
-PIPELINE ARCHITECTURE — RESEARCH WORKFLOWS
-Every high-value function for sparse input follows this pattern:
-1. parse — extract the subject (company name, claim, entity) from input. Output: structured subject line only.
-2. research (research:true) — web search for current facts about that subject. Output: key facts with sources.
-3. analyze — apply the function's framework using research + original input.
-4. draft — produce the final formatted deliverable.
-
-Mark any leaf that needs web search with "research": true in JSON.
-Research leaf prompts MUST say: "Use web search to find current, factual information about the subject identified in the input. Then return only the research findings."
+RECOMMENDED PIPELINE SHAPE (compiled into one prompt at runtime)
+1. parse — identify the entity from input
+2. research — "research": true — one step only; prompt: quick web search for entity facts
+3. analyze — apply the function framework
+4. draft — final formatted deliverable with clear sections
 
 EXECUTION RULES
-- Composite nodes: "steps" array, NO "prompt".
-- Leaf nodes: "prompt" string, NO "steps". Optional "research": true.
-- Pipeline order: output of step N → input of step N+1. Original subject must stay visible in every step's prompt instructions.
+- Composites: "steps" array, NO "prompt". Leaves: "prompt" string. Optional "research": true on ONE leaf max.
 - Return ONLY valid JSON. No markdown fences.
 
-NAMING
-- Top-level: ONE word (thesis, memo, comps, flags, signal).
-- Sub-steps: ONE word (parse, research, analyze, draft, stress, map).
+NAMING: ONE word at every level (thesis, parse, research, draft).
 
-LEAF PROMPTS — HIGHEST POTENTIAL
-- Each leaf does ONE thing with expert-grade instructions.
-- State exactly what to return. No preamble in output.
-- Never refuse. Never say insufficient data. Research what's missing.
-- For investor deliverables specify sections: e.g. thesis needs Thesis Statement, Market, Product, Traction, Team, Risks, Upside, Recommendation.
+LEAF PROMPTS: expert-grade, specify exact output format. For thesis: Thesis, Market, Product, Traction, Team, Risks, Upside, Recommendation.
 
-YOUR STANDARDS
-- REAL deliverables a professional in this role would actually use in their job.
-- Web search for anything involving a named company, person, product, or current events.
-- OUTPUT: valid JSON only.`;
+OUTPUT: valid JSON only.`;
 
 // summarize the user's personal library so Claude can tailor every prompt
 function summarizeLibrary(operators, opMap, { compact = false } = {}) {
@@ -301,24 +289,15 @@ Return ONLY JSON: {"functions":[{"name":"...","description":"..."}]} — exactly
 async function decomposeFunction(role, fn, operators, opMap) {
   const prompt = `The user is a: ${role}.
 
-Decompose this function into a RESEARCH-AWARE pipeline that works on SPARSE input (often just a company name or one-line note).
+Decompose this function into a pipeline that will be COMPILED INTO ONE PROMPT at runtime (single ~30s Claude call).
 
 FUNCTION: ${fn.name}
 ${fn.description ? `Description: ${fn.description}` : ""}
 
-REQUIRED PIPELINE PATTERN for ${role}:
-1. parse — extract subject/entities from input (one short output). Example: "bobyard ai startup" → ENTITY: Bobyard
-2. research — MUST have "research": true — prompt MUST instruct web_search for funding, product, team, traction
-3. analyze — apply ${fn.name} framework using research findings
-4. draft — final professional deliverable with clear sections
-
-Research step prompt example:
-"Use web_search to research the entity. Search company name + funding + product. Return ENTITY, WEBSITE, PRODUCT, FUNDING, TEAM, TRACTION, SOURCES."
-
-Requirements:
-- 3–5 top-level steps minimum following parse → research → analyze → draft pattern where applicable.
-- Every research step MUST have "research": true.
-- draft/analyze steps must say: use VERIFIED WEB RESEARCH and prior step outputs — never claim insufficient data.
+Shape: parse → research (research:true, ONE quick search step) → analyze → draft
+- Each leaf prompt must be concise — they merge into one execution prompt.
+- research step: "research": true, prompt asks for 1–2 web searches then continues.
+- draft step: specifies final output sections.
 - For "thesis": output sections — Thesis Statement, Market, Product, Traction, Team, Risks, Upside, Recommendation.
 - ONE word names at every level.
 
@@ -820,13 +799,14 @@ async function runPipelineOnServer({ op, opMap, operators, material, image, onPr
   for (const id of ids) subset[id] = opMap[id];
 
   const controller = new AbortController();
-  const timeoutMs = 300000;
+  const timeoutMs = 32000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let elapsed = 0;
+  onProgress?.(`${op.name}…`, 0.2);
   const progressTimer = setInterval(() => {
-    elapsed += 5;
-    onProgress?.(`web research · ${op.name} · ${elapsed}s`, Math.min(0.88, 0.18 + (elapsed / 240) * 0.7));
-  }, 5000);
+    elapsed += 2;
+    onProgress?.(`${op.name} · ${elapsed}s`, Math.min(0.85, 0.2 + elapsed / 28));
+  }, 2000);
 
   try {
     const res = await fetch("/api/pipeline", {
@@ -837,13 +817,10 @@ async function runPipelineOnServer({ op, opMap, operators, material, image, onPr
     });
     const raw = await res.text();
     const data = parseApiResponse(res, raw);
-    if (data.steps?.length) {
-      const last = data.steps[data.steps.length - 1];
-      onProgress?.(last.name || op.name, 0.92);
-    }
+    onProgress?.(`done · ${op.name}`, 0.95);
     return data.output || "";
   } catch (err) {
-    if (err.name === "AbortError") throw new Error("Research timed out after 5 minutes. Try again.");
+    if (err.name === "AbortError") throw new Error("Timed out after 30s — try a simpler function or shorter input.");
     throw err;
   } finally {
     clearTimeout(timer);
@@ -854,7 +831,7 @@ async function runPipelineOnServer({ op, opMap, operators, material, image, onPr
 async function runClaude(prompt, text, opts = {}) {
   const { image = null, system = null, maxTokens = null, research = false } = opts;
   const controller = new AbortController();
-  const timeoutMs = research ? 300000 : 120000;
+  const timeoutMs = 32000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch("/api/run", {
@@ -867,7 +844,7 @@ async function runClaude(prompt, text, opts = {}) {
     const data = parseApiResponse(res, raw);
     return (data.outputs || [])[0] || "";
   } catch (err) {
-    if (err.name === "AbortError") throw new Error(research ? "Research timed out — try again." : "Request timed out — try again.");
+    if (err.name === "AbortError") throw new Error("Timed out after 30s — try again.");
     throw err;
   } finally {
     clearTimeout(timer);
