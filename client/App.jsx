@@ -26,7 +26,7 @@ const INK = "#20201d";
 const PEN_W = 2.4; // world units
 const MARKER_W = 16;
 const HIGHLIGHT_INK = "#F2D04E";
-const HIGHLIGHT_W = 26;
+const HIGHLIGHT_W = 14;
 
 const TOOL_GROUPS = [
   { id: "think", label: "think" },
@@ -42,7 +42,7 @@ const CANVAS_TOOLS = {
     group: "think",
     label: "Highlighter",
     icon: "▬",
-    hint: "Draw over text to transform · scribble to erase · circle to delete everything inside",
+    hint: "Draw over text to transform · scribble to erase · circle to select inside",
     swatch: HIGHLIGHT_INK,
   },
   select: {
@@ -1578,8 +1578,8 @@ export default function App() {
             if (isClosedHighlightLoop(pts)) {
               const inside = itemsInsideHighlightLoop(pts, itemsRef.current);
               if (inside.length) {
-                setItems((arr) => arr.filter((it) => !inside.includes(it.id)));
-                showToastRef.current(`cleared ${inside.length} item${inside.length > 1 ? "s" : ""}`);
+                setSelection(inside);
+                showToastRef.current(`selected ${inside.length} item${inside.length > 1 ? "s" : ""}`);
               } else {
                 showToastRef.current("nothing inside the circle");
               }
@@ -1612,7 +1612,7 @@ export default function App() {
                   } else {
                     setItems((arr) => arr.filter((it) => it.id !== strokeId));
                     if (!g.deletedIds?.size) {
-                      showToastRef.current("scribble to erase · circle to delete · draw over text to think");
+                      showToastRef.current("scribble to erase · circle to select · draw over text to think");
                     }
                   }
                 });
@@ -2842,10 +2842,10 @@ export default function App() {
                         (draft.loop ? " hl-loop" : "")
                       }
                       points={draft.points.map((p) => `${p.x},${p.y}`).join(" ")}
-                      fill={draft.loop ? "rgba(224, 82, 82, 0.08)" : "none"}
-                      stroke={draft.loop ? "#c94444" : draft.highlight ? HIGHLIGHT_INK : INK}
+                      fill={draft.loop ? "rgba(32, 32, 29, 0.05)" : "none"}
+                      stroke={draft.loop ? "var(--ink)" : draft.highlight ? HIGHLIGHT_INK : INK}
                       strokeWidth={draft.highlight ? HIGHLIGHT_W : draft.marker ? MARKER_W : PEN_W}
-                      strokeOpacity={draft.loop ? 0.55 : draft.highlight ? 0.72 : draft.marker ? 0.32 : 0.95}
+                      strokeOpacity={draft.loop ? 0.4 : draft.highlight ? 0.72 : draft.marker ? 0.32 : 0.95}
                       strokeLinecap="round"
                       strokeLinejoin="round"
                     />
@@ -2856,9 +2856,9 @@ export default function App() {
                         y1={draft.points[draft.points.length - 1].y}
                         x2={draft.points[0].x}
                         y2={draft.points[0].y}
-                        stroke="#c94444"
-                        strokeWidth={2}
-                        strokeOpacity={0.45}
+                        stroke="var(--ink)"
+                        strokeWidth={1.5}
+                        strokeOpacity={0.35}
                         strokeDasharray="6 4"
                       />
                     )}
@@ -3217,7 +3217,7 @@ function CanvasHud({ tool, selectionCount, imageArmed }) {
   } else if (selectionCount > 0 && tool === "select") {
     hint = `${selectionCount} selected · drag to move · drop on another idea to merge`;
   } else if (tool === "highlight") {
-    hint = "Text → primitives · scribble erases · closed circle deletes inside · ⌫ at cursor";
+    hint = "Text → primitives · scribble erases · closed circle selects inside · ⌫ at cursor";
   }
 
   return (
