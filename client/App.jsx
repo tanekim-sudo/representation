@@ -31,6 +31,85 @@ const MARKER_W = 16;
 const HIGHLIGHT_INK = "#F2D04E";
 const HIGHLIGHT_W = 14;
 
+/** Six hex directions for branching — angles from +x axis, counter-clockwise from east; we use standard math angles. */
+const EXPAND_DIRS = [
+  { id: "n", label: "↑", angle: -Math.PI / 2 },
+  { id: "ne", label: "↗", angle: -Math.PI / 6 },
+  { id: "se", label: "↘", angle: Math.PI / 6 },
+  { id: "s", label: "↓", angle: Math.PI / 2 },
+  { id: "sw", label: "↙", angle: 5 * Math.PI / 6 },
+  { id: "nw", label: "↖", angle: -5 * Math.PI / 6 },
+];
+const BRANCH_DIST = 240;
+
+function isNoteItem(it) {
+  return it && (it.type === "text" || it.type === "image");
+}
+
+function noteCenter(it) {
+  if (!isNoteItem(it)) return null;
+  const bb = itemWorldBBox(it);
+  if (!bb) return { x: it.x || 0, y: it.y || 0 };
+  return { x: (bb.minx + bb.maxx) / 2, y: (bb.miny + bb.maxy) / 2 };
+}
+
+function branchAnchor(it, dirId) {
+  const c = noteCenter(it);
+  if (!c) return { x: 0, y: 0 };
+  const bb = itemWorldBBox(it);
+  const dir = EXPAND_DIRS.find((d) => d.id === dirId) || EXPAND_DIRS[0];
+  const hw = bb ? (bb.maxx - bb.minx) / 2 : 40;
+  const hh = bb ? (bb.maxy - bb.miny) / 2 : 24;
+  const pad = 8;
+  return {
+    x: c.x + Math.cos(dir.angle) * (hw + pad),
+    y: c.y + Math.sin(dir.angle) * (hh + pad),
+  };
+}
+
+function linkEndpoint(it, toward) {
+  const c = noteCenter(it);
+  if (!c || !toward) return c || { x: 0, y: 0 };
+  const bb = itemWorldBBox(it);
+  if (!bb) return c;
+  const dx = toward.x - c.x;
+  const dy = toward.y - c.y;
+  if (!dx && !dy) return c;
+  const angle = Math.atan2(dy, dx);
+  const hw = Math.max(20, (bb.maxx - bb.minx) / 2);
+  const hh = Math.max(16, (bb.maxy - bb.miny) / 2);
+  const denom = Math.sqrt((Math.cos(angle) / hw) ** 2 + (Math.sin(angle) / hh) ** 2) || 1;
+  const dist = 1 / denom + 2;
+  return { x: c.x + Math.cos(angle) * dist, y: c.y + Math.sin(angle) * dist };
+}
+
+function inferLinkDir(from, to) {
+  const a = noteCenter(from);
+  const b = noteCenter(to);
+  if (!a || !b) return EXPAND_DIRS[1].id;
+  const angle = Math.atan2(b.y - a.y, b.x - a.x);
+  let best = EXPAND_DIRS[0];
+  let bestDiff = Infinity;
+  for (const d of EXPAND_DIRS) {
+    const diff = Math.abs(Math.atan2(Math.sin(angle - d.angle), Math.cos(angle - d.angle)));
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = d;
+    }
+  }
+  return best.id;
+}
+
+function linkCurvePath(from, to) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const bend = Math.min(52, dist * 0.24);
+  const cx = (from.x + to.x) / 2 + (-dy / dist) * bend;
+  const cy = (from.y + to.y) / 2 + (dx / dist) * bend;
+  return `M ${from.x} ${from.y} Q ${cx} ${cy} ${to.x} ${to.y}`;
+}
+
 const TOOL_GROUPS = [
   { id: "think", label: "think" },
   { id: "canvas", label: "canvas" },
@@ -53,7 +132,7 @@ const CANVAS_TOOLS = {
     group: "canvas",
     label: "Select",
     icon: "↖",
-    hint: "Click or lasso to select. Drag to move. Drop on another idea to merge.",
+    hint: "Double-tap a note to branch · drag a nub to draw an arrow · drag notes to move",
   },
   hand: {
     id: "hand",
@@ -588,6 +667,9 @@ function stripMd(s) {
 
 function normalizeItem(it) {
   if (!it) return it;
+  if (it.type === "link") {
+    return { id: it.id, type: "link", fromId: it.fromId, toId: it.toId, fromDir: it.fromDir || null };
+  }
   const base = { rotation: 0, scale: 1, ...it };
   if (base.type === "text" && !base.w) base.w = 360;
   if (base.type === "image" && !base.h && base.w) base.h = Math.round(base.w * 0.75);
@@ -1332,9 +1414,11 @@ export default function App() {
   const [canRedo, setCanRedo] = useState(false);
   const [railTab, setRailTab] = useState("functions"); // functions | structures
   const [railDropOver, setRailDropOver] = useState(false);
-  const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
+  const [expandPulse, setExpandPulse] = useState(null); // item id — compass enlarged after double-tap
+  const [linkDraft, setLinkDraft] = useState(null); // { fromX, fromY, toX, toY }
 
   const viewportRef = useRef(null);
+  const inputLayerRef = useRef(null);
   const gesture = useRef(null);
   const camRef = useRef(camera);
   const itemsRef = useRef(items);
@@ -1348,6 +1432,7 @@ export default function App() {
   const eraseAtPointerRef = useRef(() => false);
   const historyRef = useRef({ past: [], future: [] });
   const pushHistoryRef = useRef(() => {});
+  const spawnBranchRef = useRef(() => {});
   camRef.current = camera;
   itemsRef.current = items;
   toolRef.current = tool;
@@ -1583,6 +1668,11 @@ export default function App() {
         const dw = (cx - g.cx) / camRef.current.scale;
         const factor = Math.max(0.25, g.startScale + dw / 200);
         updateItem(g.id, { scale: factor });
+      } else if (g.mode === "connect") {
+        g.lastCx = cx;
+        g.lastCy = cy;
+        const w = clientToWorld(cx, cy);
+        setLinkDraft({ fromX: g.fromX, fromY: g.fromY, toX: w.x, toY: w.y });
       }
     }
 
@@ -1680,6 +1770,61 @@ export default function App() {
           const target = itemAtPoint(g.lastCx ?? g.cx, g.lastCy ?? g.cy, exclude);
           if (target) combineRef.current?.(g.ids, [target.id]);
         }
+      } else if (g.mode === "connect") {
+        setLinkDraft(null);
+        const endCx = g.lastCx ?? g.cx;
+        const endCy = g.lastCy ?? g.cy;
+        const w = clientToWorld(endCx, endCy);
+        const moved = Math.hypot(endCx - g.cx, endCy - g.cy);
+        const exclude = new Set([g.fromId]);
+        const hit = itemAtPoint(endCx, endCy, exclude);
+        if (hit && isNoteItem(hit)) {
+          pushHistoryRef.current();
+          const dup = itemsRef.current.some(
+            (it) => it.type === "link" && it.fromId === g.fromId && it.toId === hit.id
+          );
+          if (!dup) {
+            setItems((arr) => [
+              ...arr,
+              normalizeItem({
+                id: uid(),
+                type: "link",
+                fromId: g.fromId,
+                toId: hit.id,
+                fromDir: g.fromDir,
+              }),
+            ]);
+          }
+          setSelection([hit.id]);
+        } else if (moved > 8 || Math.hypot(w.x - g.fromX, w.y - g.fromY) > 28) {
+          pushHistoryRef.current();
+          const id = uid();
+          const noteW = 320;
+          setItems((arr) => [
+            ...arr,
+            normalizeItem({
+              id,
+              type: "text",
+              x: w.x - noteW / 2,
+              y: w.y - 48,
+              text: "",
+              w: noteW,
+              bornFrom: [g.fromId],
+            }),
+            normalizeItem({
+              id: uid(),
+              type: "link",
+              fromId: g.fromId,
+              toId: id,
+              fromDir: g.fromDir,
+            }),
+          ]);
+          setSelection([id]);
+          setEditing(id);
+        } else {
+          spawnBranchRef.current(g.fromId, g.fromDir);
+        }
+        setExpandPulse(null);
       }
     }
 
@@ -1725,6 +1870,9 @@ export default function App() {
         finishEditing();
         setSelection([]);
         setLasso(null);
+        setExpandPulse(null);
+        setLinkDraft(null);
+        gesture.current = null;
         setHighlight((hl) => {
           if (hl?.strokeId) {
             setItems((arr) => arr.filter((it) => it.id !== hl.strokeId));
@@ -1738,6 +1886,13 @@ export default function App() {
         e.preventDefault();
         deleteSelection();
         return;
+      }
+      if (e.key === "Enter" && selRef.current.length === 1 && !e.metaKey && !e.ctrlKey) {
+        const it = itemsRef.current.find((i) => i.id === selRef.current[0]);
+        if (it?.type === "text" && !editingRef.current) {
+          e.preventDefault();
+          setEditing(it.id);
+        }
       }
       if (
         (e.key === "Delete" || e.key === "Backspace") &&
@@ -1788,8 +1943,63 @@ export default function App() {
   function deleteSelection() {
     pushHistory();
     const ids = new Set(selRef.current);
-    setItems((arr) => arr.filter((it) => !ids.has(it.id)));
+    setItems((arr) =>
+      arr.filter((it) => {
+        if (ids.has(it.id)) return false;
+        if (it.type === "link" && (ids.has(it.fromId) || ids.has(it.toId))) return false;
+        return true;
+      })
+    );
     setSelection([]);
+    setExpandPulse(null);
+    setLinkDraft(null);
+  }
+
+  function spawnBranchInDir(fromId, dirId) {
+    const from = itemsRef.current.find((i) => i.id === fromId);
+    if (!from || !isNoteItem(from)) return;
+    pushHistory();
+    const dir = EXPAND_DIRS.find((d) => d.id === dirId) || EXPAND_DIRS[0];
+    const c = noteCenter(from);
+    const noteW = 320;
+    const x = c.x + Math.cos(dir.angle) * BRANCH_DIST - noteW / 2;
+    const y = c.y + Math.sin(dir.angle) * BRANCH_DIST - 48;
+    const id = uid();
+    setItems((arr) => [
+      ...arr,
+      normalizeItem({ id, type: "text", x, y, text: "", w: noteW, bornFrom: [fromId] }),
+      normalizeItem({ id: uid(), type: "link", fromId, toId: id, fromDir: dirId }),
+    ]);
+    setSelection([id]);
+    setEditing(id);
+    setExpandPulse(null);
+  }
+  spawnBranchRef.current = spawnBranchInDir;
+
+  function startBranchDrag(e, fromId, dirId) {
+    e.stopPropagation();
+    e.preventDefault();
+    const from = itemsRef.current.find((i) => i.id === fromId);
+    if (!from) return;
+    const ap = branchAnchor(from, dirId);
+    gesture.current = {
+      mode: "connect",
+      fromId,
+      fromDir: dirId,
+      fromX: ap.x,
+      fromY: ap.y,
+      cx: e.clientX,
+      cy: e.clientY,
+      lastCx: e.clientX,
+      lastCy: e.clientY,
+    };
+    setLinkDraft({ fromX: ap.x, fromY: ap.y, toX: ap.x, toY: ap.y });
+    setGesturing(true);
+    try {
+      inputLayerRef.current?.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
   }
 
   // ---- composed operators (functions made of functions) ----
@@ -2248,6 +2458,7 @@ export default function App() {
     const list = itemsRef.current;
     for (let i = list.length - 1; i >= 0; i--) {
       const it = list[i];
+      if (it.type === "link") continue;
       if (excludeIds?.has(it.id)) continue;
       if (it.type === "stroke") {
         for (let k = 1; k < it.points.length; k++) {
@@ -2334,6 +2545,8 @@ export default function App() {
   // ---- pointer gestures on the board ----
   function onPointerDown(e) {
     if (e.button !== 0) return;
+    if (e.target.closest?.(".branch-nub")) return;
+    setExpandPulse(null);
     setGesturing(true);
     const cx = e.clientX;
     const cy = e.clientY;
@@ -2487,22 +2700,31 @@ export default function App() {
     setTool("select");
   }
 
-  // double-click: edit an existing text, or write a new one
+  // double-click: branch compass on notes, edit empty notes, write on blank paper
   function onDoubleClick(e) {
     const t = toolRef.current;
     if (t !== "select" && t !== "text") return;
     finishEditing();
     const hit = itemAtPoint(e.clientX, e.clientY);
-    if (hit) {
-      if (hit.type === "text") {
+    if (hit?.type === "text") {
+      const it = itemsRef.current.find((i) => i.id === hit.id);
+      if (!it?.text?.trim()) {
         setSelection([hit.id]);
         setEditing(hit.id);
+        return;
       }
+      setSelection([hit.id]);
+      setExpandPulse(hit.id);
+      return;
+    }
+    if (hit?.type === "image") {
+      setSelection([hit.id]);
+      setExpandPulse(hit.id);
       return;
     }
     const w = clientToWorld(e.clientX, e.clientY);
     const id = uid();
-    setItems((arr) => [...arr, normalizeItem({ id, type: "text", x: w.x, y: w.y, text: "" })]);
+    setItems((arr) => [...arr, normalizeItem({ id, type: "text", x: w.x, y: w.y, text: "", w: 320 })]);
     setSelection([id]);
     setEditing(id);
   }
@@ -2648,6 +2870,9 @@ export default function App() {
   const selBBox = selection.length ? selectionWorldBBox() : null;
   const selItem = selection.length === 1 ? items.find((it) => it.id === selection[0]) : null;
   const canTransform = selItem && (selItem.type === "text" || selItem.type === "image");
+  const branchTarget =
+    tool === "select" && !editing && !highlight && selItem && isNoteItem(selItem) ? selItem : null;
+  const boardLinks = items.filter((it) => it.type === "link");
   const selScreenBBox = selBBox && selection.length ? (() => {
     const ids = new Set(selection);
     let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
@@ -2850,6 +3075,60 @@ export default function App() {
           className="world"
           style={{ transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.scale})` }}
         >
+          {/* branch arrows between notes */}
+          <svg className="link-layer" style={{ overflow: "visible" }}>
+            <defs>
+              <marker
+                id="board-link-arrow"
+                markerWidth="9"
+                markerHeight="9"
+                refX="8"
+                refY="4.5"
+                orient="auto"
+                markerUnits="strokeWidth"
+              >
+                <path d="M0,0 L9,4.5 L0,9 Z" fill={INK} fillOpacity="0.55" />
+              </marker>
+            </defs>
+            {boardLinks.map((link) => {
+              const from = items.find((i) => i.id === link.fromId);
+              const to = items.find((i) => i.id === link.toId);
+              if (!from || !to) return null;
+              const dirId = link.fromDir || inferLinkDir(from, to);
+              const a = branchAnchor(from, dirId);
+              const b = linkEndpoint(to, a);
+              return (
+                <path
+                  key={link.id}
+                  d={linkCurvePath(a, b)}
+                  className="board-link"
+                  fill="none"
+                  stroke={INK}
+                  strokeWidth={1.6}
+                  strokeOpacity={0.42}
+                  strokeLinecap="round"
+                  markerEnd="url(#board-link-arrow)"
+                />
+              );
+            })}
+            {linkDraft && (
+              <path
+                d={linkCurvePath(
+                  { x: linkDraft.fromX, y: linkDraft.fromY },
+                  { x: linkDraft.toX, y: linkDraft.toY }
+                )}
+                className="board-link draft"
+                fill="none"
+                stroke={INK}
+                strokeWidth={1.8}
+                strokeOpacity={0.65}
+                strokeDasharray="6 5"
+                strokeLinecap="round"
+                markerEnd="url(#board-link-arrow)"
+              />
+            )}
+          </svg>
+
           {/* committed strokes */}
           <svg className="ink-layer" style={{ overflow: "visible" }}>
             {items
@@ -2981,6 +3260,7 @@ export default function App() {
 
       {/* dedicated input surface — all canvas tools attach here */}
       <div
+        ref={inputLayerRef}
         className={"canvas-input-layer " + cursorClass}
         onPointerDown={onPointerDown}
         onDoubleClick={onDoubleClick}
@@ -3096,6 +3376,15 @@ export default function App() {
         />
       )}
 
+      {branchTarget && !gesturing && (
+        <BranchCompass
+          item={branchTarget}
+          worldToClient={worldToClient}
+          expanded={expandPulse === branchTarget.id}
+          onStartDrag={startBranchDrag}
+        />
+      )}
+
       {aiMenuPos && !highlight && (
         <SelectionMenu
           pos={aiMenuPos}
@@ -3104,6 +3393,11 @@ export default function App() {
           onRunOp={(op) => runOperator(op, selection, { atClient: { x: aiMenuPos.x, y: aiMenuPos.y } })}
           onExport={exportSelection}
           onDelete={deleteSelection}
+          onEdit={
+            selection.length === 1 && items.find((i) => i.id === selection[0])?.type === "text"
+              ? () => setEditing(selection[0])
+              : null
+          }
           onSaveStructure={() => captureSelectionAsStructure()}
           onDiscoverSameness={selection.length >= 2 ? runSamenessDiscovery : null}
         />
@@ -3143,6 +3437,38 @@ export default function App() {
           onDelete={deleteFunction}
         />
       )}
+    </div>
+  );
+}
+
+function BranchCompass({ item, worldToClient, expanded, onStartDrag }) {
+  const c = noteCenter(item);
+  if (!c) return null;
+  const sc = worldToClient(c.x, c.y);
+  const r = expanded ? 68 : 46;
+  return (
+    <div
+      className={"branch-compass" + (expanded ? " expanded" : "")}
+      style={{ left: sc.x, top: sc.y }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      {expanded && <span className="branch-compass-hint">branch</span>}
+      {EXPAND_DIRS.map((dir) => {
+        const px = Math.cos(dir.angle) * r;
+        const py = Math.sin(dir.angle) * r;
+        return (
+          <button
+            key={dir.id}
+            type="button"
+            className="branch-nub"
+            style={{ transform: `translate(calc(-50% + ${px}px), calc(-50% + ${py}px))` }}
+            title={`Branch ${dir.label}`}
+            onPointerDown={(e) => onStartDrag(e, item.id, dir.id)}
+          >
+            <span className="branch-nub-dot" />
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -3280,7 +3606,7 @@ function CanvasHud({ tool, selectionCount, imageArmed }) {
   } else if (selectionCount >= 2 && tool === "select") {
     hint = `${selectionCount} selected · selection menu → sameness or merge · drag to move`;
   } else if (selectionCount > 0 && tool === "select") {
-    hint = `${selectionCount} selected · drag ⠿ to toolbox to save · drop on canvas to merge`;
+    hint = `${selectionCount} selected · double-tap to branch · drag nub for arrow · Enter to write`;
   } else if (tool === "highlight") {
     hint = "Text → primitives · scribble erases · closed circle selects inside · ⌫ at cursor";
   }
@@ -3604,6 +3930,7 @@ function SelectionMenu({
   onRunOp,
   onExport,
   onDelete,
+  onEdit,
   onSaveStructure,
   onDiscoverSameness,
 }) {
@@ -3657,6 +3984,11 @@ function SelectionMenu({
         <button className="p-btn" onClick={() => setOpen(true)}>
           export
         </button>
+        {onEdit && (
+          <button className="p-btn" onClick={onEdit} title="edit note">
+            write
+          </button>
+        )}
         <button className="p-btn" onClick={onSaveStructure} disabled={!selectionCount} title="save to structures">
           save
         </button>
