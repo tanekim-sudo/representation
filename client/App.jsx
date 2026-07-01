@@ -922,11 +922,33 @@ function estimatePlanMs(plan) {
 function parseHighlightPortals(out) {
   const blocks = out
     .split(/\n{2,}/)
-    .map((p) => p.replace(/^\s*(?:\[[^\]]+\]|[-*•]|\d+[.)])\s*/m, "").trim())
-    .filter((p) => p.length > 8);
-  if (blocks.length >= 2) return blocks;
-  const lines = out.split(/\n+/).map((l) => l.trim()).filter((l) => l.length > 8);
-  return lines.length >= 2 ? lines : [out.trim()];
+    .map((b) => b.trim())
+    .filter((b) => b.length > 8);
+  const portals = blocks.map((block) => {
+    const tagged = block.match(/^\[([^\]]+)\]\s*\n([\s\S]+)$/);
+    if (tagged) return { domain: tagged[1].trim(), body: tagged[2].trim() };
+    const inline = block.match(/^\[([^\]]+)\]\s*(.+)$/s);
+    if (inline) return { domain: inline[1].trim(), body: inline[2].trim() };
+    return {
+      domain: null,
+      body: block.replace(/^\s*(?:\[[^\]]+\]|[-*•]|\d+[.)])\s*/m, "").trim(),
+    };
+  });
+  return portals.filter((p) => p.body.length > 8);
+}
+
+function portalDisplayText(portal) {
+  if (portal.domain) return `[${portal.domain}]\n${portal.body}`;
+  return portal.body;
+}
+
+function pointNearRect(px, py, rect, pad = 6) {
+  return (
+    px >= rect.left - pad &&
+    px <= rect.right + pad &&
+    py >= rect.top - pad &&
+    py <= rect.bottom + pad
+  );
 }
 
 function strokeWorldBBox(points, pad = 0) {
@@ -972,38 +994,41 @@ function extractTextFromHighlightStroke(points, strokeWidth, itemList, worldToCl
   );
   if (!textItems.length) return null;
 
-  const samples = sampleStrokePoints(points);
+  const samples = sampleStrokePoints(points).map((p) => worldToClient(p.x, p.y));
+  const pad = Math.max(10, strokeWidth * 0.55);
 
   for (const item of textItems) {
     const el = document.querySelector(`[data-item="${item.id}"].board-text`);
     if (!el) continue;
     const full = el.innerText || item.text;
-    const charHits = new Map();
+    const textNode = el.firstChild;
+    const charHits = new Set();
 
-    for (const p of samples) {
-      const client = worldToClient(p.x, p.y);
-      let range = null;
-      if (document.caretRangeFromPoint) {
-        range = document.caretRangeFromPoint(client.x, client.y);
-      } else if (document.caretPositionFromPoint) {
-        const pos = document.caretPositionFromPoint(client.x, client.y);
-        if (pos) {
-          range = document.createRange();
-          range.setStart(pos.offsetNode, pos.offset);
-          range.setEnd(pos.offsetNode, pos.offset);
+    if (textNode?.nodeType === Node.TEXT_NODE) {
+      for (let i = 0; i < full.length; i++) {
+        try {
+          const range = document.createRange();
+          range.setStart(textNode, i);
+          range.setEnd(textNode, Math.min(i + 1, textNode.length));
+          const cr = range.getBoundingClientRect();
+          if (!cr.width && !cr.height) continue;
+          if (samples.some((s) => pointNearRect(s.x, s.y, cr, pad))) charHits.add(i);
+        } catch {
+          /* skip bad range */
         }
       }
-      if (!range || !el.contains(range.startContainer)) continue;
-      const pre = document.createRange();
-      pre.selectNodeContents(el);
-      pre.setEnd(range.startContainer, range.startOffset);
-      const offset = pre.toString().length;
-      charHits.set(offset, (charHits.get(offset) || 0) + 1);
     }
 
-    if (!charHits.size) continue;
+    if (!charHits.size) {
+      const er = el.getBoundingClientRect();
+      if (samples.some((s) => pointNearRect(s.x, s.y, er, pad))) {
+        for (let i = 0; i < full.length; i++) charHits.add(i);
+      } else {
+        continue;
+      }
+    }
 
-    const hitOffsets = [...charHits.keys()].sort((a, b) => a - b);
+    const hitOffsets = [...charHits].sort((a, b) => a - b);
     let start = hitOffsets[0];
     let end = hitOffsets[hitOffsets.length - 1] + 1;
     while (start > 0 && /\S/.test(full[start - 1])) start--;
@@ -1227,6 +1252,7 @@ export default function App() {
   const [dropReady, setDropReady] = useState(false);
   const [dropTargetId, setDropTargetId] = useState(null);
   const [highlight, setHighlight] = useState(null); // { itemId, quote, context, rect }
+  const [gesturing, setGesturing] = useState(false);
   const [railTab, setRailTab] = useState("functions"); // functions | structures
   const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
 
@@ -1238,6 +1264,7 @@ export default function App() {
   const selRef = useRef(selection);
   const editingRef = useRef(editing);
   const combineRef = useRef(null);
+  const showToastRef = useRef(() => {});
   camRef.current = camera;
   itemsRef.current = items;
   toolRef.current = tool;
@@ -1249,62 +1276,15 @@ export default function App() {
   useEffect(() => localStorage.setItem(OPERATORS_KEY, JSON.stringify(operators)), [operators]);
   useEffect(() => localStorage.setItem(STRUCTURES_KEY, JSON.stringify(structures)), [structures]);
 
-  // ---- highlighter: detect text selection in thought particles ----
   useEffect(() => {
-    function onSelectionChange() {
-      const t = toolRef.current;
-      if (t !== "select") return;
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed) {
-        return;
-      }
-      const quote = sel.toString().trim();
-      if (quote.length < 2) {
-        setHighlight(null);
-        return;
-      }
-      const node = sel.anchorNode;
-      const el =
-        node?.nodeType === Node.TEXT_NODE
-          ? node.parentElement?.closest?.("[data-item].board-text")
-          : node?.closest?.("[data-item].board-text");
-      if (!el) {
-        setHighlight(null);
-        return;
-      }
-      const itemId = el.getAttribute("data-item");
-      const item = itemsRef.current.find((i) => i.id === itemId);
-      if (!item?.text) return;
-      const range = sel.getRangeAt(0);
-      const rect = range.getBoundingClientRect();
-      if (!rect.width && !rect.height) return;
-      setHighlight({
-        itemId,
-        quote,
-        context: item.text,
-        rect: {
-          left: rect.left,
-          top: rect.top,
-          bottom: rect.bottom,
-          right: rect.right,
-          width: rect.width,
-          height: rect.height,
-        },
-      });
-      setSelection([itemId]);
-    }
-    document.addEventListener("selectionchange", onSelectionChange);
-    return () => document.removeEventListener("selectionchange", onSelectionChange);
-  }, []);
-
-  useEffect(() => {
-    if (tool !== "select") setHighlight(null);
+    if (!["select", "highlight"].includes(tool)) setHighlight(null);
   }, [tool]);
 
   function showToast(msg) {
     setToast(msg);
     setTimeout(() => setToast((t) => (t === msg ? null : t)), 3200);
   }
+  showToastRef.current = showToast;
 
   function pushJob(job) {
     const id = job.id || uid();
@@ -1371,6 +1351,9 @@ export default function App() {
       setEditing(null);
     }
   }
+
+  const setGesturingRef = useRef(setGesturing);
+  setGesturingRef.current = setGesturing;
 
   // global pointer move/up so gestures work across canvas items
   useEffect(() => {
@@ -1448,6 +1431,7 @@ export default function App() {
     }
 
     function onUp() {
+      setGesturingRef.current(false);
       const g = gesture.current;
       gesture.current = null;
       if (!g) return;
@@ -1478,6 +1462,7 @@ export default function App() {
                   worldToClient
                 );
                 if (extracted) setHighlight(extracted);
+                else showToastRef.current("draw over text to capture a thought particle");
               });
             });
           }
@@ -1603,6 +1588,48 @@ export default function App() {
 
   // ---- composed operators (functions made of functions) ----
   const opMap = useMemo(() => Object.fromEntries(operators.map((o) => [o.id, o])), [operators]);
+
+  function spawnPortalObjects(portals, sourceIds, atWorld) {
+    const idSet = new Set(sourceIds || []);
+    const sel = itemsRef.current.filter((it) => idSet.has(it.id));
+    const boxes = sel.map(itemWorldBBox).filter(Boolean);
+    const cx = atWorld?.x ?? (boxes.length ? Math.max(...boxes.map((b) => b.maxx)) + 48 : viewportCenterWorld().x);
+    const cy = atWorld?.y ?? (boxes.length ? Math.min(...boxes.map((b) => b.miny)) : viewportCenterWorld().y);
+    const n = portals.length;
+    const radius = 100 + n * 18;
+    const newIds = [];
+    const newItems = [];
+    for (let i = 0; i < n; i++) {
+      const portal = portals[i];
+      const text = portalDisplayText(portal);
+      const clean = stripMd(text).trim();
+      if (!clean) continue;
+      const spread = Math.min(Math.PI * 0.85, Math.max(Math.PI / 3, n * 0.28));
+      const angle = -spread / 2 + (n === 1 ? 0 : (i / (n - 1)) * spread);
+      const x = cx + Math.cos(angle) * radius;
+      const y = cy + Math.sin(angle) * radius + i * 8;
+      const id = uid();
+      newIds.push(id);
+      const w = Math.min(480, Math.max(240, Math.round(clean.length * 0.45 + 180)));
+      newItems.push(
+        normalizeItem({
+          id,
+          type: "text",
+          x,
+          y,
+          text: clean,
+          w,
+          bornFrom: sourceIds || [],
+          portal: !!portal.domain,
+        })
+      );
+    }
+    if (newItems.length) {
+      setItems((arr) => [...arr, ...newItems]);
+      setSelection(newIds);
+    }
+    return newIds;
+  }
 
   function spawnMultipleObjects(texts, sourceIds, atWorld) {
     const idSet = new Set(sourceIds || []);
@@ -1751,11 +1778,21 @@ export default function App() {
 
   // ---- onboarding: build a whole toolbox for a role ----
   async function runOnboarding(role) {
-    setOnboard({ step: "working", role, done: 0, total: 10, label: "imagining your functions…" });
+    localStorage.setItem(ONBOARDED_KEY, "1");
+    setOnboard(null);
+    const jobId = pushJob({
+      id: uid(),
+      label: `building ${role} toolbox`,
+      type: "onboard",
+      status: "running",
+      step: "imagining functions…",
+      startedAt: Date.now(),
+      estimatedMs: 120000,
+    });
     try {
       const list = await generateFunctionList(role, operators, opMap);
       if (!list.length) throw new Error("Could not imagine functions. Try again.");
-      setOnboard((o) => ({ ...o, total: list.length }));
+      patchJob(jobId, { step: `designing 0 / ${list.length} functions…` });
       let done = 0;
       const trees = await Promise.all(
         list.map(async (fn) => {
@@ -1770,17 +1807,18 @@ export default function App() {
             };
           }
           done += 1;
-          setOnboard((o) => (o && o.step === "working" ? { ...o, done } : o));
+          patchJob(jobId, { step: `designing ${done} / ${list.length} functions…` });
           return tree;
         })
       );
       const newOps = [];
       trees.forEach((t) => materializeTree(t, role, true, newOps));
       setOperators((prev) => [...prev, ...newOps]);
-      localStorage.setItem(ONBOARDED_KEY, "1");
-      setOnboard({ step: "done", role, count: trees.length });
+      finishJob(jobId, "done", `${trees.length} functions ready`);
+      showToast(`${trees.length} functions ready for ${role}`);
     } catch (err) {
-      setOnboard({ step: "error", message: err.message || "Something went wrong." });
+      finishJob(jobId, "error", err.message || "failed");
+      showToast(err.message || "Something went wrong.");
     }
   }
 
@@ -2026,6 +2064,7 @@ export default function App() {
   // ---- pointer gestures on the board ----
   function onPointerDown(e) {
     if (e.button !== 0) return;
+    setGesturing(true);
     const cx = e.clientX;
     const cy = e.clientY;
     const panning = toolRef.current === "hand";
@@ -2142,6 +2181,8 @@ export default function App() {
 
   // double-click: edit an existing text, or write a new one
   function onDoubleClick(e) {
+    const t = toolRef.current;
+    if (t !== "select" && t !== "text") return;
     finishEditing();
     const hit = itemAtPoint(e.clientX, e.clientY);
     if (hit) {
@@ -2234,9 +2275,11 @@ export default function App() {
       const atWorld = clientToWorld(cx, cy);
 
       if (op.multi) {
-        const parts = parseHighlightPortals(out);
-        if (parts.length >= 2) {
-          spawnMultipleObjects(parts, [hl.itemId], atWorld);
+        const portals = parseHighlightPortals(out);
+        if (portals.length >= 2) {
+          spawnPortalObjects(portals, [hl.itemId], atWorld);
+        } else if (portals.length === 1) {
+          spawnNewObject(portalDisplayText(portals[0]), [hl.itemId], atWorld);
         } else {
           spawnNewObject(out, [hl.itemId], atWorld);
         }
@@ -2347,7 +2390,7 @@ export default function App() {
     }
     return { left, top, right, bottom, cx: (left + right) / 2 };
   })() : null;
-  const aiMenuPos = selScreenBBox && !editing && !gesture.current
+  const aiMenuPos = selScreenBBox && !editing && !gesturing
     ? {
         x: clamp(selScreenBBox.cx, RAIL_W + 120, window.innerWidth - 120),
         y: selScreenBBox.top < 100 ? selScreenBBox.bottom + 14 : selScreenBBox.top - 14,
@@ -2794,7 +2837,12 @@ function BoardText({ item, selected, dropTarget, editing, onCommit }) {
   }
   return (
     <div
-      className={"board-text" + (selected ? " sel" : "") + (dropTarget ? " drop-target" : "")}
+      className={
+        "board-text" +
+        (selected ? " sel" : "") +
+        (dropTarget ? " drop-target" : "") +
+        (item.portal ? " portal" : "")
+      }
       data-item={item.id}
       style={style}
     >
@@ -2858,8 +2906,12 @@ function startStructDrag(e, struct) {
 function CanvasHud({ tool, selectionCount }) {
   const meta = CANVAS_TOOLS[tool] || CANVAS_TOOLS.select;
   let hint = meta.hint;
-  if (selectionCount > 0 && tool === "select") {
+  if (tool === "highlight" && selectionCount > 1) {
+    hint = `${selectionCount} ideas selected · draw over text · collide fuses with the other selection`;
+  } else if (selectionCount > 0 && tool === "select") {
     hint = `${selectionCount} selected · drag to move · drop on another idea to combine`;
+  } else if (tool === "highlight") {
+    hint = "Draw over text on the canvas · cognition toolbar opens on the passage";
   }
 
   return (
@@ -2953,16 +3005,24 @@ function HighlightToolbar({ highlight, collideReady, onOp, onDismiss }) {
         </button>
       </div>
       <div className="highlight-actions">
-        {Object.entries(HIGHLIGHT_OPS).map(([key, op]) => (
-          <button
-            key={key}
-            className="highlight-btn"
-            title={op.title + (key === "collide" && collideReady ? " (2 objects selected)" : "")}
-            onClick={() => onOp(key)}
-          >
-            {op.label}
-          </button>
-        ))}
+        {Object.entries(HIGHLIGHT_OPS).map(([key, op]) => {
+          const disabled = key === "collide" && !collideReady;
+          return (
+            <button
+              key={key}
+              className="highlight-btn"
+              disabled={disabled}
+              title={
+                disabled
+                  ? "Select another idea first, then highlight text to collide"
+                  : op.title + (key === "collide" && collideReady ? " · 2 objects selected" : "")
+              }
+              onClick={() => !disabled && onOp(key)}
+            >
+              {op.label}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -3215,7 +3275,7 @@ function Onboarding({ state, onStart, onSkip, onClose }) {
           <div className="onboard-mark">lens</div>
           <h2>What do you do?</h2>
           <p className="onboard-sub">
-            I'll build you a toolbox of thinking functions — each one made of smaller functions — tuned to how you work.
+            Pick a role — I'll build thinking functions in the background while you use the canvas.
           </p>
           <div className="role-grid">
             {ROLES.map((r) => (

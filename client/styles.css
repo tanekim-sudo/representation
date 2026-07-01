@@ -570,6 +570,19 @@ body {
   mix-blend-mode: multiply;
 }
 
+.board-text.portal {
+  border-left: 3px solid #c9a227;
+  padding-left: 8px;
+}
+.board-text.portal::first-line {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #b8921f;
+  font-family: var(--sans, system-ui, sans-serif);
+}
+
 /* text written straight onto the board */
 .board-text {
   position: absolute;
@@ -933,13 +946,17 @@ body {
   text-transform: uppercase;
   border: 1px solid var(--line-2);
   border-radius: 8px;
-  background: var(--bg);
+  background: var(--paper);
   color: var(--ink-2);
   cursor: pointer;
   transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
 }
-.highlight-btn:hover {
-  background: color-mix(in srgb, #c9a227 12%, var(--bg));
+.highlight-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.highlight-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, #c9a227 12%, var(--paper));
   border-color: color-mix(in srgb, #c9a227 35%, var(--line-2));
   color: var(--ink);
 }
