@@ -22,6 +22,7 @@ const OLD_SEEDS_KEY = "lens.seeds.v2";
 const OP_MIME = "application/lens-op";
 const STRUCT_MIME = "application/lens-structure";
 const SEL_MIME = "application/lens-selection";
+const PATHS_KEY = "lens.paths.v1";
 const RAIL_W = 280;
 const COMBINE_THRESHOLD = 14; // px moved before drop-on-item triggers combine
 
@@ -41,6 +42,23 @@ const EXPAND_DIRS = [
   { id: "nw", label: "↖", angle: -5 * Math.PI / 6 },
 ];
 const BRANCH_DIST = 240;
+
+/**
+ * Path verbs — the units of shared seeing. A path is not information;
+ * it's a reproducible sequence of attention: where to look, how to hold it.
+ */
+const PATH_VERBS = [
+  { id: "notice", label: "notice", glyph: "✦", hint: "Notice this." },
+  { id: "attend", label: "attend", glyph: "◉", hint: "Attend here. Stay with it." },
+  { id: "compare", label: "compare", glyph: "⇄", hint: "Hold these together. Feel the tension." },
+  { id: "linger", label: "linger", glyph: "◷", hint: "Linger here. Don't move on yet." },
+  { id: "release", label: "let go", glyph: "⊘", hint: "Let this go. It's not the point." },
+  { id: "look", label: "look again", glyph: "↺", hint: "Look again — it changed." },
+];
+
+function pathVerb(kind) {
+  return PATH_VERBS.find((v) => v.id === kind) || PATH_VERBS[0];
+}
 
 function isNoteItem(it) {
   return it && (it.type === "text" || it.type === "image");
@@ -1395,6 +1413,11 @@ export default function App() {
     if (Array.isArray(saved) && saved.length) return saved;
     return migrateOldSavedNodes();
   });
+  const [paths, setPaths] = useState(() => load(PATHS_KEY, []));
+  // recording: { pathId, title, steps: [...], branchOf: {pathId, stepIndex} | null }
+  const [recording, setRecording] = useState(null);
+  // walking: { pathId, stepIndex }
+  const [walking, setWalking] = useState(null);
 
   const [tool, setTool] = useState("highlight"); // highlight | select | text | pen | marker | eraser | hand
   const [selection, setSelection] = useState([]);
@@ -1412,11 +1435,12 @@ export default function App() {
   const [imageArmed, setImageArmed] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
-  const [railTab, setRailTab] = useState("functions"); // functions | structures
+  const [railTab, setRailTab] = useState("functions"); // functions | structures | paths
   const [railDropOver, setRailDropOver] = useState(false);
   const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
   const [expandPulse, setExpandPulse] = useState(null); // item id — compass enlarged after double-tap
   const [linkDraft, setLinkDraft] = useState(null); // { fromX, fromY, toX, toY }
+  const [hoverId, setHoverId] = useState(null); // note under cursor — its tendrils wake up
 
   const viewportRef = useRef(null);
   const inputLayerRef = useRef(null);
@@ -1434,6 +1458,10 @@ export default function App() {
   const historyRef = useRef({ past: [], future: [] });
   const pushHistoryRef = useRef(() => {});
   const spawnBranchRef = useRef(() => {});
+  const recordStepRef = useRef(() => {});
+  const hoverIdRef = useRef(null);
+  const hoverRafRef = useRef(null);
+  hoverIdRef.current = hoverId;
   camRef.current = camera;
   itemsRef.current = items;
   toolRef.current = tool;
@@ -1444,6 +1472,7 @@ export default function App() {
   useEffect(() => localStorage.setItem(CAMERA_KEY, JSON.stringify(camera)), [camera]);
   useEffect(() => localStorage.setItem(OPERATORS_KEY, JSON.stringify(operators)), [operators]);
   useEffect(() => localStorage.setItem(STRUCTURES_KEY, JSON.stringify(structures)), [structures]);
+  useEffect(() => localStorage.setItem(PATHS_KEY, JSON.stringify(paths)), [paths]);
 
   useEffect(() => {
     if (!["select", "highlight"].includes(tool)) setHighlight(null);
@@ -1797,6 +1826,8 @@ export default function App() {
             ]);
           }
           setSelection([hit.id]);
+          // while recording a path, a drawn connection is itself a "compare" moment
+          recordStepRef.current("compare", [g.fromId, hit.id]);
         } else if (moved > 8 || Math.hypot(w.x - g.fromX, w.y - g.fromY) > 28) {
           pushHistoryRef.current();
           const id = uid();
@@ -1822,6 +1853,8 @@ export default function App() {
           ]);
           setSelection([id]);
           setEditing(id);
+          // every continuation is a branch — recording captures it as a step
+          recordStepRef.current("notice", [g.fromId, id]);
         } else {
           spawnBranchRef.current(g.fromId, g.fromDir);
         }
@@ -2281,6 +2314,275 @@ export default function App() {
     showToast("function deleted");
   }
 
+  // ---- paths: the medium of shared seeing ----
+  // A path preserves the generative sequence of attention, not the artifact.
+  // Recording captures moments of seeing; walking replays them; walkers can
+  // branch mid-path, so the path evolves.
+
+  const recordingRef = useRef(recording);
+  recordingRef.current = recording;
+  const walkingRef = useRef(walking);
+  walkingRef.current = walking;
+  const pathsRef = useRef(paths);
+  pathsRef.current = paths;
+  const camAnimRef = useRef(null);
+
+  function animateCameraTo(targetWorld, targetScale, ms = 850) {
+    if (camAnimRef.current) cancelAnimationFrame(camAnimRef.current);
+    const r = vpRect();
+    const from = { ...camRef.current };
+    const scale = clamp(targetScale ?? from.scale, 0.12, 4.5);
+    const to = {
+      scale,
+      x: r.width / 2 - targetWorld.x * scale,
+      y: r.height / 2 - targetWorld.y * scale,
+    };
+    const t0 = performance.now();
+    const ease = (t) => 1 - Math.pow(1 - t, 3);
+    const tick = (now) => {
+      const t = Math.min(1, (now - t0) / ms);
+      const k = ease(t);
+      setCamera({
+        x: from.x + (to.x - from.x) * k,
+        y: from.y + (to.y - from.y) * k,
+        scale: from.scale + (to.scale - from.scale) * k,
+      });
+      if (t < 1) camAnimRef.current = requestAnimationFrame(tick);
+      else camAnimRef.current = null;
+    };
+    camAnimRef.current = requestAnimationFrame(tick);
+  }
+
+  function stepFocusCenter(step) {
+    const ids = new Set(step.itemIds || []);
+    const targets = itemsRef.current.filter((it) => ids.has(it.id));
+    if (!targets.length) return step.fallbackCenter || null;
+    let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+    for (const it of targets) {
+      const bb = itemWorldBBox(it);
+      if (!bb) continue;
+      minx = Math.min(minx, bb.minx);
+      miny = Math.min(miny, bb.miny);
+      maxx = Math.max(maxx, bb.maxx);
+      maxy = Math.max(maxy, bb.maxy);
+    }
+    if (minx === Infinity) return step.fallbackCenter || null;
+    return { x: (minx + maxx) / 2, y: (miny + maxy) / 2, w: maxx - minx, h: maxy - miny };
+  }
+
+  function stepFocusScale(focus) {
+    if (!focus?.w) return camRef.current.scale;
+    const r = vpRect();
+    const pad = 220;
+    const fit = Math.min((r.width - pad) / Math.max(focus.w, 80), (r.height - pad) / Math.max(focus.h, 60));
+    return clamp(Math.min(fit, 1.6), 0.25, 1.8);
+  }
+
+  function beginRecordingPath(branchOf = null) {
+    finishEditing();
+    setWalking(null);
+    setRecording({
+      pathId: uid(),
+      title: "",
+      steps: branchOf?.inheritedSteps || [],
+      branchOf: branchOf ? { pathId: branchOf.pathId, stepIndex: branchOf.stepIndex } : null,
+    });
+    setRailTab("paths");
+    showToast(branchOf ? "branching — keep walking your own way" : "recording your path — mark moments of seeing");
+  }
+
+  function recordStep(kind, itemIds, caption = "") {
+    const rec = recordingRef.current;
+    if (!rec) return;
+    const ids = (itemIds || []).filter((id) => {
+      const it = itemsRef.current.find((i) => i.id === id);
+      return it && it.type !== "link";
+    });
+    if (!ids.length) {
+      showToast("select or touch something first");
+      return;
+    }
+    const center = viewportCenterWorld();
+    const step = {
+      id: uid(),
+      kind,
+      itemIds: ids,
+      caption: caption.trim(),
+      fallbackCenter: center,
+      // snapshot text so the step survives later edits/deletions
+      snapshot: ids
+        .map((id) => {
+          const it = itemsRef.current.find((i) => i.id === id);
+          if (it?.type === "text") return (it.text || "").slice(0, 300);
+          if (it?.type === "image") return "[image]";
+          if (it?.type === "stroke") return "[drawing]";
+          return "";
+        })
+        .filter(Boolean),
+      ts: Date.now(),
+    };
+    setRecording((r) => (r ? { ...r, steps: [...r.steps, step] } : r));
+    showToast(`${pathVerb(kind).glyph} ${pathVerb(kind).label} · step ${rec.steps.length + 1}`);
+  }
+  recordStepRef.current = recordStep;
+
+  function updateRecordedStep(stepId, patch) {
+    setRecording((r) =>
+      r ? { ...r, steps: r.steps.map((s) => (s.id === stepId ? { ...s, ...patch } : s)) } : r
+    );
+  }
+
+  function removeRecordedStep(stepId) {
+    setRecording((r) => (r ? { ...r, steps: r.steps.filter((s) => s.id !== stepId) } : r));
+  }
+
+  function finishRecordingPath(title) {
+    const rec = recordingRef.current;
+    if (!rec) return;
+    if (!rec.steps.length) {
+      setRecording(null);
+      showToast("path discarded — no steps");
+      return;
+    }
+    const firstText = rec.steps.flatMap((s) => s.snapshot || []).find((t) => t && !t.startsWith("["));
+    const path = {
+      id: rec.pathId,
+      title: (title || "").trim() || (firstText ? firstText.split("\n")[0].slice(0, 44) : "untitled path"),
+      steps: rec.steps,
+      branchOf: rec.branchOf,
+      createdAt: Date.now(),
+      walks: 0,
+    };
+    setPaths((arr) => [path, ...arr]);
+    setRecording(null);
+    setRailTab("paths");
+    showToast(`path saved · ${path.steps.length} steps`);
+  }
+
+  function discardRecording() {
+    setRecording(null);
+    showToast("recording discarded");
+  }
+
+  function deletePath(id) {
+    setPaths((arr) => arr.filter((p) => p.id !== id));
+    if (walkingRef.current?.pathId === id) setWalking(null);
+  }
+
+  function beginWalk(pathId) {
+    const path = pathsRef.current.find((p) => p.id === pathId);
+    if (!path?.steps?.length) return;
+    finishEditing();
+    setSelection([]);
+    setRecording(null);
+    setPaths((arr) => arr.map((p) => (p.id === pathId ? { ...p, walks: (p.walks || 0) + 1 } : p)));
+    setWalking({ pathId, stepIndex: 0 });
+  }
+
+  function walkTo(stepIndex) {
+    const w = walkingRef.current;
+    if (!w) return;
+    const path = pathsRef.current.find((p) => p.id === w.pathId);
+    if (!path) return;
+    const idx = clamp(stepIndex, 0, path.steps.length - 1);
+    setWalking({ ...w, stepIndex: idx });
+  }
+
+  function endWalk() {
+    setWalking(null);
+  }
+
+  function branchFromWalk() {
+    const w = walkingRef.current;
+    if (!w) return;
+    const path = pathsRef.current.find((p) => p.id === w.pathId);
+    if (!path) return;
+    const inherited = path.steps.slice(0, w.stepIndex + 1).map((s) => ({ ...s, id: uid() }));
+    setWalking(null);
+    beginRecordingPath({ pathId: path.id, stepIndex: w.stepIndex, inheritedSteps: inherited });
+  }
+
+  // camera follows the walk
+  useEffect(() => {
+    if (!walking) return;
+    const path = paths.find((p) => p.id === walking.pathId);
+    const step = path?.steps?.[walking.stepIndex];
+    if (!step) return;
+    const focus = stepFocusCenter(step);
+    if (focus) animateCameraTo(focus, stepFocusScale(focus));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walking?.pathId, walking?.stepIndex]);
+
+  // keyboard navigation while walking
+  useEffect(() => {
+    if (!walking) return;
+    function onKey(e) {
+      const typing = e.target.isContentEditable || /^(INPUT|TEXTAREA)$/.test(e.target.tagName || "");
+      if (typing) return;
+      if (e.key === "ArrowRight" || e.key === " " || e.key === "Enter") {
+        e.preventDefault();
+        const path = pathsRef.current.find((p) => p.id === walkingRef.current?.pathId);
+        const w = walkingRef.current;
+        if (path && w && w.stepIndex >= path.steps.length - 1) endWalk();
+        else walkTo((w?.stepIndex ?? 0) + 1);
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        walkTo((walkingRef.current?.stepIndex ?? 0) - 1);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        endWalk();
+      } else if (e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        branchFromWalk();
+      }
+    }
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [!!walking]);
+
+  function exportPath(path) {
+    const blob = JSON.stringify({ kind: "lens-path", version: 1, path, items: itemsRef.current.filter((it) => path.steps.some((s) => s.itemIds?.includes(it.id))) }, null, 2);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([blob], { type: "application/json" }));
+    a.download = `path-${(path.title || "untitled").replace(/\s+/g, "-").slice(0, 32)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    showToast("path exported — send someone your seeing");
+  }
+
+  function importPath(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        if (data?.kind !== "lens-path" || !data.path?.steps?.length) throw new Error("not a path");
+        const idMap = {};
+        const newItems = (data.items || [])
+          .filter((it) => !itemsRef.current.some((ex) => ex.id === it.id))
+          .map((it) => {
+            const nid = uid();
+            idMap[it.id] = nid;
+            return normalizeItem({ ...it, id: nid });
+          });
+        // remap step item ids to the newly planted copies (keep ids that already exist)
+        const steps = data.path.steps.map((s) => ({
+          ...s,
+          id: uid(),
+          itemIds: (s.itemIds || []).map((id) => idMap[id] || id),
+        }));
+        if (newItems.length) setItems((arr) => [...arr, ...newItems]);
+        const path = { ...data.path, id: uid(), steps, importedAt: Date.now(), walks: 0 };
+        setPaths((arr) => [path, ...arr]);
+        setRailTab("paths");
+        showToast(`path received · ${steps.length} steps — walk it`);
+      } catch {
+        showToast("could not read that path file");
+      }
+    };
+    reader.readAsText(file);
+  }
+
   // ---- saved idea structures ----
   function saveSelectionByIds(ids, extra = {}) {
     if (!ids?.length) {
@@ -2701,6 +3003,23 @@ export default function App() {
     setTool("select");
   }
 
+  // hover: wake a note's tendrils so you can grab a thought anywhere and continue it
+  function onHoverMove(e) {
+    if (toolRef.current !== "select" || gesture.current || editingRef.current || walkingRef.current) {
+      if (hoverIdRef.current) setHoverId(null);
+      return;
+    }
+    const cx = e.clientX;
+    const cy = e.clientY;
+    if (hoverRafRef.current) return;
+    hoverRafRef.current = requestAnimationFrame(() => {
+      hoverRafRef.current = null;
+      const hit = itemAtPoint(cx, cy);
+      const id = hit && isNoteItem(hit) ? hit.id : null;
+      if (id !== hoverIdRef.current) setHoverId(id);
+    });
+  }
+
   // double-click: branch compass on notes, edit empty notes, write on blank paper
   function onDoubleClick(e) {
     const t = toolRef.current;
@@ -2871,9 +3190,20 @@ export default function App() {
   const selBBox = selection.length ? selectionWorldBBox() : null;
   const selItem = selection.length === 1 ? items.find((it) => it.id === selection[0]) : null;
   const canTransform = selItem && (selItem.type === "text" || selItem.type === "image");
+  const hoverItem = hoverId ? items.find((it) => it.id === hoverId) : null;
   const branchTarget =
-    tool === "select" && !editing && !highlight && selItem && isNoteItem(selItem) ? selItem : null;
+    tool === "select" && !editing && !highlight && !walking
+      ? (selItem && isNoteItem(selItem) ? selItem : hoverItem && isNoteItem(hoverItem) ? hoverItem : null)
+      : null;
   const boardLinks = items.filter((it) => it.type === "link");
+  const walkPath = walking ? paths.find((p) => p.id === walking.pathId) : null;
+  const walkStep = walkPath?.steps?.[walking.stepIndex] || null;
+  const walkFocusRects = walkStep
+    ? walkStep.itemIds
+        .map((id) => items.find((it) => it.id === id))
+        .filter(Boolean)
+        .map((it) => itemScreenBBox(it))
+    : [];
   const selScreenBBox = selBBox && selection.length ? (() => {
     const ids = new Set(selection);
     let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
@@ -2968,8 +3298,53 @@ export default function App() {
           <button className={"rail-tab" + (railTab === "structures" ? " on" : "")} onClick={() => setRailTab("structures")}>
             structures {structures.length ? `(${structures.length})` : ""}
           </button>
+          <button className={"rail-tab" + (railTab === "paths" ? " on" : "")} onClick={() => setRailTab("paths")}>
+            paths {paths.length ? `(${paths.length})` : ""}
+          </button>
         </div>
-        {railTab === "functions" ? (
+        {railTab === "paths" ? (
+          <>
+            <button
+              className="rail-create"
+              disabled={!!recording}
+              onClick={() => beginRecordingPath()}
+              title="record a sequence of attention others can walk"
+            >
+              {recording ? "recording…" : "◉ begin a path"}
+            </button>
+            <button
+              className="rail-create ghost"
+              onClick={() => {
+                const input = document.createElement("input");
+                input.type = "file";
+                input.accept = "application/json";
+                input.onchange = () => input.files?.[0] && importPath(input.files[0]);
+                input.click();
+              }}
+            >
+              ↓ receive a path
+            </button>
+            <div className="rail-scroll">
+              {paths.length === 0 && !recording ? (
+                <p className="rail-empty">
+                  A path is not a note — it's a walk. Record where you attended, what you noticed, where
+                  you lingered. Someone else walks it and arrives with their perception changed.
+                </p>
+              ) : (
+                paths.map((p) => (
+                  <PathCard
+                    key={p.id}
+                    path={p}
+                    parent={p.branchOf ? paths.find((x) => x.id === p.branchOf.pathId) : null}
+                    onWalk={() => beginWalk(p.id)}
+                    onExport={() => exportPath(p)}
+                    onDelete={() => deletePath(p.id)}
+                  />
+                ))
+              )}
+            </div>
+          </>
+        ) : railTab === "functions" ? (
           <>
             <button className="rail-create" onClick={openCreateFunction}>
               + function
@@ -3057,6 +3432,9 @@ export default function App() {
         )}
         {railTab === "structures" && (
           <div className="rail-hint">drop selection here to save · drag onto canvas to plant</div>
+        )}
+        {railTab === "paths" && (
+          <div className="rail-hint">walk a path · press b mid-walk to branch it</div>
         )}
       </aside>
 
@@ -3264,6 +3642,8 @@ export default function App() {
         ref={inputLayerRef}
         className={"canvas-input-layer " + cursorClass}
         onPointerDown={onPointerDown}
+        onPointerMove={onHoverMove}
+        onPointerLeave={() => hoverIdRef.current && setHoverId(null)}
         onDoubleClick={onDoubleClick}
         onDragOver={(e) => {
           if (
@@ -3359,7 +3739,7 @@ export default function App() {
       </div>
       </div>
 
-      {!editing && (
+      {!editing && !walking && (
         <CanvasHud tool={tool} selectionCount={selection.length} imageArmed={imageArmed} />
       )}
 
@@ -3382,7 +3762,35 @@ export default function App() {
           item={branchTarget}
           worldToClient={worldToClient}
           expanded={expandPulse === branchTarget.id}
+          subtle={!selection.includes(branchTarget.id)}
           onStartDrag={startBranchDrag}
+        />
+      )}
+
+      {recording && !walking && (
+        <PathRecorderBar
+          recording={recording}
+          selectionCount={selection.length}
+          onVerb={(kind, caption) => recordStep(kind, selRef.current, caption)}
+          onRemoveStep={removeRecordedStep}
+          onCaptionStep={updateRecordedStep}
+          onFinish={finishRecordingPath}
+          onDiscard={discardRecording}
+        />
+      )}
+
+      {walking && walkPath && walkStep && (
+        <WalkOverlay
+          path={walkPath}
+          stepIndex={walking.stepIndex}
+          step={walkStep}
+          rects={walkFocusRects}
+          onPrev={() => walkTo(walking.stepIndex - 1)}
+          onNext={() =>
+            walking.stepIndex >= walkPath.steps.length - 1 ? endWalk() : walkTo(walking.stepIndex + 1)
+          }
+          onBranch={branchFromWalk}
+          onLeave={endWalk}
         />
       )}
 
@@ -3442,14 +3850,14 @@ export default function App() {
   );
 }
 
-function BranchCompass({ item, worldToClient, expanded, onStartDrag }) {
+function BranchCompass({ item, worldToClient, expanded, subtle, onStartDrag }) {
   const c = noteCenter(item);
   if (!c) return null;
   const sc = worldToClient(c.x, c.y);
   const r = expanded ? 68 : 46;
   return (
     <div
-      className={"branch-compass" + (expanded ? " expanded" : "")}
+      className={"branch-compass" + (expanded ? " expanded" : "") + (subtle ? " subtle" : "")}
       style={{ left: sc.x, top: sc.y }}
       onPointerDown={(e) => e.stopPropagation()}
     >
@@ -3470,6 +3878,208 @@ function BranchCompass({ item, worldToClient, expanded, onStartDrag }) {
           </button>
         );
       })}
+    </div>
+  );
+}
+
+function PathRecorderBar({ recording, selectionCount, onVerb, onRemoveStep, onCaptionStep, onFinish, onDiscard }) {
+  const [caption, setCaption] = useState("");
+  const [finishing, setFinishing] = useState(false);
+  const [title, setTitle] = useState("");
+  const steps = recording.steps || [];
+
+  if (finishing) {
+    return (
+      <div className="path-recorder" onPointerDown={(e) => e.stopPropagation()}>
+        <span className="rec-dot done" />
+        <input
+          className="rec-title-input"
+          autoFocus
+          placeholder="name this path — what does it teach someone to see?"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onFinish(title);
+            if (e.key === "Escape") setFinishing(false);
+          }}
+        />
+        <button className="rec-btn primary" onClick={() => onFinish(title)}>
+          save path
+        </button>
+        <button className="rec-btn" onClick={() => setFinishing(false)}>
+          back
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="path-recorder" onPointerDown={(e) => e.stopPropagation()}>
+      <span className="rec-dot" />
+      <span className="rec-label">
+        {recording.branchOf ? "branching" : "recording"} · {steps.length} step{steps.length === 1 ? "" : "s"}
+      </span>
+      {steps.length > 0 && (
+        <div className="rec-steps">
+          {steps.map((s, i) => (
+            <button
+              key={s.id}
+              className="rec-step-chip"
+              title={`${pathVerb(s.kind).label}${s.caption ? ` — ${s.caption}` : ""} · click to remove`}
+              onClick={() => onRemoveStep(s.id)}
+            >
+              {pathVerb(s.kind).glyph}
+              <span className="rec-step-n">{i + 1}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <span className="rec-sep" />
+      <input
+        className="rec-caption"
+        placeholder="say what to notice… (optional)"
+        value={caption}
+        onChange={(e) => setCaption(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && caption.trim() && steps.length) {
+            onCaptionStep(steps[steps.length - 1].id, { caption: caption.trim() });
+            setCaption("");
+          }
+        }}
+      />
+      <div className="rec-verbs" title={selectionCount ? "" : "select something on the canvas first"}>
+        {PATH_VERBS.map((v) => (
+          <button
+            key={v.id}
+            className="rec-verb"
+            disabled={!selectionCount}
+            title={v.hint}
+            onClick={() => {
+              onVerb(v.id, caption);
+              setCaption("");
+            }}
+          >
+            <span className="rec-verb-glyph">{v.glyph}</span>
+            {v.label}
+          </button>
+        ))}
+      </div>
+      <span className="rec-sep" />
+      <button className="rec-btn primary" disabled={!steps.length} onClick={() => setFinishing(true)}>
+        finish
+      </button>
+      <button className="rec-btn danger" onClick={onDiscard} title="discard recording">
+        ×
+      </button>
+    </div>
+  );
+}
+
+function WalkOverlay({ path, stepIndex, step, rects, onPrev, onNext, onBranch, onLeave }) {
+  const verb = pathVerb(step.kind);
+  const last = stepIndex >= path.steps.length - 1;
+  const pad = 16;
+  const missing = rects.length === 0;
+  return (
+    <>
+      <svg className="walk-dim" width="100%" height="100%">
+        <defs>
+          <mask id="walk-holes">
+            <rect x="0" y="0" width="100%" height="100%" fill="white" />
+            {rects.map((r, i) => (
+              <rect
+                key={i}
+                x={r.left - pad}
+                y={r.top - pad}
+                width={r.right - r.left + pad * 2}
+                height={r.bottom - r.top + pad * 2}
+                rx="12"
+                fill="black"
+              />
+            ))}
+          </mask>
+        </defs>
+        <rect x="0" y="0" width="100%" height="100%" fill="rgba(28, 26, 22, 0.5)" mask="url(#walk-holes)" />
+        {rects.map((r, i) => (
+          <rect
+            key={"o" + i}
+            x={r.left - pad}
+            y={r.top - pad}
+            width={r.right - r.left + pad * 2}
+            height={r.bottom - r.top + pad * 2}
+            rx="12"
+            fill="none"
+            stroke="rgba(242, 208, 78, 0.85)"
+            strokeWidth="2"
+            className="walk-hole-ring"
+          />
+        ))}
+      </svg>
+      <div className="walk-footer" onPointerDown={(e) => e.stopPropagation()}>
+        <div className="walk-verb">
+          <span className="walk-glyph">{verb.glyph}</span>
+          <span className="walk-verb-name">{verb.label}</span>
+        </div>
+        <div className="walk-caption">
+          {step.caption || verb.hint}
+          {missing && <span className="walk-missing"> (what was here has changed — that, too, is part of the path)</span>}
+        </div>
+        <div className="walk-progress">
+          {path.steps.map((s, i) => (
+            <span key={s.id} className={"walk-dot" + (i === stepIndex ? " on" : i < stepIndex ? " past" : "")} />
+          ))}
+        </div>
+        <div className="walk-controls">
+          <button className="walk-btn" disabled={stepIndex === 0} onClick={onPrev}>
+            ←
+          </button>
+          <span className="walk-count">
+            {stepIndex + 1} / {path.steps.length}
+          </span>
+          <button className="walk-btn primary" onClick={onNext}>
+            {last ? "arrive" : "→"}
+          </button>
+          <span className="walk-sep" />
+          <button className="walk-btn branch" onClick={onBranch} title="stop here and continue your own way (b)">
+            ⑂ branch here
+          </button>
+          <button className="walk-btn" onClick={onLeave} title="leave the walk (esc)">
+            leave
+          </button>
+        </div>
+        <div className="walk-title">walking · {path.title}</div>
+      </div>
+    </>
+  );
+}
+
+function PathCard({ path, parent, onWalk, onExport, onDelete }) {
+  const verbs = [...new Set((path.steps || []).map((s) => pathVerb(s.kind).glyph))].slice(0, 6);
+  return (
+    <div className="path-card">
+      <div className="path-card-top">
+        <span className="path-card-glyphs">{verbs.join(" ")}</span>
+        <span className="path-card-title">{path.title || "untitled path"}</span>
+      </div>
+      <div className="path-card-meta">
+        {path.steps?.length || 0} steps
+        {path.walks ? ` · walked ${path.walks}×` : ""}
+        {parent && (
+          <span className="path-card-branch"> · ⑂ from “{parent.title}” at step {(path.branchOf?.stepIndex ?? 0) + 1}</span>
+        )}
+        {!parent && path.branchOf && <span className="path-card-branch"> · ⑂ branched</span>}
+      </div>
+      <div className="path-card-actions">
+        <button className="path-card-btn primary" onClick={onWalk}>
+          ▷ walk
+        </button>
+        <button className="path-card-btn" onClick={onExport} title="export as file to send">
+          ↗ send
+        </button>
+        <button className="path-card-btn danger" onClick={onDelete} title="delete path">
+          ×
+        </button>
+      </div>
     </div>
   );
 }
