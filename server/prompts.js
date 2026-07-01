@@ -73,9 +73,11 @@ export function outputContractForFunction(name) {
 ## Recommendation`;
   if (n.includes("memo"))
     return `OUTPUT FORMAT: Executive Summary, Investment Highlights, Business Overview, Market, Risks, Recommendation.`;
-  if (n.includes("split"))
-    return `OUTPUT FORMAT: Separate distinct sub-ideas as paragraphs separated by blank lines.`;
-  if (n.includes("combine"))
+  if (n.includes("differentiate"))
+    return `OUTPUT FORMAT: Separate distinct parts as paragraphs separated by blank lines.`;
+  if (n.includes("merge"))
     return `OUTPUT FORMAT: One unified text combining all parts.`;
+  if (n.includes("compress") || n.includes("expand") || n.includes("ground") || n.includes("generalize"))
+    return `OUTPUT FORMAT: Plain prose only — one coherent result, no section headers.`;
   return `OUTPUT FORMAT: Complete professional work product appropriate to "${name}".`;
 }

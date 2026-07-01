@@ -1015,8 +1015,8 @@ body {
 .highlight-toolbar {
   position: fixed;
   z-index: 45;
-  min-width: 280px;
-  max-width: min(420px, 92vw);
+  min-width: 300px;
+  max-width: min(560px, 94vw);
   padding: 10px 12px;
   background: var(--card);
   border: 1px solid color-mix(in srgb, #c9a227 40%, var(--line-2));
@@ -1072,11 +1072,13 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+  max-height: 160px;
+  overflow-y: auto;
 }
 .highlight-btn {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
-  padding: 6px 8px;
+  padding: 5px 9px;
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.04em;

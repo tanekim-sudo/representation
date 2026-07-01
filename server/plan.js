@@ -6,6 +6,7 @@ import {
   synthesizePrompt,
   outputContractForFunction,
 } from "./prompts.js";
+import { isFastPrimitive, PRIMITIVE_SYSTEM } from "../shared/transform-primitives.js";
 
 /** Flatten any-depth operator tree to ordered leaves (depth-first). */
 export function collectLeaves(op, opMap, out = []) {
@@ -33,6 +34,7 @@ export function opTreeNeedsResearch(op, opMap) {
 }
 
 export function shouldEnableResearch(op, opMap, material) {
+  if (isFastPrimitive(op)) return false;
   if (opTreeNeedsResearch(op, opMap)) return true;
   const sparse = (material || "").trim().length < 500;
   const named = /\b(startup|ai|inc|corp|llc|labs|tech|company|platform|app)\b/i.test(material || "");
@@ -67,6 +69,27 @@ function compileWorkflowSteps(leaves) {
  */
 export function compileExecutionPlan(op, opMap, material) {
   const leaves = collectLeaves(op, opMap);
+
+  if (isFastPrimitive(op)) {
+    const prompt = (op.prompt || "").trim() || `Apply ${op.name} to the input.`;
+    const phases = [
+      {
+        id: "synthesize",
+        label: op.name,
+        timeoutMs: op.estimatedMs || 20000,
+        maxTokens: op.maxTokens || 1200,
+        prompt,
+        system: PRIMITIVE_SYSTEM,
+      },
+    ];
+    return {
+      functionName: op.name,
+      functionDescription: op.description || "",
+      phases,
+      synthesize: { prompt, system: PRIMITIVE_SYSTEM },
+    };
+  }
+
   const sparse = (material || "").trim().length < 500;
   const needsResearch = shouldEnableResearch(op, opMap, material);
 

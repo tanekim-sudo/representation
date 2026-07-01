@@ -1,9 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { jsonrepair } from "jsonrepair";
+import {
+  TRANSFORM_PRIMITIVES,
+  PRIMITIVE_SYSTEM,
+  migrateOperatorStore,
+  isFastPrimitive,
+} from "../shared/transform-primitives.js";
 
 const ITEMS_KEY = "lens.board.items.v1";
 const CAMERA_KEY = "lens.board.camera.v1";
-const OPERATORS_KEY = "lens.board.operators.v1";
+const OPERATORS_KEY = "lens.board.operators.v2";
+const LEGACY_OPERATORS_KEY = "lens.board.operators.v1";
 const STRUCTURES_KEY = "lens.structures.v1";
 const STRUCTSEQ_KEY = "lens.structseq.v1";
 const OLD_NODES_KEY = "lens.savednodes.v1";
@@ -20,78 +27,6 @@ const MARKER_W = 16;
 const HIGHLIGHT_INK = "#F2D04E";
 const HIGHLIGHT_W = 26;
 
-const DEFAULT_OPERATORS = [
-  { id: "op-combine", name: "combine", kind: "prompt", primitive: true,
-    prompt: "Combine the following material into one unified object. Preserve the essence of each part. Return ONLY the combined result." },
-  { id: "op-split", name: "split", kind: "prompt", primitive: true, multi: true,
-    prompt: "Break the material into its distinct underlying sub-ideas or components. Return each as a separate paragraph, one idea per block, no numbering." },
-  { id: "op-sharpen", name: "sharpen", kind: "prompt", primitive: true,
-    prompt: "Rewrite this more sharply and precisely, preserving the meaning. Return only the rewritten text." },
-  { id: "op-expand", name: "expand", kind: "prompt", primitive: true,
-    prompt: "Expand this idea with depth, specifics and a fresh angle. Return only the expanded text." },
-  { id: "op-counter", name: "counter", kind: "prompt", primitive: true,
-    prompt: "Give the single strongest counter-argument or opposing view to this. Return only that argument." },
-  { id: "op-simplify", name: "simplify", kind: "prompt", primitive: true,
-    prompt: "Explain this as simply and concretely as possible, like to a smart friend. Return only the explanation." },
-];
-
-const HIGHLIGHT_SYSTEM = `You are the cognition engine of lens — a whiteboard for thought particles.
-
-Rules:
-- Operate on the HIGHLIGHTED fragment as a discrete thought particle.
-- Never meta-comment. Never say "here is" or explain your process.
-- Deliver substantive content the user can think WITH.
-- Each output should feel like a portal — same deep structure, new surface.`;
-
-const HIGHLIGHT_OPS = {
-  isolate: {
-    label: "isolate",
-    title: "Extract pure thought particle",
-    prompt:
-      "ISOLATE this highlighted fragment as a standalone thought particle. Distill to its essential structure. Return ONLY the isolated particle — sharper, more itself than the original.",
-  },
-  collide: {
-    label: "collide",
-    title: "Force creative collision",
-    prompt:
-      "COLLIDE the highlighted thought particle with the collision material. Force an impact — fracture, fusion, or unexpected third thing. Return ONLY what emerges from the collision.",
-  },
-  synthesize: {
-    label: "synthesize",
-    title: "Unify into one insight",
-    prompt:
-      "SYNTHESIZE the highlight with its surrounding context into one unified insight. Return ONLY the synthesis.",
-  },
-  mutate: {
-    label: "mutate",
-    title: "Extend perceptual field",
-    multi: true,
-    prompt: `EXTEND the perceptual field around this highlight. Do NOT explain. Do NOT summarize the instruction.
-
-Spawn parallel expressions of the SAME underlying structure across different domains — each a portal.
-
-Format each portal as:
-[DOMAIN]
-One vivid paragraph expressing the same deep pattern in that domain.
-
-Include 5–8 portals from wherever the pattern genuinely lives: painting, literature, memory, film, psychology, biology, scripture, history, music, science, etc.
-
-The feeling: I have never run out of places to go.`,
-  },
-  compare: {
-    label: "compare",
-    title: "Find structural parallels",
-    multi: true,
-    prompt: `COMPARE this highlight to structurally parallel expressions elsewhere. Same deep structure, different surfaces.
-
-Format each as:
-[PARALLEL]
-Brief expression of the shared pattern
-
-Include 4–6 parallels from art, literature, history, science, personal life, myth, etc.`,
-  },
-};
-
 const TOOL_GROUPS = [
   { id: "think", label: "think" },
   { id: "canvas", label: "canvas" },
@@ -106,7 +41,7 @@ const CANVAS_TOOLS = {
     group: "think",
     label: "Highlighter",
     icon: "▬",
-    hint: "Draw over text to capture a thought particle — then isolate, mutate, compare…",
+    hint: "Draw over text · same primitives as the toolbox — expand, compress, translate…",
     swatch: HIGHLIGHT_INK,
   },
   select: {
@@ -114,7 +49,7 @@ const CANVAS_TOOLS = {
     group: "canvas",
     label: "Select",
     icon: "↖",
-    hint: "Click or lasso to select. Drag to move. Drop on another idea to combine.",
+    hint: "Click or lasso to select. Drag to move. Drop on another idea to merge.",
   },
   hand: {
     id: "hand",
@@ -489,6 +424,7 @@ function opTreeNeedsResearch(op, opMap) {
 }
 
 function shouldEnableResearch(op, opMap, originalMaterial) {
+  if (isFastPrimitive(op)) return false;
   if (opTreeNeedsResearch(op, opMap)) return true;
   const sparse = (originalMaterial || "").trim().length < 500;
   const named = /\b(startup|ai|inc|corp|llc|labs|tech|company|platform|app)\b/i.test(originalMaterial || "");
@@ -1226,12 +1162,8 @@ export default function App() {
   });
   const [camera, setCamera] = useState(() => load(CAMERA_KEY, { x: 0, y: 0, scale: 1 }));
   const [operators, setOperators] = useState(() => {
-    const s = load(OPERATORS_KEY, null);
-    if (!Array.isArray(s)) return DEFAULT_OPERATORS;
-    const names = new Set(s.map((o) => o.name));
-    const missing = DEFAULT_OPERATORS.filter((o) => o.primitive && !names.has(o.name));
-    const merged = missing.length ? [...s, ...missing] : s;
-    return migrateOperators(merged);
+    const saved = load(OPERATORS_KEY, null) || load(LEGACY_OPERATORS_KEY, null);
+    return migrateOperators(migrateOperatorStore(saved));
   });
   const [structures, setStructures] = useState(() => {
     const saved = load(STRUCTURES_KEY, null);
@@ -1719,49 +1651,67 @@ export default function App() {
     return newIds;
   }
 
-  async function executeOperatorJob(jobId, op, targetIds, atClient) {
+  async function executeOperatorJob(jobId, op, targetIds, atClient, opts = {}) {
     const idSet = new Set(targetIds);
     const itemList = itemsRef.current.filter((it) => idSet.has(it.id));
     patchJob(jobId, { step: "reading material…" });
-    const { text, image } = await gatherMaterialFromItems(itemList);
+    const gathered = await gatherMaterialFromItems(itemList);
+    let text = gathered.text;
+    const { image } = gathered;
     if (!text?.trim() && !image) throw new Error("no readable content");
 
-    const { plan } = await fetchExecutionPlan(op, opMap, text);
-    const estimatedMs = estimatePlanMs(plan);
-    patchJob(jobId, {
-      step: `running · ${op.name}`,
-      startedAt: Date.now(),
-      estimatedMs,
-    });
+    if (opts.highlightQuote) {
+      text = `HIGHLIGHTED:\n"""\n${opts.highlightQuote.trim()}\n"""\n\nFULL TEXT:\n"""\n${(opts.highlightContext || text).trim()}\n"""`;
+    }
 
-    const onProgress = (step) => patchJob(jobId, { step });
+    let out;
+    if (isFastPrimitive(op)) {
+      patchJob(jobId, {
+        step: op.name,
+        startedAt: Date.now(),
+        estimatedMs: op.estimatedMs || 15000,
+      });
+      out = await runClaude(op.prompt, text, {
+        system: PRIMITIVE_SYSTEM,
+        maxTokens: op.maxTokens || 1200,
+      });
+    } else {
+      const { plan } = await fetchExecutionPlan(op, opMap, text);
+      const estimatedMs = estimatePlanMs(plan);
+      patchJob(jobId, {
+        step: `running · ${op.name}`,
+        startedAt: Date.now(),
+        estimatedMs,
+      });
+      const onProgress = (step) => patchJob(jobId, { step });
+      out = await runExecutionOnServer({
+        op,
+        opMap,
+        operators,
+        material: text,
+        image,
+        onProgress,
+        plan,
+      });
+    }
 
-    const out = await runExecutionOnServer({
-      op,
-      opMap,
-      operators,
-      material: text,
-      image,
-      onProgress,
-      plan,
-    });
-
-    // primitive: split → multiple objects
-    if (op.multi || op.name === "split") {
+    if (op.multi || op.name === "differentiate") {
       const parts = out
         .split(/\n{2,}/)
-        .map((p) => p.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim())
+        .map((p) => p.replace(/^\s*(?:\[[^\]]+\]|[-*•]|\d+[.)])\s*/m, "").trim())
         .filter((p) => p.length > 3);
       if (parts.length < 2) {
         const lines = out.split(/\n+/).map((l) => l.trim()).filter((l) => l.length > 3);
         if (lines.length >= 2) {
           const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
+          pushHistory();
           spawnMultipleObjects(lines, targetIds, atWorld);
           return;
         }
-        throw new Error("split produced only one part");
+        throw new Error(`${op.name} produced only one part`);
       }
       const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
+      pushHistory();
       spawnMultipleObjects(parts, targetIds, atWorld);
       return;
     }
@@ -1779,8 +1729,8 @@ export default function App() {
       showToast("drop onto an idea");
       return;
     }
-    if (op.name === "combine" && ids.length < 2) {
-      showToast("combine: drag one idea onto another, or lasso-select 2+");
+    if ((op.needsSelection >= 2 || op.name === "merge") && ids.length < 2) {
+      showToast("merge: select 2+ ideas, or highlight with another selected");
       return;
     }
     setSelection(ids);
@@ -1792,9 +1742,9 @@ export default function App() {
       step: "starting…",
       progress: 0,
       startedAt: Date.now(),
-      estimatedMs: 90000,
+      estimatedMs: isFastPrimitive(op) ? op.estimatedMs || 15000 : 90000,
     });
-    executeOperatorJob(jobId, op, ids, atClient)
+    executeOperatorJob(jobId, op, ids, atClient, opts)
       .then(() => finishJob(jobId, "done", `done · ${op.name}`))
       .catch((err) => {
         finishJob(jobId, "error", err.message || "failed");
@@ -2054,19 +2004,14 @@ export default function App() {
   }
 
   const topFunctions = operators.filter((o) => o.top);
-  const primitives = operators.filter((o) => !o.role && !o.top && (o.primitive || ["combine", "split"].includes(o.name)));
-  const basics = operators.filter((o) => !o.role && !o.top && !o.primitive && !["combine", "split"].includes(o.name));
-  const selectionQuickOps = useMemo(() => {
-    const seen = new Set();
-    const out = [];
-    for (const op of [...topFunctions, ...primitives, ...basics]) {
-      if (seen.has(op.id)) continue;
-      seen.add(op.id);
-      out.push(op);
-      if (out.length >= 8) break;
-    }
-    return out;
-  }, [operators, topFunctions, primitives, basics]);
+  const primitives = useMemo(() => {
+    const byName = Object.fromEntries(
+      operators.filter((o) => o.primitive && !o.role && !o.top).map((o) => [o.name, o])
+    );
+    return TRANSFORM_PRIMITIVES.map((t) => byName[t.name] || t);
+  }, [operators]);
+  const basics = operators.filter((o) => !o.role && !o.top && !o.primitive);
+  const selectionQuickOps = primitives;
 
   function plantStarterThought() {
     pushHistory();
@@ -2357,75 +2302,33 @@ export default function App() {
     spawnNewObject(out, sourceIds, atWorld);
   }
 
-  async function runHighlightAction(opKey, hl) {
-    const op = HIGHLIGHT_OPS[opKey];
-    if (!op) return;
-    const collideIds = selRef.current.filter((id) => id !== hl.itemId);
-    let collideText = "";
-    if (opKey === "collide" && collideIds.length) {
-      collideText = itemsRef.current
-        .filter((it) => collideIds.includes(it.id) && it.type === "text" && it.text?.trim())
-        .map((it) => it.text.trim())
-        .join("\n\n");
+  function runHighlightPrimitive(op, hl) {
+    if (op.needsSelection >= 2) {
+      const others = selRef.current.filter((id) => id !== hl.itemId);
+      if (!others.length) {
+        showToast("select another idea first, then highlight for merge");
+        return;
+      }
     }
-    let prompt = op.prompt;
-    if (opKey === "collide" && collideText) {
-      prompt += `\n\nCOLLISION MATERIAL:\n"""\n${collideText}\n"""`;
-    } else if (opKey === "collide") {
-      prompt += `\n\nCOLLISION MATERIAL: the surrounding context — force it against the full parent text.`;
-    }
-    const material = `HIGHLIGHTED THOUGHT PARTICLE:\n"""\n${hl.quote}\n"""\n\nFULL CONTEXT:\n"""\n${hl.context}\n"""`;
-    return runClaude(prompt, material, { system: HIGHLIGHT_SYSTEM, maxTokens: 4096 });
-  }
-
-  async function executeHighlightOp(opKey, hl) {
-    const op = HIGHLIGHT_OPS[opKey];
-    const jobId = pushJob({
-      id: uid(),
-      label: `✦ ${op.label}`,
-      type: "highlight",
-      status: "running",
-      step: op.title,
-      startedAt: Date.now(),
-      estimatedMs: op.multi ? 75000 : 45000,
-    });
     window.getSelection()?.removeAllRanges();
     removeHighlightStroke(hl.strokeId);
     setHighlight(null);
-
-    try {
-      const out = await runHighlightAction(opKey, hl);
-      if (!out?.trim()) throw new Error("empty result");
-
-      const cx = hl.rect.left + hl.rect.width / 2;
-      const cy = hl.rect.bottom + 12;
-      const atWorld = clientToWorld(cx, cy);
-
-      if (op.multi) {
-        const portals = parseHighlightPortals(out);
-        pushHistory();
-        if (portals.length >= 2) {
-          spawnPortalObjects(portals, [hl.itemId], atWorld);
-        } else if (portals.length === 1) {
-          spawnNewObject(portalDisplayText(portals[0]), [hl.itemId], atWorld);
-        } else {
-          spawnNewObject(out, [hl.itemId], atWorld);
-        }
-      } else {
-        pushHistory();
-        spawnNewObject(out, [hl.itemId], atWorld);
-      }
-      finishJob(jobId, "done", `✦ ${op.label}`);
-    } catch (err) {
-      finishJob(jobId, "error", err.message || "failed");
-      showToast(err.message || "highlight failed");
-    }
+    const ids =
+      op.needsSelection >= 2
+        ? [hl.itemId, ...selRef.current.filter((id) => id !== hl.itemId)]
+        : [hl.itemId];
+    const atClient = { x: hl.rect.left + hl.rect.width / 2, y: hl.rect.bottom + 12 };
+    runOperator(op, ids, {
+      atClient,
+      highlightQuote: hl.quote,
+      highlightContext: hl.context,
+    });
   }
 
   async function combineItemsByDrag(draggedIds, targetIds) {
     const ids = [...new Set([...draggedIds, ...targetIds])];
-    const combineOp = operators.find((o) => o.name === "combine" && !o.role) || DEFAULT_OPERATORS[0];
-    runOperator(combineOp, ids, {});
+    const mergeOp = operators.find((o) => o.name === "merge" && o.primitive) || TRANSFORM_PRIMITIVES.find((o) => o.name === "merge");
+    runOperator(mergeOp, ids, {});
   }
   combineRef.current = combineItemsByDrag;
 
@@ -2664,7 +2567,7 @@ export default function App() {
         )}
         <JobPanel jobs={jobs} onDismiss={(id) => setJobs((j) => j.filter((x) => x.id !== id))} />
         {railTab === "functions" && (
-          <div className="rail-hint">drag onto canvas · combine by dragging ideas together</div>
+          <div className="rail-hint">drag onto canvas · merge by dragging ideas together</div>
         )}
         {railTab === "structures" && (
           <div className="rail-hint">drag structure onto canvas to plant</div>
@@ -2892,8 +2795,9 @@ export default function App() {
       {highlight && !editing && (
         <HighlightToolbar
           highlight={highlight}
-          collideReady={selection.filter((id) => id !== highlight.itemId).length > 0}
-          onOp={(opKey) => executeHighlightOp(opKey, highlight)}
+          primitives={primitives}
+          mergeReady={selection.filter((id) => id !== highlight.itemId).length > 0}
+          onOp={(op) => runHighlightPrimitive(op, highlight)}
           onDismiss={() => {
             window.getSelection()?.removeAllRanges();
             removeHighlightStroke(highlight.strokeId);
@@ -3074,13 +2978,13 @@ function CanvasHud({ tool, selectionCount, imageArmed }) {
   if (imageArmed && tool === "image") {
     hint = "Click on the canvas to place your image";
   } else if (tool === "highlight" && selectionCount > 1) {
-    hint = `${selectionCount} ideas selected · draw over text · collide fuses with the other selection`;
+    hint = `${selectionCount} ideas selected · highlight text · merge fuses with the other selection`;
   } else if (selectionCount >= 2 && tool === "select") {
-    hint = `${selectionCount} selected · selection menu → sameness or combine · drag to move`;
+    hint = `${selectionCount} selected · selection menu → sameness or merge · drag to move`;
   } else if (selectionCount > 0 && tool === "select") {
-    hint = `${selectionCount} selected · drag to move · drop on another idea to combine`;
+    hint = `${selectionCount} selected · drag to move · drop on another idea to merge`;
   } else if (tool === "highlight") {
-    hint = "Draw over text on the canvas · cognition toolbar opens on the passage";
+    hint = "Draw over text · pick a primitive — same operators as the toolbox";
   }
 
   return (
@@ -3163,7 +3067,7 @@ function InputDeck({ tool, imageArmed, canUndo, canRedo, onSelectTool, onPickIma
   );
 }
 
-function HighlightToolbar({ highlight, collideReady, onOp, onDismiss }) {
+function HighlightToolbar({ highlight, primitives, mergeReady, onOp, onDismiss }) {
   const cx = highlight.rect.left + highlight.rect.width / 2;
   const above = highlight.rect.top > 100;
   const style = {
@@ -3184,21 +3088,21 @@ function HighlightToolbar({ highlight, collideReady, onOp, onDismiss }) {
         </button>
       </div>
       <div className="highlight-actions">
-        {Object.entries(HIGHLIGHT_OPS).map(([key, op]) => {
-          const disabled = key === "collide" && !collideReady;
+        {primitives.map((op) => {
+          const disabled = op.needsSelection >= 2 && !mergeReady;
           return (
             <button
-              key={key}
+              key={op.id}
               className="highlight-btn"
               disabled={disabled}
               title={
                 disabled
-                  ? "Select another idea first, then highlight text to collide"
-                  : op.title + (key === "collide" && collideReady ? " · 2 objects selected" : "")
+                  ? "Select another idea first, then highlight for merge"
+                  : op.description || op.name
               }
-              onClick={() => !disabled && onOp(key)}
+              onClick={() => !disabled && onOp(op)}
             >
-              {op.label}
+              {op.name}
             </button>
           );
         })}
