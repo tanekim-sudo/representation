@@ -7,6 +7,7 @@ import {
   estimatePrimitiveMs,
 } from "../shared/transform-primitives.js";
 import { scaleEta, ETA } from "../shared/eta.js";
+import { phaseClientAbortMs } from "../shared/phase-timeouts.js";
 
 const ITEMS_KEY = "lens.board.items.v1";
 const CAMERA_KEY = "lens.board.camera.v1";
@@ -19,6 +20,7 @@ const ARTIFACT_KEY = "lens.artifact.v1";
 const OLD_SEEDS_KEY = "lens.seeds.v2";
 const OP_MIME = "application/lens-op";
 const STRUCT_MIME = "application/lens-structure";
+const SEL_MIME = "application/lens-selection";
 const RAIL_W = 280;
 const COMBINE_THRESHOLD = 14; // px moved before drop-on-item triggers combine
 
@@ -374,31 +376,6 @@ Escape quotes and newlines inside all string values. No markdown fences.`;
   }
 }
 
-// expand an existing operator subtree with more layers via Claude
-async function expandOperatorSubtree(op, opMap, operators) {
-  const current = serializeTree(op, opMap);
-  const prompt = `Expand this function with MORE sub-layers of abstraction. Add deeper decomposition where steps still bundle multiple operations. Go at least 2 layers deeper. Keep ONE-word names at every level.
-
-CURRENT:
-${current}
-
-Return ONLY JSON for the COMPLETE expanded function (same shape):
-{"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}
-
-Escape quotes and newlines inside strings. No markdown fences.`;
-  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 8000 });
-  try {
-    return parseJSON(out);
-  } catch {
-    const retry = await runClaude(
-      `${prompt}\n\nPrevious reply was invalid JSON. Return ONLY one minified JSON object.`,
-      "",
-      { system: librarySystem(operators, opMap), maxTokens: 8000 }
-    );
-    return parseJSON(retry);
-  }
-}
-
 // flatten a decomposition tree into flat operators; returns the root id
 function materializeTree(node, role, top, out) {
   const id = uid();
@@ -454,6 +431,24 @@ function serializeTree(node, opMap, depth = 0) {
     for (const sid of node.steps) lines.push(serializeTree(opMap[sid], opMap, depth + 1));
   }
   return lines.filter(Boolean).join("\n");
+}
+
+function opToJsonTree(op, opMap) {
+  if (!op) return null;
+  const base = { name: op.name || "function", description: op.description || "" };
+  if (op.kind === "pipeline" && op.steps?.length) {
+    return {
+      ...base,
+      steps: op.steps.map((id) => opToJsonTree(opMap[id], opMap)).filter(Boolean),
+    };
+  }
+  return { ...base, prompt: op.prompt || "" };
+}
+
+function collectDraftOps(rootOp, opMap) {
+  if (!rootOp) return [];
+  const ids = collectSubtreeIds(rootOp.id, opMap);
+  return [...ids].map((id) => ({ ...opMap[id] }));
 }
 
 function collectSubtreeIds(rootId, opMap) {
@@ -1165,7 +1160,7 @@ async function runExecutionOnServer({ op, opMap, operators, material, image, onP
 
   for (let i = 0; i < phases.length; i++) {
     const phase = phases[i];
-    const timeoutMs = (phase.timeoutMs || 55000) + 8000;
+    const timeoutMs = phaseClientAbortMs(phase);
     onProgress?.(`${phase.label} (${i + 1}/${phases.length})`);
 
     const controller = new AbortController();
@@ -1218,7 +1213,7 @@ async function runExecutionOnServer({ op, opMap, operators, material, image, onP
 async function runClaude(prompt, text, opts = {}) {
   const { image = null, system = null, maxTokens = null, research = false } = opts;
   const controller = new AbortController();
-  const timeoutMs = 95000;
+  const timeoutMs = phaseClientAbortMs({ timeoutMs: 180000 });
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch("/api/run", {
@@ -1310,6 +1305,7 @@ export default function App() {
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   const [railTab, setRailTab] = useState("functions"); // functions | structures
+  const [railDropOver, setRailDropOver] = useState(false);
   const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
 
   const viewportRef = useRef(null);
@@ -1941,32 +1937,7 @@ export default function App() {
     runOperator(op, ids, { atClient });
   }
 
-  async function expandFunction(op) {
-    const jobId = pushJob({ id: uid(), label: `expand · ${op.name}`, type: "expand", status: "running", step: "expanding…", startedAt: Date.now(), estimatedMs: ETA.expandFunction });
-    try {
-      const tree = await expandOperatorSubtree(op, opMap, operators);
-      const { rootId, ops } = treeToOperators(tree, { role: op.role || null, top: !!op.top });
-      setOperators((arr) => {
-        const map = Object.fromEntries(arr.map((o) => [o.id, o]));
-        const removeIds = collectSubtreeIds(op.id, map);
-        let next = arr.filter((o) => !removeIds.has(o.id));
-        next = next.map((o) => {
-          if (o.kind === "pipeline" && o.steps?.includes(op.id)) {
-            return { ...o, steps: o.steps.map((sid) => (sid === op.id ? rootId : sid)) };
-          }
-          return o;
-        });
-        return [...next, ...ops];
-      });
-      setExpanded((e) => ({ ...e, [rootId]: true }));
-      finishJob(jobId, "done", "expanded");
-    } catch (err) {
-      finishJob(jobId, "error", err.message || "failed");
-      showToast(err.message || "could not expand");
-    }
-  }
-
-  // ---- onboarding: build a whole toolbox for a role ----
+  // ---- saved idea structures ----
   async function runOnboarding(role) {
     localStorage.setItem(ONBOARDED_KEY, "1");
     setOnboard(null);
@@ -2074,14 +2045,18 @@ export default function App() {
   }
 
   // ---- saved idea structures ----
-  function captureSelectionAsStructure(extra = {}) {
-    const ids = new Set(selRef.current);
-    const sel = itemsRef.current.filter((it) => ids.has(it.id));
-    if (!sel.length) {
+  function saveSelectionByIds(ids, extra = {}) {
+    if (!ids?.length) {
       showToast("select material to save");
       return null;
     }
-    const bb = selectionWorldBBox();
+    const idSet = new Set(ids);
+    const sel = itemsRef.current.filter((it) => idSet.has(it.id));
+    if (!sel.length) {
+      showToast("nothing to save");
+      return null;
+    }
+    const bb = selectionWorldBBoxForIds(ids);
     const anchor = bb ? { x: bb.minx, y: bb.miny } : viewportCenterWorld();
     const relativeItems = sel.map((it) => {
       const base = { ...it, id: uid() };
@@ -2106,6 +2081,25 @@ export default function App() {
     setRailTab("structures");
     showToast(extra.toast || "saved structure");
     return struct;
+  }
+
+  function captureSelectionAsStructure(extra = {}) {
+    return saveSelectionByIds(selRef.current, extra);
+  }
+
+  function pinOpToToolbox(opId) {
+    const op = opMap[opId];
+    if (!op) return;
+    if (op.top && topFunctions.some((f) => f.id === opId)) {
+      showToast("already in toolbox");
+      return;
+    }
+    const tree = opToJsonTree(op, opMap);
+    if (!tree) return;
+    const { ops } = treeToOperators(tree, { role: op.role || null, top: true });
+    setOperators((prev) => [...prev, ...ops]);
+    setRailTab("functions");
+    showToast(`saved · ${op.name}`);
   }
 
   function deleteStructure(id) {
@@ -2260,8 +2254,8 @@ export default function App() {
     return [hit.id];
   }
 
-  function selectionWorldBBox() {
-    const ids = new Set(selRef.current);
+  function selectionWorldBBoxForIds(itemIds) {
+    const ids = new Set(itemIds || []);
     const sel = itemsRef.current.filter((it) => ids.has(it.id));
     if (!sel.length) return null;
     let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
@@ -2275,6 +2269,10 @@ export default function App() {
       maxy = Math.max(maxy, b.y);
     }
     return { minx, miny, maxx, maxy };
+  }
+
+  function selectionWorldBBox() {
+    return selectionWorldBBoxForIds(selRef.current);
   }
 
   function eraseAtPointer(cx, cy) {
@@ -2666,18 +2664,43 @@ export default function App() {
     <div className="board-app">
       {/* left rail: draggable transformations */}
       <aside
-        className="board-rail"
+        className={"board-rail" + (railDropOver ? " drop-over" : "")}
         onDragOver={(e) => {
-          if (e.dataTransfer.types.includes(OP_MIME) || e.dataTransfer.types.includes(STRUCT_MIME)) e.preventDefault();
-          if (e.dataTransfer.types.includes(OP_MIME)) {
+          if (
+            e.dataTransfer.types.includes(OP_MIME) ||
+            e.dataTransfer.types.includes(STRUCT_MIME) ||
+            e.dataTransfer.types.includes(SEL_MIME)
+          ) {
+            e.preventDefault();
+            setRailDropOver(true);
             e.dataTransfer.dropEffect = "copy";
           }
         }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget)) setRailDropOver(false);
+        }}
         onDrop={(e) => {
           e.preventDefault();
+          setRailDropOver(false);
+          const selJson = e.dataTransfer.getData(SEL_MIME);
+          if (selJson) {
+            try {
+              saveSelectionByIds(JSON.parse(selJson));
+            } catch {
+              /* ignore bad payload */
+            }
+            return;
+          }
+          const opId = e.dataTransfer.getData(OP_MIME);
+          if (opId) {
+            pinOpToToolbox(opId);
+            return;
+          }
           const structId = e.dataTransfer.getData(STRUCT_MIME);
-          if (structId) applyStructureDrop(structId);
-          // functions compose on cards only — transforms happen on canvas
+          if (structId) {
+            setRailTab("structures");
+            showToast("already saved");
+          }
         }}
       >
         <div className="rail-head">
@@ -2711,7 +2734,6 @@ export default function App() {
                       expanded={expanded}
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
-                      onExpand={expandFunction}
                     />
                   ))}
                 </>
@@ -2727,7 +2749,6 @@ export default function App() {
                       expanded={expanded}
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
-                      onExpand={expandFunction}
                       flat
                     />
                   ))}
@@ -2744,7 +2765,6 @@ export default function App() {
                       expanded={expanded}
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
-                      onExpand={expandFunction}
                       flat
                     />
                   ))}
@@ -2781,10 +2801,10 @@ export default function App() {
         )}
         <JobPanel jobs={jobs} onDismiss={(id) => setJobs((j) => j.filter((x) => x.id !== id))} />
         {railTab === "functions" && (
-          <div className="rail-hint">drag onto canvas · merge by dragging ideas together</div>
+          <div className="rail-hint">drag onto canvas to run · drop here to save</div>
         )}
         {railTab === "structures" && (
-          <div className="rail-hint">drag structure onto canvas to plant</div>
+          <div className="rail-hint">drop selection here to save · drag onto canvas to plant</div>
         )}
       </aside>
 
@@ -2879,7 +2899,8 @@ export default function App() {
                   className={"board-img" + (selection.includes(it.id) ? " sel" : "") + (dropTargetId === it.id ? " drop-target" : "")}
                   src={it.src}
                   style={{ ...itemStyle(it), width: it.w, height: it.h }}
-                  draggable={false}
+                  draggable={selection.includes(it.id)}
+                  onDragStart={(e) => selection.includes(it.id) && startSelectionDrag(e, [it.id])}
                   alt=""
                 />
               ) : (
@@ -2890,6 +2911,7 @@ export default function App() {
                   dropTarget={dropTargetId === it.id}
                   editing={editing === it.id}
                   onCommit={(text) => commitEdit(it.id, text)}
+                  onDragStart={(e) => startSelectionDrag(e, [it.id])}
                 />
               )
             )}
@@ -2904,7 +2926,16 @@ export default function App() {
                 width: selBBox.maxx - selBBox.minx + 20,
                 height: selBBox.maxy - selBBox.miny + 20,
               }}
-            />
+            >
+              <div
+                className="sel-drag"
+                draggable
+                onDragStart={(e) => startSelectionDrag(e, selection)}
+                title="drag to toolbox to save"
+              >
+                ⠿
+              </div>
+            </div>
           )}
         </div>
 
@@ -3090,7 +3121,7 @@ export default function App() {
   );
 }
 
-function BoardText({ item, selected, dropTarget, editing, onCommit }) {
+function BoardText({ item, selected, dropTarget, editing, onCommit, onDragStart }) {
   const ref = useRef(null);
   const seeded = useRef(false);
 
@@ -3147,6 +3178,8 @@ function BoardText({ item, selected, dropTarget, editing, onCommit }) {
       }
       data-item={item.id}
       style={style}
+      draggable={selected}
+      onDragStart={(e) => selected && onDragStart?.(e)}
     >
       {item.text}
     </div>
@@ -3193,6 +3226,12 @@ function ScreenTransformHandles({ bbox, onRotateStart, onResizeStart, onScaleSta
   );
 }
 
+function startSelectionDrag(e, ids) {
+  e.stopPropagation();
+  e.dataTransfer.setData(SEL_MIME, JSON.stringify(ids));
+  e.dataTransfer.effectAllowed = "copy";
+}
+
 function startOpDrag(e, op) {
   e.stopPropagation();
   e.dataTransfer.setData(OP_MIME, op.id);
@@ -3215,7 +3254,7 @@ function CanvasHud({ tool, selectionCount, imageArmed }) {
   } else if (selectionCount >= 2 && tool === "select") {
     hint = `${selectionCount} selected · selection menu → sameness or merge · drag to move`;
   } else if (selectionCount > 0 && tool === "select") {
-    hint = `${selectionCount} selected · drag to move · drop on another idea to merge`;
+    hint = `${selectionCount} selected · drag ⠿ to toolbox to save · drop on canvas to merge`;
   } else if (tool === "highlight") {
     hint = "Text → primitives · scribble erases · closed circle selects inside · ⌫ at cursor";
   }
@@ -3422,7 +3461,7 @@ function JobPanel({ jobs, onDismiss }) {
   );
 }
 
-function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onExpand, flat }) {
+function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, flat }) {
   if (!op) return null;
   const steps = op.kind === "pipeline" && op.steps ? op.steps.map((id) => opMap[id]).filter(Boolean) : [];
   const open = expanded[op.id];
@@ -3447,11 +3486,6 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onExpand, flat
               {open ? "▾" : "▸"}
             </button>
           )}
-          {onExpand && !flat && (
-            <button className="op-card-expand" onClick={() => onExpand(op)} title="expand layers">
-              +
-            </button>
-          )}
           <button className="op-card-edit" onClick={() => onEdit(op)} title="edit">
             ⚙
           </button>
@@ -3460,7 +3494,7 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onExpand, flat
       {open && steps.length > 0 && (
         <div className="op-card-steps">
           {steps.map((step) => (
-            <DraggableStep key={step.id} step={step} opMap={opMap} expanded={expanded} onToggle={onToggle} onEdit={onEdit} onExpand={onExpand} depth={1} />
+            <DraggableStep key={step.id} step={step} opMap={opMap} expanded={expanded} onToggle={onToggle} onEdit={onEdit} depth={1} />
           ))}
         </div>
       )}
@@ -3468,7 +3502,7 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onExpand, flat
   );
 }
 
-function DraggableStep({ step, opMap, expanded, onToggle, onEdit, onExpand, depth }) {
+function DraggableStep({ step, opMap, expanded, onToggle, onEdit, depth }) {
   const sub = step.kind === "pipeline" && step.steps ? step.steps.map((id) => opMap[id]).filter(Boolean) : [];
   const open = expanded[step.id];
   const isLeaf = !sub.length;
@@ -3490,16 +3524,11 @@ function DraggableStep({ step, opMap, expanded, onToggle, onEdit, onExpand, dept
             {open ? "▾" : "▸"}
           </button>
         )}
-        {onExpand && !isLeaf && (
-          <button className="op-step-expand" onClick={() => onExpand(step)} title="expand">
-            +
-          </button>
-        )}
         <button className="op-step-edit" onClick={() => onEdit(step)}>⚙</button>
       </div>
       {open &&
         sub.map((child) => (
-          <DraggableStep key={child.id} step={child} opMap={opMap} expanded={expanded} onToggle={onToggle} onEdit={onEdit} onExpand={onExpand} depth={depth + 1} />
+          <DraggableStep key={child.id} step={child} opMap={opMap} expanded={expanded} onToggle={onToggle} onEdit={onEdit} depth={depth + 1} />
         ))}
     </div>
   );
@@ -3709,73 +3738,128 @@ function Onboarding({ state, onStart, onSkip, onClose }) {
 
 function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveManual, onDelete }) {
   const isCreate = editor.mode === "create";
-  const op = editor.op || null;
-  const isPipeline = op?.kind === "pipeline";
+  const sourceRoot = editor.op || null;
 
-  const [tab, setTab] = useState("describe"); // describe | manual
+  const [draftOps, setDraftOps] = useState(() => (isCreate ? [] : collectDraftOps(sourceRoot, opMap)));
+  const [rootId, setRootId] = useState(() => sourceRoot?.id || null);
+  const [navPath, setNavPath] = useState([]);
+
+  const draftMap = useMemo(() => Object.fromEntries(draftOps.map((o) => [o.id, o])), [draftOps]);
+  const focusId = navPath.length ? navPath[navPath.length - 1] : rootId;
+  const focusOp = focusId ? draftMap[focusId] : null;
+  const rootDraft = rootId ? draftMap[rootId] : null;
+
+  const [name, setName] = useState(focusOp?.name || "");
+  const [description, setDescription] = useState(focusOp?.description || "");
+  const [prompt, setPrompt] = useState(focusOp?.prompt || "");
   const [prose, setProse] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const [preview, setPreview] = useState(null); // Claude JSON tree awaiting save
 
-  const [name, setName] = useState(op?.name || "");
-  const [description, setDescription] = useState(op?.description || "");
-  const [prompt, setPrompt] = useState(op?.prompt || "");
+  useEffect(() => {
+    setName(focusOp?.name || "");
+    setDescription(focusOp?.description || "");
+    setPrompt(focusOp?.prompt || "");
+  }, [focusId]);
 
-  async function runDescribe() {
+  function patchFocus(patch) {
+    if (!focusId) return;
+    setDraftOps((ops) => ops.map((o) => (o.id === focusId ? { ...o, ...patch } : o)));
+  }
+
+  function flushFields() {
+    if (!focusId) return;
+    patchFocus({
+      name: name.trim(),
+      description: description.trim(),
+      prompt: prompt.trim(),
+    });
+  }
+
+  function navigateTo(id) {
+    flushFields();
+    if (id === rootId) {
+      setNavPath([]);
+      return;
+    }
+    const idx = navPath.indexOf(id);
+    if (idx >= 0) setNavPath(navPath.slice(0, idx + 1));
+    else setNavPath([...navPath, id]);
+  }
+
+  function navigateUp() {
+    flushFields();
+    setNavPath((p) => p.slice(0, -1));
+  }
+
+  async function runProse() {
     const instruction = prose.trim();
     if (!instruction) return;
     setBusy(true);
     setError(null);
-    setPreview(null);
     try {
+      flushFields();
       let tree;
-      if (isCreate) {
+      if (isCreate && !rootDraft) {
         tree = await createFunctionFromProse(instruction, operators, opMap);
       } else {
-        tree = await editFunctionWithProse(op, opMap, instruction, operators);
+        const target = focusOp || rootDraft;
+        tree = await editFunctionWithProse(target, draftMap, instruction, operators);
       }
-      setPreview(tree);
-      setName(tree.name || name);
-      setDescription(tree.description || description);
-      if (tree.prompt) setPrompt(tree.prompt);
+      const { rootId: rid, ops } = treeToOperators(tree, {
+        role: rootDraft?.role || sourceRoot?.role || null,
+        top: isCreate ? true : !!sourceRoot?.top,
+      });
+      setDraftOps(ops);
+      setRootId(rid);
+      setNavPath([]);
+      setProse("");
     } catch (err) {
-      setError(err.message || "Could not build that function.");
+      setError(err.message || "Could not apply changes.");
     } finally {
       setBusy(false);
     }
   }
 
-  function acceptPreview() {
-    if (!preview) return;
-    const { ops } = treeToOperators(preview, {
-      role: op?.role || null,
-      top: isCreate ? true : !!op?.top,
-    });
-    onSaveTree(isCreate ? null : op.id, ops);
+  function saveAll() {
+    flushFields();
+    let ops = draftOps;
+    let rid = rootId;
+    if (!rid && name.trim() && prompt.trim()) {
+      rid = uid();
+      ops = [
+        {
+          id: rid,
+          kind: "prompt",
+          name: name.trim(),
+          description: description.trim(),
+          prompt: prompt.trim(),
+          top: true,
+        },
+      ];
+    }
+    const root = ops.find((o) => o.id === rid);
+    if (!rid || !root?.name?.trim()) return;
+    if (root.kind === "prompt" && !root.prompt?.trim()) return;
+    onSaveTree(isCreate ? null : sourceRoot?.id, ops);
   }
 
-  function saveManual() {
-    if (!name.trim()) return;
-    if (isPipeline) {
-      // pipeline metadata only — structure edits go through describe
-      onSaveManual({
-        ...op,
-        name: name.trim(),
-        description: description.trim(),
-      });
-      return;
-    }
-    const id = op?.id || uid();
-    onSaveManual({
-      id,
-      kind: "prompt",
-      name: name.trim(),
-      description: description.trim(),
-      prompt: prompt.trim(),
-      top: isCreate ? true : op?.top,
+  const isPipeline = focusOp?.kind === "pipeline";
+  const steps =
+    isPipeline && focusOp?.steps ? focusOp.steps.map((id) => draftMap[id]).filter(Boolean) : [];
+  const crumbs = [];
+  if (rootDraft) {
+    crumbs.push({ id: rootId, name: rootDraft.name || "function" });
+    navPath.forEach((id) => {
+      const o = draftMap[id];
+      if (o) crumbs.push({ id, name: o.name });
     });
   }
+
+  const canSave =
+    !!rootDraft ||
+    (name.trim() && prompt.trim()) ||
+    (rootId && draftOps.some((o) => o.id === rootId && o.name?.trim()));
 
   return (
     <div className="modal-scrim" onClick={onClose}>
@@ -3787,120 +3871,126 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
           </button>
         </div>
 
-        <div className="fn-tabs">
-          <button className={"fn-tab" + (tab === "describe" ? " on" : "")} onClick={() => setTab("describe")}>
-            describe
-          </button>
-          <button className={"fn-tab" + (tab === "manual" ? " on" : "")} onClick={() => setTab("manual")}>
-            manual
+        <div className="fn-pane">
+          {rootDraft && crumbs.length > 0 && (
+            <nav className="fn-crumb" aria-label="function path">
+              {crumbs.map((c, i) => (
+                <span key={c.id} className="fn-crumb-item">
+                  {i > 0 && <span className="fn-crumb-sep">/</span>}
+                  <button
+                    type="button"
+                    className={"fn-crumb-btn" + (c.id === focusId ? " on" : "")}
+                    onClick={() => navigateTo(c.id)}
+                  >
+                    {c.name}
+                  </button>
+                </span>
+              ))}
+              {navPath.length > 0 && (
+                <button type="button" className="fn-crumb-up" onClick={navigateUp}>
+                  ← back
+                </button>
+              )}
+            </nav>
+          )}
+
+          {!rootDraft && isCreate && (
+            <p className="fn-hint">
+              Describe what this function should do, or fill in the fields below for a simple one-step function.
+            </p>
+          )}
+
+          {rootDraft && (
+            <>
+              {steps.length > 0 && (
+                <div className="fn-blocks-wrap">
+                  <div className="fn-blocks-label">steps</div>
+                  <FunctionBlockNav steps={steps} focusId={focusId} onSelect={navigateTo} />
+                </div>
+              )}
+
+              <label>name</label>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. stress-test thesis"
+              />
+
+              <label>description</label>
+              <input
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="what goes in, what comes out"
+              />
+
+              {!isPipeline && (
+                <>
+                  <label>prompt</label>
+                  <textarea
+                    rows={6}
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    placeholder="Instruction for this step — return only the result."
+                  />
+                </>
+              )}
+            </>
+          )}
+
+          {!rootDraft && isCreate && (
+            <>
+              <label>name</label>
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="function name" />
+              <label>description</label>
+              <input
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="what it does"
+              />
+              <label>prompt</label>
+              <textarea
+                rows={5}
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="Or skip manual fields and describe below with AI."
+              />
+            </>
+          )}
+
+          <label>{rootDraft ? "revise with words" : "describe with words"}</label>
+          <textarea
+            className="fn-prose"
+            rows={3}
+            placeholder={
+              isCreate
+                ? 'e.g. "Extract action items, owners, and deadlines from messy meeting notes"'
+                : 'e.g. "Add a step that checks for contradictions" or "Make the output shorter"'
+            }
+            value={prose}
+            onChange={(e) => setProse(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) runProse();
+            }}
+          />
+
+          {error && <div className="fn-error">{error}</div>}
+
+          <button className="fn-generate" disabled={busy || !prose.trim()} onClick={runProse}>
+            {busy ? (
+              <>
+                <span className="spinner" /> building…
+              </>
+            ) : rootDraft ? (
+              "apply with AI"
+            ) : (
+              "generate with AI"
+            )}
           </button>
         </div>
 
-        {tab === "describe" && (
-          <div className="fn-pane">
-            <p className="fn-hint">
-              {isCreate
-                ? "Describe what you want this function to do in plain English. Claude will design it and break it into sub-functions down to editable primitives."
-                : "Tell Claude what to change — add a step, rewrite a prompt, rename it, make it sharper. It updates the whole function tree."}
-            </p>
-
-            {!isCreate && op && (
-              <div className="fn-current">
-                <div className="fn-current-label">current</div>
-                <pre>{serializeTree(op, opMap)}</pre>
-              </div>
-            )}
-
-            <textarea
-              className="fn-prose"
-              rows={4}
-              autoFocus
-              placeholder={
-                isCreate
-                  ? 'e.g. "Take messy meeting notes and extract action items, owners, and deadlines as a clean list"'
-                  : 'e.g. "Add a step that checks for contradictions" or "Make the final output shorter and more direct"'
-              }
-              value={prose}
-              onChange={(e) => setProse(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) runDescribe();
-              }}
-            />
-
-            {error && <div className="fn-error">{error}</div>}
-
-            <button className="fn-generate" disabled={busy || !prose.trim()} onClick={runDescribe}>
-              {busy ? (
-                <>
-                  <span className="spinner" /> building…
-                </>
-              ) : isCreate ? (
-                "generate function"
-              ) : (
-                "apply changes"
-              )}
-            </button>
-
-            {preview && (
-              <div className="fn-preview">
-                <div className="fn-preview-head">
-                  <span className="fn-preview-label">preview</span>
-                  <span className="fn-preview-name">{preview.name}</span>
-                </div>
-                {preview.description && <p className="fn-preview-desc">{preview.description}</p>}
-                <FunctionPreviewTree node={preview} depth={0} />
-                <div className="fn-preview-actions">
-                  <button className="fn-secondary" onClick={() => setPreview(null)}>
-                    revise
-                  </button>
-                  <button className="fn-primary" onClick={acceptPreview}>
-                    {isCreate ? "add to toolbox" : "save changes"}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {tab === "manual" && (
-          <div className="fn-pane">
-            <label>name</label>
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. stress-test thesis" />
-
-            <label>description</label>
-            <input
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="what goes in, what comes out"
-            />
-
-            {isPipeline && op ? (
-              <>
-                <label>structure</label>
-                <p className="fn-hint small">
-                  This is a composed function. To add, remove, or reorder steps, use the <strong>describe</strong> tab.
-                </p>
-                <div className="fn-tree-readonly">
-                  <FunctionPreviewTreeFromOps root={op} opMap={opMap} depth={0} />
-                </div>
-              </>
-            ) : (
-              <>
-                <label>prompt</label>
-                <textarea
-                  rows={7}
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  placeholder="Precise instruction for Claude: what to do with the input text, and to return only the result."
-                />
-              </>
-            )}
-          </div>
-        )}
-
         <div className="fn-foot">
-          {!isCreate && op && (
-            <button className="fn-del" onClick={() => onDelete(op.id)}>
+          {!isCreate && sourceRoot && (
+            <button className="fn-del" onClick={() => onDelete(sourceRoot.id)}>
               delete
             </button>
           )}
@@ -3908,64 +3998,31 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
           <button className="fn-secondary" onClick={onClose}>
             cancel
           </button>
-          {tab === "manual" && (
-            <button
-              className="fn-primary"
-              disabled={!name.trim() || (!isPipeline && !prompt.trim())}
-              onClick={saveManual}
-            >
-              save
-            </button>
-          )}
+          <button className="fn-primary" disabled={!canSave} onClick={saveAll}>
+            save
+          </button>
         </div>
       </div>
     </div>
   );
 }
 
-// preview tree from Claude JSON (nested steps)
-function FunctionPreviewTree({ node, depth }) {
-  if (!node) return null;
-  const children = node.steps || [];
-  const isLeaf = !children.length;
+function FunctionBlockNav({ steps, focusId, onSelect }) {
+  if (!steps?.length) return null;
   return (
-    <div className="fn-tree-node" style={{ paddingLeft: depth * 16 }}>
-      <div className="fn-tree-row">
-        <span className={"fn-tree-dot" + (isLeaf ? " leaf" : "")} />
-        <span className="fn-tree-name">{node.name}</span>
-        {node.description && <span className="fn-tree-desc">{node.description}</span>}
-      </div>
-      {node.prompt && (
-        <div className="fn-tree-prompt" style={{ paddingLeft: 16 + depth * 16 }}>
-          {node.prompt}
-        </div>
-      )}
-      {children.map((child, i) => (
-        <FunctionPreviewTree key={i} node={child} depth={depth + 1} />
-      ))}
-    </div>
-  );
-}
-
-// preview tree from flat opMap (saved operators)
-function FunctionPreviewTreeFromOps({ root, opMap, depth }) {
-  if (!root) return null;
-  const children = root.kind === "pipeline" && root.steps ? root.steps.map((id) => opMap[id]).filter(Boolean) : [];
-  const isLeaf = root.kind === "prompt";
-  return (
-    <div className="fn-tree-node" style={{ paddingLeft: depth * 16 }}>
-      <div className="fn-tree-row">
-        <span className={"fn-tree-dot" + (isLeaf ? " leaf" : "")} />
-        <span className="fn-tree-name">{root.name}</span>
-        {root.description && <span className="fn-tree-desc">{root.description}</span>}
-      </div>
-      {root.prompt && (
-        <div className="fn-tree-prompt" style={{ paddingLeft: 16 + depth * 16 }}>
-          {root.prompt}
-        </div>
-      )}
-      {children.map((child) => (
-        <FunctionPreviewTreeFromOps key={child.id} root={child} opMap={opMap} depth={depth + 1} />
+    <div className="fn-blocks">
+      {steps.map((step, i) => (
+        <React.Fragment key={step.id}>
+          {i > 0 && <span className="fn-block-sep">→</span>}
+          <button
+            type="button"
+            className={"fn-block" + (focusId === step.id ? " on" : "") + (step.kind === "pipeline" ? " composite" : " leaf")}
+            onClick={() => onSelect(step.id)}
+            title={step.description || step.name}
+          >
+            {step.name}
+          </button>
+        </React.Fragment>
       ))}
     </div>
   );

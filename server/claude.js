@@ -65,7 +65,7 @@ export async function runPrompt({
   maxTokens = null,
   research = false,
   maxSearchUses = 5,
-  timeoutMs = 60000,
+  timeoutMs = 180000,
 }) {
   const anthropic = getClient();
   if (!anthropic) {

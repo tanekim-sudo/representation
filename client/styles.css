@@ -48,6 +48,10 @@ body {
   z-index: 40;
   height: 100%;
 }
+.board-rail.drop-over {
+  background: rgba(242, 208, 78, 0.12);
+  box-shadow: inset 0 0 0 2px rgba(242, 208, 78, 0.55);
+}
 
 .rail-tabs {
   display: flex;
@@ -642,6 +646,27 @@ body {
   border: 1px dashed var(--line-2);
   border-radius: 4px;
   pointer-events: none;
+}
+.sel-drag {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--faint);
+  font-size: 12px;
+  cursor: grab;
+  pointer-events: auto;
+  box-shadow: 0 2px 8px rgba(32, 32, 29, 0.08);
+}
+.sel-drag:active {
+  cursor: grabbing;
 }
 
 /* live lasso (viewport-local) */
@@ -1863,6 +1888,96 @@ body {
   margin: 3px 0 8px 14px;
   padding-left: 10px;
   border-left: 2px solid var(--line);
+}
+.fn-crumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin-bottom: 14px;
+  padding: 8px 10px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.fn-crumb-btn {
+  border: none;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 13px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--serif);
+}
+.fn-crumb-btn.on {
+  color: var(--ink);
+  font-weight: 500;
+}
+.fn-crumb-btn:hover {
+  color: var(--ink);
+  background: rgba(32, 32, 29, 0.06);
+}
+.fn-crumb-sep {
+  color: var(--faint);
+  font-size: 12px;
+}
+.fn-crumb-up {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.fn-crumb-up:hover {
+  color: var(--ink);
+}
+.fn-blocks-wrap {
+  margin-bottom: 12px;
+}
+.fn-blocks-label {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 8px;
+}
+.fn-blocks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.fn-block {
+  border: 1px solid var(--line-2);
+  background: var(--card);
+  color: var(--ink);
+  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: 9px;
+  cursor: pointer;
+  font-weight: 500;
+}
+.fn-block.composite {
+  border-style: dashed;
+}
+.fn-block.leaf {
+  border-color: var(--ink);
+}
+.fn-block.on {
+  background: var(--ink);
+  color: var(--card);
+  border-color: var(--ink);
+}
+.fn-block:hover:not(.on) {
+  border-color: var(--ink);
+}
+.fn-block-sep {
+  color: var(--faint);
+  font-size: 12px;
+  user-select: none;
 }
 .fn-foot {
   display: flex;

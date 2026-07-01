@@ -12,6 +12,7 @@ import {
   primitiveNeedsResearch,
   primitiveNeedsResolve,
 } from "../shared/transform-primitives.js";
+import { PHASE_TIMEOUT } from "../shared/phase-timeouts.js";
 
 /** Flatten any-depth operator tree to ordered leaves (depth-first). */
 export function collectLeaves(op, opMap, out = []) {
@@ -84,7 +85,7 @@ function compilePrimitivePlan(op, material) {
     phases.push({
       id: "resolve",
       label: "identify subject",
-      timeoutMs: 18000,
+      timeoutMs: PHASE_TIMEOUT.resolve,
       maxTokens: 1024,
       prompt: RESOLVE_PROMPT,
     });
@@ -95,7 +96,7 @@ function compilePrimitivePlan(op, material) {
     phases.push({
       id: "research",
       label: "research",
-      timeoutMs: 42000,
+      timeoutMs: PHASE_TIMEOUT.research,
       maxTokens: 2048,
       research: true,
       maxSearchUses: 2,
@@ -107,7 +108,7 @@ function compilePrimitivePlan(op, material) {
   phases.push({
     id: "synthesize",
     label: op.name,
-    timeoutMs: op.estimatedMs || 22000,
+    timeoutMs: op.estimatedMs ? Math.max(op.estimatedMs * 4, PHASE_TIMEOUT.synthesizePrimitive) : PHASE_TIMEOUT.synthesizePrimitive,
     maxTokens: op.maxTokens || 1400,
     prompt,
     system: PRIMITIVE_SYSTEM,
@@ -155,7 +156,7 @@ export function compileExecutionPlan(op, opMap, material) {
     phases.push({
       id: "resolve",
       label: "identify subject",
-      timeoutMs: 18000,
+      timeoutMs: PHASE_TIMEOUT.resolve,
       maxTokens: 1024,
       prompt: resolvePrompt,
     });
@@ -167,7 +168,7 @@ export function compileExecutionPlan(op, opMap, material) {
     phases.push({
       id: "research",
       label: "web research",
-      timeoutMs: 48000,
+      timeoutMs: PHASE_TIMEOUT.research,
       maxTokens: 3072,
       research: true,
       maxSearchUses: 3,
@@ -187,7 +188,7 @@ export function compileExecutionPlan(op, opMap, material) {
   phases.push({
     id: "synthesize",
     label: op?.name || "deliver",
-    timeoutMs: 55000,
+    timeoutMs: PHASE_TIMEOUT.synthesizeComposite,
     maxTokens: 6144,
     prompt: synthPrompt,
     system: SYNTHESIZE_SYSTEM,
