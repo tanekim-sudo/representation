@@ -18,38 +18,26 @@ TYPE: [startup | company | person | idea | text | other]
 SEARCH_TERMS: [2-4 quoted search queries to find this entity online, e.g. "Bobyard AI startup", "Bobyard construction funding"]
 NOTES: [one line — what the user likely wants analyzed]`;
 
-export const RESEARCH_SYSTEM = `You are the research arm of lens — a whiteboard where sparse notes become professional deliverables.
+export const RESEARCH_SYSTEM = `You are the research arm of lens.
 ${LENS_SUBJECT_RULE}
 
-You MUST use web_search. Run multiple searches using SEARCH_TERMS and entity name variants.
-Return structured facts with source URLs. Never skip searching. Never say you cannot find information without searching first.`;
+Use web_search 2–3 times with the SEARCH_TERMS, then STOP and return facts. Be concise — bullet facts only, no essays.`;
 
 export function researchPrompt(entity, searchTerms, originalMaterial) {
-  return `Research this subject thoroughly for an investor/professional deliverable.
+  return `Quick research for a professional deliverable. Use 2–3 web searches only.
 
-ORIGINAL WHITEBOARD INPUT:
-"""
-${originalMaterial}
-"""
-
+INPUT: """${originalMaterial}"""
 ENTITY: ${entity}
-SEARCH_TERMS (use these with web_search):
-${searchTerms.map((t) => `- ${t}`).join("\n")}
+SEARCH (pick 2–3): ${searchTerms.slice(0, 3).join(" | ")}
 
-Return ONLY:
-ENTITY: [confirmed official name]
-WEBSITE: [url]
-PRODUCT: [what they build/sell]
-MARKET: [industry, customers]
-TRACTION: [metrics, customers, growth signals]
-FUNDING: [rounds, amounts, investors, dates]
-TEAM: [founders, key people]
-COMPETITORS: [named alternatives]
-RISKS: [2-3 factual risks]
-RECENT: [latest news with dates]
-SOURCES:
-- [url]
-(list every source used)`;
+Return ONLY these lines (brief):
+ENTITY:
+WEBSITE:
+PRODUCT:
+FUNDING:
+TEAM:
+TRACTION:
+SOURCES: (urls)`;
 }
 
 export const SYNTHESIZE_SYSTEM = `You are the synthesis engine of lens — you produce the final professional deliverable.

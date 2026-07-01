@@ -105,10 +105,10 @@ export function compileExecutionPlan(op, opMap, material) {
     phases.push({
       id: "research",
       label: "web research",
-      timeoutMs: 55000,
-      maxTokens: 4096,
+      timeoutMs: 48000,
+      maxTokens: 3072,
       research: true,
-      maxSearchUses: 6,
+      maxSearchUses: 3,
       system: RESEARCH_SYSTEM,
       researchLeafPrompt,
     });
@@ -125,8 +125,8 @@ export function compileExecutionPlan(op, opMap, material) {
   phases.push({
     id: "synthesize",
     label: op?.name || "deliver",
-    timeoutMs: 90000,
-    maxTokens: 8192,
+    timeoutMs: 55000,
+    maxTokens: 6144,
     prompt: synthPrompt,
     system: SYNTHESIZE_SYSTEM,
   });

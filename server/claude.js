@@ -30,14 +30,6 @@ function extractText(message) {
   return parts.join("\n").trim();
 }
 
-function countWebSearches(message) {
-  let n = 0;
-  for (const block of message.content || []) {
-    if (block.type === "server_tool_use" && block.name === "web_search") n++;
-  }
-  return n;
-}
-
 function imageBlock(image) {
   if (!image || typeof image !== "string") return null;
   const m = image.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]*)$/);
@@ -106,23 +98,7 @@ export async function runPrompt({
     };
     if (research) params.tools = [WEB_SEARCH_TOOL(maxSearchUses)];
 
-    let message = await withTimeout(anthropic.messages.create(params), timeoutMs);
-
-    if (research && countWebSearches(message) === 0) {
-      params.messages = [
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: `Use web_search now on the entity in the material, then answer:\n\n${prompt}\n\n---\n${text || ""}`,
-            },
-          ],
-        },
-      ];
-      message = await withTimeout(anthropic.messages.create(params), timeoutMs);
-    }
-
+    const message = await withTimeout(anthropic.messages.create(params), timeoutMs);
     return extractText(message);
   };
 

@@ -762,8 +762,8 @@ function structurePreview(struct) {
 }
 
 function parseApiResponse(res, raw) {
-  if (res.status === 504 || /FUNCTION_INVOCATION_TIMEOUT|timeout/i.test(raw)) {
-    throw new Error("Research timed out on the server. Try again in a moment.");
+  if (res.status === 504 || /FUNCTION_INVOCATION_TIMEOUT|timed out/i.test(raw)) {
+    throw new Error("Phase timed out on the server — continuing if possible.");
   }
   let data;
   try {
@@ -802,7 +802,7 @@ async function runExecutionOnServer({ op, opMap, operators, material, image, onP
 
   for (let i = 0; i < phases.length; i++) {
     const phase = phases[i];
-    const timeoutMs = (phase.timeoutMs || 60000) + 4000;
+    const timeoutMs = (phase.timeoutMs || 55000) + 8000;
     onProgress?.(`${phase.label} (${i + 1}/${phases.length})`, (i + 0.15) / phases.length);
 
     const controller = new AbortController();
@@ -835,6 +835,12 @@ async function runExecutionOnServer({ op, opMap, operators, material, image, onP
       }
       onProgress?.(`${phase.label} ✓`, (i + 1) / phases.length);
     } catch (err) {
+      if (phase.id === "research") {
+        context.research = "";
+        context.researchFallback = true;
+        onProgress?.("research skipped — synthesizing", (i + 1) / phases.length);
+        continue;
+      }
       if (err.name === "AbortError") {
         throw new Error(`${phase.label} timed out — try again.`);
       }

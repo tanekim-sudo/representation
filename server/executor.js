@@ -62,6 +62,11 @@ export async function runPhase(phaseId, plan, context, { operators, op, image, o
       if (tops.length) sys += `\n\nUser toolbox: ${tops.join(", ")}`;
     }
 
+    const fallbackSearch = !!context.researchFallback && !context.research?.trim();
+    if (fallbackSearch) {
+      sys += `\n\nWeb search available: run 1–2 quick searches on the entity, then write the deliverable.`;
+    }
+
     const { outputs } = await runPrompt({
       prompt: phase.prompt,
       text: buildPhaseMaterial("synthesize", context),
@@ -69,6 +74,8 @@ export async function runPhase(phaseId, plan, context, { operators, op, image, o
       system: sys,
       maxTokens: phase.maxTokens,
       timeoutMs: phase.timeoutMs,
+      research: fallbackSearch,
+      maxSearchUses: 2,
     });
     return { output: outputs[0] || "" };
   }
@@ -89,18 +96,28 @@ export async function runExecutionPlan({ op, opMap, operators, material, image, 
   };
 
   for (const phase of plan.phases) {
-    const result = await runPhase(phase.id, plan, context, { operators, op, image, onStep });
-    if (phase.id === "resolve") {
-      context.subject = result.subject || context.subject;
-      context.resolveRaw = result.resolveRaw || result.output;
-    }
-    if (phase.id === "research") {
-      context.research = result.research || result.output;
-    }
-    if (phase.id === "synthesize") {
-      const output = (result.output || "").trim();
-      if (!output) throw Object.assign(new Error("Empty deliverable."), { status: 500 });
-      return { output, plan, phasesRun: plan.phases.map((p) => p.id) };
+    try {
+      const result = await runPhase(phase.id, plan, context, { operators, op, image, onStep });
+      if (phase.id === "resolve") {
+        context.subject = result.subject || context.subject;
+        context.resolveRaw = result.resolveRaw || result.output;
+      }
+      if (phase.id === "research") {
+        context.research = result.research || result.output;
+      }
+      if (phase.id === "synthesize") {
+        const output = (result.output || "").trim();
+        if (!output) throw Object.assign(new Error("Empty deliverable."), { status: 500 });
+        return { output, plan, phasesRun: plan.phases.map((p) => p.id) };
+      }
+    } catch (err) {
+      if (phase.id === "research") {
+        console.warn("[lens] research phase failed, continuing with synthesize fallback:", err?.message);
+        context.research = "";
+        context.researchFallback = true;
+        continue;
+      }
+      throw err;
     }
   }
 
