@@ -22,7 +22,6 @@ const OLD_SEEDS_KEY = "lens.seeds.v2";
 const OP_MIME = "application/lens-op";
 const STRUCT_MIME = "application/lens-structure";
 const SEL_MIME = "application/lens-selection";
-const PATHS_KEY = "lens.paths.v1";
 const RAIL_W = 280;
 const COMBINE_THRESHOLD = 14; // px moved before drop-on-item triggers combine
 
@@ -44,21 +43,10 @@ const EXPAND_DIRS = [
 const BRANCH_DIST = 240;
 
 /**
- * Path verbs — the units of shared seeing. A path is not information;
- * it's a reproducible sequence of attention: where to look, how to hold it.
+ * Every node carries its path implicitly: bornFrom lineage plus drawn
+ * connections. Nothing is recorded — the journey is reconstructed from
+ * history whenever someone walks or sends a node.
  */
-const PATH_VERBS = [
-  { id: "notice", label: "notice", glyph: "✦", hint: "Notice this." },
-  { id: "attend", label: "attend", glyph: "◉", hint: "Attend here. Stay with it." },
-  { id: "compare", label: "compare", glyph: "⇄", hint: "Hold these together. Feel the tension." },
-  { id: "linger", label: "linger", glyph: "◷", hint: "Linger here. Don't move on yet." },
-  { id: "release", label: "let go", glyph: "⊘", hint: "Let this go. It's not the point." },
-  { id: "look", label: "look again", glyph: "↺", hint: "Look again — it changed." },
-];
-
-function pathVerb(kind) {
-  return PATH_VERBS.find((v) => v.id === kind) || PATH_VERBS[0];
-}
 
 function isNoteItem(it) {
   return it && (it.type === "text" || it.type === "image");
@@ -689,6 +677,7 @@ function normalizeItem(it) {
     return { id: it.id, type: "link", fromId: it.fromId, toId: it.toId, fromDir: it.fromDir || null };
   }
   const base = { rotation: 0, scale: 1, ...it };
+  if (!base.bornAt) base.bornAt = Date.now();
   if (base.type === "text" && !base.w) base.w = 360;
   if (base.type === "image" && !base.h && base.w) base.h = Math.round(base.w * 0.75);
   return base;
@@ -1413,10 +1402,7 @@ export default function App() {
     if (Array.isArray(saved) && saved.length) return saved;
     return migrateOldSavedNodes();
   });
-  const [paths, setPaths] = useState(() => load(PATHS_KEY, []));
-  // recording: { pathId, title, steps: [...], branchOf: {pathId, stepIndex} | null }
-  const [recording, setRecording] = useState(null);
-  // walking: { pathId, stepIndex }
+  // walking: { nodeId, title, steps: [...], stepIndex } — derived from a node's history on demand
   const [walking, setWalking] = useState(null);
 
   const [tool, setTool] = useState("highlight"); // highlight | select | text | pen | marker | eraser | hand
@@ -1435,7 +1421,7 @@ export default function App() {
   const [imageArmed, setImageArmed] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
-  const [railTab, setRailTab] = useState("functions"); // functions | structures | paths
+  const [railTab, setRailTab] = useState("functions"); // functions | structures
   const [railDropOver, setRailDropOver] = useState(false);
   const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
   const [expandPulse, setExpandPulse] = useState(null); // item id — compass enlarged after double-tap
@@ -1458,7 +1444,6 @@ export default function App() {
   const historyRef = useRef({ past: [], future: [] });
   const pushHistoryRef = useRef(() => {});
   const spawnBranchRef = useRef(() => {});
-  const recordStepRef = useRef(() => {});
   const hoverIdRef = useRef(null);
   const hoverRafRef = useRef(null);
   hoverIdRef.current = hoverId;
@@ -1472,7 +1457,6 @@ export default function App() {
   useEffect(() => localStorage.setItem(CAMERA_KEY, JSON.stringify(camera)), [camera]);
   useEffect(() => localStorage.setItem(OPERATORS_KEY, JSON.stringify(operators)), [operators]);
   useEffect(() => localStorage.setItem(STRUCTURES_KEY, JSON.stringify(structures)), [structures]);
-  useEffect(() => localStorage.setItem(PATHS_KEY, JSON.stringify(paths)), [paths]);
 
   useEffect(() => {
     if (!["select", "highlight"].includes(tool)) setHighlight(null);
@@ -1826,8 +1810,6 @@ export default function App() {
             ]);
           }
           setSelection([hit.id]);
-          // while recording a path, a drawn connection is itself a "compare" moment
-          recordStepRef.current("compare", [g.fromId, hit.id]);
         } else if (moved > 8 || Math.hypot(w.x - g.fromX, w.y - g.fromY) > 28) {
           pushHistoryRef.current();
           const id = uid();
@@ -1853,8 +1835,6 @@ export default function App() {
           ]);
           setSelection([id]);
           setEditing(id);
-          // every continuation is a branch — recording captures it as a step
-          recordStepRef.current("notice", [g.fromId, id]);
         } else {
           spawnBranchRef.current(g.fromId, g.fromDir);
         }
@@ -2314,17 +2294,13 @@ export default function App() {
     showToast("function deleted");
   }
 
-  // ---- paths: the medium of shared seeing ----
-  // A path preserves the generative sequence of attention, not the artifact.
-  // Recording captures moments of seeing; walking replays them; walkers can
-  // branch mid-path, so the path evolves.
+  // ---- paths: every node already carries its journey ----
+  // Nothing is recorded. A node's path is reconstructed on demand from its
+  // history: bornFrom provenance plus drawn connections, in birth order.
+  // Any node can be walked or sent, any time.
 
-  const recordingRef = useRef(recording);
-  recordingRef.current = recording;
   const walkingRef = useRef(walking);
   walkingRef.current = walking;
-  const pathsRef = useRef(paths);
-  pathsRef.current = paths;
   const camAnimRef = useRef(null);
 
   function animateCameraTo(targetWorld, targetScale, ms = 850) {
@@ -2378,140 +2354,100 @@ export default function App() {
     return clamp(Math.min(fit, 1.6), 0.25, 1.8);
   }
 
-  function beginRecordingPath(branchOf = null) {
-    finishEditing();
-    setWalking(null);
-    setRecording({
-      pathId: uid(),
-      title: "",
-      steps: branchOf?.inheritedSteps || [],
-      branchOf: branchOf ? { pathId: branchOf.pathId, stepIndex: branchOf.stepIndex } : null,
-    });
-    setRailTab("paths");
-    showToast(branchOf ? "branching — keep walking your own way" : "recording your path — mark moments of seeing");
+  function nodeParents(it, allItems) {
+    const set = new Set((it.bornFrom || []).filter(Boolean));
+    for (const l of allItems) {
+      if (l.type === "link" && l.toId === it.id && l.fromId) set.add(l.fromId);
+    }
+    set.delete(it.id);
+    return [...set];
   }
 
-  function recordStep(kind, itemIds, caption = "") {
-    const rec = recordingRef.current;
-    if (!rec) return;
-    const ids = (itemIds || []).filter((id) => {
-      const it = itemsRef.current.find((i) => i.id === id);
-      return it && it.type !== "link";
+  /** Reconstruct a node's journey from history alone: ancestors in birth order, ending at the node. */
+  function buildNodeJourney(nodeId, allItems = itemsRef.current) {
+    const map = new Map(allItems.map((it) => [it.id, it]));
+    const target = map.get(nodeId);
+    if (!target || target.type === "link") return null;
+    const seen = new Set([nodeId]);
+    const queue = [nodeId];
+    while (queue.length) {
+      const it = map.get(queue.shift());
+      if (!it) continue;
+      for (const pid of nodeParents(it, allItems)) {
+        if (!seen.has(pid) && map.get(pid) && map.get(pid).type !== "link") {
+          seen.add(pid);
+          queue.push(pid);
+        }
+      }
+    }
+    const involved = allItems
+      .filter((it) => seen.has(it.id) && it.type !== "link")
+      .sort((a, b) => (a.bornAt || 0) - (b.bornAt || 0) || (a.id === nodeId ? 1 : b.id === nodeId ? -1 : 0));
+    const steps = involved.map((it, i) => {
+      const parents = nodeParents(it, allItems).filter((pid) => seen.has(pid));
+      const caption =
+        parents.length === 0
+          ? i === 0
+            ? "where it began"
+            : "a separate spark"
+          : parents.length === 1
+          ? "grew out of the previous thought"
+          : `drawn together from ${parents.length} thoughts`;
+      return {
+        id: uid(),
+        // for convergence moments, illuminate the parents alongside the child
+        itemIds: parents.length > 1 ? [...parents, it.id] : [it.id],
+        focusId: it.id,
+        caption,
+        arrived: it.id === nodeId,
+      };
     });
-    if (!ids.length) {
-      showToast("select or touch something first");
+    const title = (target.text || "").trim().split("\n")[0].slice(0, 48) || "a thought";
+    return { nodeId, title, steps };
+  }
+
+  function walkNode(nodeId) {
+    const journey = buildNodeJourney(nodeId);
+    if (!journey || !journey.steps.length) {
+      showToast("nothing to walk yet");
       return;
     }
-    const center = viewportCenterWorld();
-    const step = {
-      id: uid(),
-      kind,
-      itemIds: ids,
-      caption: caption.trim(),
-      fallbackCenter: center,
-      // snapshot text so the step survives later edits/deletions
-      snapshot: ids
-        .map((id) => {
-          const it = itemsRef.current.find((i) => i.id === id);
-          if (it?.type === "text") return (it.text || "").slice(0, 300);
-          if (it?.type === "image") return "[image]";
-          if (it?.type === "stroke") return "[drawing]";
-          return "";
-        })
-        .filter(Boolean),
-      ts: Date.now(),
-    };
-    setRecording((r) => (r ? { ...r, steps: [...r.steps, step] } : r));
-    showToast(`${pathVerb(kind).glyph} ${pathVerb(kind).label} · step ${rec.steps.length + 1}`);
-  }
-  recordStepRef.current = recordStep;
-
-  function updateRecordedStep(stepId, patch) {
-    setRecording((r) =>
-      r ? { ...r, steps: r.steps.map((s) => (s.id === stepId ? { ...s, ...patch } : s)) } : r
-    );
-  }
-
-  function removeRecordedStep(stepId) {
-    setRecording((r) => (r ? { ...r, steps: r.steps.filter((s) => s.id !== stepId) } : r));
-  }
-
-  function finishRecordingPath(title) {
-    const rec = recordingRef.current;
-    if (!rec) return;
-    if (!rec.steps.length) {
-      setRecording(null);
-      showToast("path discarded — no steps");
-      return;
-    }
-    const firstText = rec.steps.flatMap((s) => s.snapshot || []).find((t) => t && !t.startsWith("["));
-    const path = {
-      id: rec.pathId,
-      title: (title || "").trim() || (firstText ? firstText.split("\n")[0].slice(0, 44) : "untitled path"),
-      steps: rec.steps,
-      branchOf: rec.branchOf,
-      createdAt: Date.now(),
-      walks: 0,
-    };
-    setPaths((arr) => [path, ...arr]);
-    setRecording(null);
-    setRailTab("paths");
-    showToast(`path saved · ${path.steps.length} steps`);
-  }
-
-  function discardRecording() {
-    setRecording(null);
-    showToast("recording discarded");
-  }
-
-  function deletePath(id) {
-    setPaths((arr) => arr.filter((p) => p.id !== id));
-    if (walkingRef.current?.pathId === id) setWalking(null);
-  }
-
-  function beginWalk(pathId) {
-    const path = pathsRef.current.find((p) => p.id === pathId);
-    if (!path?.steps?.length) return;
     finishEditing();
     setSelection([]);
-    setRecording(null);
-    setPaths((arr) => arr.map((p) => (p.id === pathId ? { ...p, walks: (p.walks || 0) + 1 } : p)));
-    setWalking({ pathId, stepIndex: 0 });
+    setWalking({ ...journey, stepIndex: 0 });
   }
 
   function walkTo(stepIndex) {
     const w = walkingRef.current;
     if (!w) return;
-    const path = pathsRef.current.find((p) => p.id === w.pathId);
-    if (!path) return;
-    const idx = clamp(stepIndex, 0, path.steps.length - 1);
-    setWalking({ ...w, stepIndex: idx });
+    setWalking({ ...w, stepIndex: clamp(stepIndex, 0, w.steps.length - 1) });
   }
 
   function endWalk() {
     setWalking(null);
   }
 
-  function branchFromWalk() {
+  // leave the walk holding the current thought — tendrils are ready, continuing is branching
+  function continueFromWalk() {
     const w = walkingRef.current;
     if (!w) return;
-    const path = pathsRef.current.find((p) => p.id === w.pathId);
-    if (!path) return;
-    const inherited = path.steps.slice(0, w.stepIndex + 1).map((s) => ({ ...s, id: uid() }));
+    const focusId = w.steps[w.stepIndex]?.focusId;
     setWalking(null);
-    beginRecordingPath({ pathId: path.id, stepIndex: w.stepIndex, inheritedSteps: inherited });
+    if (focusId && itemsRef.current.some((it) => it.id === focusId)) {
+      setSelection([focusId]);
+      showToast("continue from here — grab a tendril");
+    }
   }
 
   // camera follows the walk
   useEffect(() => {
     if (!walking) return;
-    const path = paths.find((p) => p.id === walking.pathId);
-    const step = path?.steps?.[walking.stepIndex];
+    const step = walking.steps?.[walking.stepIndex];
     if (!step) return;
     const focus = stepFocusCenter(step);
     if (focus) animateCameraTo(focus, stepFocusScale(focus));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [walking?.pathId, walking?.stepIndex]);
+  }, [walking?.nodeId, walking?.stepIndex]);
 
   // keyboard navigation while walking
   useEffect(() => {
@@ -2521,9 +2457,8 @@ export default function App() {
       if (typing) return;
       if (e.key === "ArrowRight" || e.key === " " || e.key === "Enter") {
         e.preventDefault();
-        const path = pathsRef.current.find((p) => p.id === walkingRef.current?.pathId);
         const w = walkingRef.current;
-        if (path && w && w.stepIndex >= path.steps.length - 1) endWalk();
+        if (w && w.stepIndex >= w.steps.length - 1) endWalk();
         else walkTo((w?.stepIndex ?? 0) + 1);
       } else if (e.key === "ArrowLeft") {
         e.preventDefault();
@@ -2533,7 +2468,7 @@ export default function App() {
         endWalk();
       } else if (e.key.toLowerCase() === "b") {
         e.preventDefault();
-        branchFromWalk();
+        continueFromWalk();
       }
     }
     window.addEventListener("keydown", onKey, { capture: true });
@@ -2541,14 +2476,27 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [!!walking]);
 
-  function exportPath(path) {
-    const blob = JSON.stringify({ kind: "lens-path", version: 1, path, items: itemsRef.current.filter((it) => path.steps.some((s) => s.itemIds?.includes(it.id))) }, null, 2);
+  /** Send a node: its whole lineage travels with it, no preparation needed. */
+  function sendNodePath(nodeId) {
+    const journey = buildNodeJourney(nodeId);
+    if (!journey) return;
+    const seen = new Set(journey.steps.map((s) => s.focusId));
+    const lineageItems = itemsRef.current.filter(
+      (it) =>
+        seen.has(it.id) ||
+        (it.type === "link" && seen.has(it.fromId) && seen.has(it.toId))
+    );
+    const blob = JSON.stringify(
+      { kind: "lens-path", version: 2, nodeId, items: lineageItems },
+      null,
+      2
+    );
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([blob], { type: "application/json" }));
-    a.download = `path-${(path.title || "untitled").replace(/\s+/g, "-").slice(0, 32)}.json`;
+    a.download = `path-${journey.title.replace(/\s+/g, "-").slice(0, 32)}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
-    showToast("path exported — send someone your seeing");
+    showToast("sent — the whole journey travels with it");
   }
 
   function importPath(file) {
@@ -2556,26 +2504,35 @@ export default function App() {
     reader.onload = () => {
       try {
         const data = JSON.parse(reader.result);
-        if (data?.kind !== "lens-path" || !data.path?.steps?.length) throw new Error("not a path");
+        if (data?.kind !== "lens-path" || !Array.isArray(data.items) || !data.items.length) {
+          throw new Error("not a path");
+        }
         const idMap = {};
-        const newItems = (data.items || [])
-          .filter((it) => !itemsRef.current.some((ex) => ex.id === it.id))
-          .map((it) => {
-            const nid = uid();
-            idMap[it.id] = nid;
-            return normalizeItem({ ...it, id: nid });
-          });
-        // remap step item ids to the newly planted copies (keep ids that already exist)
-        const steps = data.path.steps.map((s) => ({
-          ...s,
-          id: uid(),
-          itemIds: (s.itemIds || []).map((id) => idMap[id] || id),
-        }));
-        if (newItems.length) setItems((arr) => [...arr, ...newItems]);
-        const path = { ...data.path, id: uid(), steps, importedAt: Date.now(), walks: 0 };
-        setPaths((arr) => [path, ...arr]);
-        setRailTab("paths");
-        showToast(`path received · ${steps.length} steps — walk it`);
+        for (const it of data.items) idMap[it.id] = uid();
+        // land the lineage centered in the current view, provenance intact
+        const notes = data.items.filter((it) => it.type !== "link" && it.type !== "stroke");
+        const cx = notes.length ? notes.reduce((s, it) => s + (it.x || 0), 0) / notes.length : 0;
+        const cy = notes.length ? notes.reduce((s, it) => s + (it.y || 0), 0) / notes.length : 0;
+        const center = viewportCenterWorld();
+        const dx = center.x - cx;
+        const dy = center.y - cy;
+        const newItems = data.items.map((it) => {
+          const base = { ...it, id: idMap[it.id] };
+          if (it.type === "link") {
+            return normalizeItem({ ...base, fromId: idMap[it.fromId] || it.fromId, toId: idMap[it.toId] || it.toId });
+          }
+          if (it.bornFrom) base.bornFrom = it.bornFrom.map((pid) => idMap[pid] || pid);
+          if (it.type === "stroke") {
+            return normalizeItem({ ...base, points: (it.points || []).map((p) => ({ x: p.x + dx, y: p.y + dy })) });
+          }
+          return normalizeItem({ ...base, x: (it.x || 0) + dx, y: (it.y || 0) + dy });
+        });
+        pushHistoryRef.current();
+        setItems((arr) => [...arr, ...newItems]);
+        const terminal = idMap[data.nodeId];
+        showToast("path received — walking it");
+        // walk right away: inheriting someone's seeing should be zero-hassle
+        setTimeout(() => terminal && walkNode(terminal), 80);
       } catch {
         showToast("could not read that path file");
       }
@@ -3196,8 +3153,7 @@ export default function App() {
       ? (selItem && isNoteItem(selItem) ? selItem : hoverItem && isNoteItem(hoverItem) ? hoverItem : null)
       : null;
   const boardLinks = items.filter((it) => it.type === "link");
-  const walkPath = walking ? paths.find((p) => p.id === walking.pathId) : null;
-  const walkStep = walkPath?.steps?.[walking.stepIndex] || null;
+  const walkStep = walking?.steps?.[walking.stepIndex] || null;
   const walkFocusRects = walkStep
     ? walkStep.itemIds
         .map((id) => items.find((it) => it.id === id))
@@ -3287,6 +3243,19 @@ export default function App() {
       >
         <div className="rail-head">
           <div className="rail-title">lens</div>
+          <button
+            className="rail-icon"
+            title="receive a path — walk someone else's seeing"
+            onClick={() => {
+              const input = document.createElement("input");
+              input.type = "file";
+              input.accept = "application/json";
+              input.onchange = () => input.files?.[0] && importPath(input.files[0]);
+              input.click();
+            }}
+          >
+            ↓
+          </button>
           <button className="rail-icon" title="set up for role" onClick={() => setOnboard({ step: "role" })}>
             ↻
           </button>
@@ -3298,53 +3267,8 @@ export default function App() {
           <button className={"rail-tab" + (railTab === "structures" ? " on" : "")} onClick={() => setRailTab("structures")}>
             structures {structures.length ? `(${structures.length})` : ""}
           </button>
-          <button className={"rail-tab" + (railTab === "paths" ? " on" : "")} onClick={() => setRailTab("paths")}>
-            paths {paths.length ? `(${paths.length})` : ""}
-          </button>
         </div>
-        {railTab === "paths" ? (
-          <>
-            <button
-              className="rail-create"
-              disabled={!!recording}
-              onClick={() => beginRecordingPath()}
-              title="record a sequence of attention others can walk"
-            >
-              {recording ? "recording…" : "◉ begin a path"}
-            </button>
-            <button
-              className="rail-create ghost"
-              onClick={() => {
-                const input = document.createElement("input");
-                input.type = "file";
-                input.accept = "application/json";
-                input.onchange = () => input.files?.[0] && importPath(input.files[0]);
-                input.click();
-              }}
-            >
-              ↓ receive a path
-            </button>
-            <div className="rail-scroll">
-              {paths.length === 0 && !recording ? (
-                <p className="rail-empty">
-                  A path is not a note — it's a walk. Record where you attended, what you noticed, where
-                  you lingered. Someone else walks it and arrives with their perception changed.
-                </p>
-              ) : (
-                paths.map((p) => (
-                  <PathCard
-                    key={p.id}
-                    path={p}
-                    parent={p.branchOf ? paths.find((x) => x.id === p.branchOf.pathId) : null}
-                    onWalk={() => beginWalk(p.id)}
-                    onExport={() => exportPath(p)}
-                    onDelete={() => deletePath(p.id)}
-                  />
-                ))
-              )}
-            </div>
-          </>
-        ) : railTab === "functions" ? (
+        {railTab === "functions" ? (
           <>
             <button className="rail-create" onClick={openCreateFunction}>
               + function
@@ -3432,9 +3356,6 @@ export default function App() {
         )}
         {railTab === "structures" && (
           <div className="rail-hint">drop selection here to save · drag onto canvas to plant</div>
-        )}
-        {railTab === "paths" && (
-          <div className="rail-hint">walk a path · press b mid-walk to branch it</div>
         )}
       </aside>
 
@@ -3767,29 +3688,17 @@ export default function App() {
         />
       )}
 
-      {recording && !walking && (
-        <PathRecorderBar
-          recording={recording}
-          selectionCount={selection.length}
-          onVerb={(kind, caption) => recordStep(kind, selRef.current, caption)}
-          onRemoveStep={removeRecordedStep}
-          onCaptionStep={updateRecordedStep}
-          onFinish={finishRecordingPath}
-          onDiscard={discardRecording}
-        />
-      )}
-
-      {walking && walkPath && walkStep && (
+      {walking && walkStep && (
         <WalkOverlay
-          path={walkPath}
+          walk={walking}
           stepIndex={walking.stepIndex}
           step={walkStep}
           rects={walkFocusRects}
           onPrev={() => walkTo(walking.stepIndex - 1)}
           onNext={() =>
-            walking.stepIndex >= walkPath.steps.length - 1 ? endWalk() : walkTo(walking.stepIndex + 1)
+            walking.stepIndex >= walking.steps.length - 1 ? endWalk() : walkTo(walking.stepIndex + 1)
           }
-          onBranch={branchFromWalk}
+          onBranch={continueFromWalk}
           onLeave={endWalk}
         />
       )}
@@ -3809,6 +3718,8 @@ export default function App() {
           }
           onSaveStructure={() => captureSelectionAsStructure()}
           onDiscoverSameness={selection.length >= 2 ? runSamenessDiscovery : null}
+          onWalkPath={selection.length === 1 && selItem && isNoteItem(selItem) ? () => walkNode(selItem.id) : null}
+          onSendPath={selection.length === 1 && selItem && isNoteItem(selItem) ? () => sendNodePath(selItem.id) : null}
         />
       )}
 
@@ -3882,102 +3793,8 @@ function BranchCompass({ item, worldToClient, expanded, subtle, onStartDrag }) {
   );
 }
 
-function PathRecorderBar({ recording, selectionCount, onVerb, onRemoveStep, onCaptionStep, onFinish, onDiscard }) {
-  const [caption, setCaption] = useState("");
-  const [finishing, setFinishing] = useState(false);
-  const [title, setTitle] = useState("");
-  const steps = recording.steps || [];
-
-  if (finishing) {
-    return (
-      <div className="path-recorder" onPointerDown={(e) => e.stopPropagation()}>
-        <span className="rec-dot done" />
-        <input
-          className="rec-title-input"
-          autoFocus
-          placeholder="name this path — what does it teach someone to see?"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") onFinish(title);
-            if (e.key === "Escape") setFinishing(false);
-          }}
-        />
-        <button className="rec-btn primary" onClick={() => onFinish(title)}>
-          save path
-        </button>
-        <button className="rec-btn" onClick={() => setFinishing(false)}>
-          back
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="path-recorder" onPointerDown={(e) => e.stopPropagation()}>
-      <span className="rec-dot" />
-      <span className="rec-label">
-        {recording.branchOf ? "branching" : "recording"} · {steps.length} step{steps.length === 1 ? "" : "s"}
-      </span>
-      {steps.length > 0 && (
-        <div className="rec-steps">
-          {steps.map((s, i) => (
-            <button
-              key={s.id}
-              className="rec-step-chip"
-              title={`${pathVerb(s.kind).label}${s.caption ? ` — ${s.caption}` : ""} · click to remove`}
-              onClick={() => onRemoveStep(s.id)}
-            >
-              {pathVerb(s.kind).glyph}
-              <span className="rec-step-n">{i + 1}</span>
-            </button>
-          ))}
-        </div>
-      )}
-      <span className="rec-sep" />
-      <input
-        className="rec-caption"
-        placeholder="say what to notice… (optional)"
-        value={caption}
-        onChange={(e) => setCaption(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && caption.trim() && steps.length) {
-            onCaptionStep(steps[steps.length - 1].id, { caption: caption.trim() });
-            setCaption("");
-          }
-        }}
-      />
-      <div className="rec-verbs" title={selectionCount ? "" : "select something on the canvas first"}>
-        {PATH_VERBS.map((v) => (
-          <button
-            key={v.id}
-            className="rec-verb"
-            disabled={!selectionCount}
-            title={v.hint}
-            onClick={() => {
-              onVerb(v.id, caption);
-              setCaption("");
-            }}
-          >
-            <span className="rec-verb-glyph">{v.glyph}</span>
-            {v.label}
-          </button>
-        ))}
-      </div>
-      <span className="rec-sep" />
-      <button className="rec-btn primary" disabled={!steps.length} onClick={() => setFinishing(true)}>
-        finish
-      </button>
-      <button className="rec-btn danger" onClick={onDiscard} title="discard recording">
-        ×
-      </button>
-    </div>
-  );
-}
-
-function WalkOverlay({ path, stepIndex, step, rects, onPrev, onNext, onBranch, onLeave }) {
-  const verb = pathVerb(step.kind);
-  const last = stepIndex >= path.steps.length - 1;
+function WalkOverlay({ walk, stepIndex, step, rects, onPrev, onNext, onBranch, onLeave }) {
+  const last = stepIndex >= walk.steps.length - 1;
   const pad = 16;
   const missing = rects.length === 0;
   return (
@@ -4017,15 +3834,15 @@ function WalkOverlay({ path, stepIndex, step, rects, onPrev, onNext, onBranch, o
       </svg>
       <div className="walk-footer" onPointerDown={(e) => e.stopPropagation()}>
         <div className="walk-verb">
-          <span className="walk-glyph">{verb.glyph}</span>
-          <span className="walk-verb-name">{verb.label}</span>
+          <span className="walk-glyph">{step.arrived ? "◉" : "✦"}</span>
+          <span className="walk-verb-name">{step.arrived ? "arrival" : `step ${stepIndex + 1}`}</span>
         </div>
         <div className="walk-caption">
-          {step.caption || verb.hint}
+          {step.arrived ? "the thought as it stands now" : step.caption}
           {missing && <span className="walk-missing"> (what was here has changed — that, too, is part of the path)</span>}
         </div>
         <div className="walk-progress">
-          {path.steps.map((s, i) => (
+          {walk.steps.map((s, i) => (
             <span key={s.id} className={"walk-dot" + (i === stepIndex ? " on" : i < stepIndex ? " past" : "")} />
           ))}
         </div>
@@ -4034,53 +3851,22 @@ function WalkOverlay({ path, stepIndex, step, rects, onPrev, onNext, onBranch, o
             ←
           </button>
           <span className="walk-count">
-            {stepIndex + 1} / {path.steps.length}
+            {stepIndex + 1} / {walk.steps.length}
           </span>
           <button className="walk-btn primary" onClick={onNext}>
             {last ? "arrive" : "→"}
           </button>
           <span className="walk-sep" />
           <button className="walk-btn branch" onClick={onBranch} title="stop here and continue your own way (b)">
-            ⑂ branch here
+            ⑂ continue from here
           </button>
           <button className="walk-btn" onClick={onLeave} title="leave the walk (esc)">
             leave
           </button>
         </div>
-        <div className="walk-title">walking · {path.title}</div>
+        <div className="walk-title">the journey of · {walk.title}</div>
       </div>
     </>
-  );
-}
-
-function PathCard({ path, parent, onWalk, onExport, onDelete }) {
-  const verbs = [...new Set((path.steps || []).map((s) => pathVerb(s.kind).glyph))].slice(0, 6);
-  return (
-    <div className="path-card">
-      <div className="path-card-top">
-        <span className="path-card-glyphs">{verbs.join(" ")}</span>
-        <span className="path-card-title">{path.title || "untitled path"}</span>
-      </div>
-      <div className="path-card-meta">
-        {path.steps?.length || 0} steps
-        {path.walks ? ` · walked ${path.walks}×` : ""}
-        {parent && (
-          <span className="path-card-branch"> · ⑂ from “{parent.title}” at step {(path.branchOf?.stepIndex ?? 0) + 1}</span>
-        )}
-        {!parent && path.branchOf && <span className="path-card-branch"> · ⑂ branched</span>}
-      </div>
-      <div className="path-card-actions">
-        <button className="path-card-btn primary" onClick={onWalk}>
-          ▷ walk
-        </button>
-        <button className="path-card-btn" onClick={onExport} title="export as file to send">
-          ↗ send
-        </button>
-        <button className="path-card-btn danger" onClick={onDelete} title="delete path">
-          ×
-        </button>
-      </div>
-    </div>
   );
 }
 
@@ -4544,6 +4330,8 @@ function SelectionMenu({
   onEdit,
   onSaveStructure,
   onDiscoverSameness,
+  onWalkPath,
+  onSendPath,
 }) {
   const [open, setOpen] = useState(false);
   const transform = pos.below ? "translate(-50%, 0)" : "translate(-50%, -100%)";
@@ -4591,6 +4379,16 @@ function SelectionMenu({
             </button>
             <span className="p-sep" />
           </>
+        )}
+        {onWalkPath && (
+          <button className="p-btn walk" onClick={onWalkPath} title="replay how this thought came to be">
+            ⟲ walk
+          </button>
+        )}
+        {onSendPath && (
+          <button className="p-btn" onClick={onSendPath} title="send this thought with its whole journey">
+            ↗ send
+          </button>
         )}
         <button className="p-btn" onClick={() => setOpen(true)}>
           export
