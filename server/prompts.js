@@ -30,7 +30,7 @@ INPUT: """${originalMaterial}"""
 ENTITY: ${entity}
 SEARCH (pick 2–3): ${searchTerms.slice(0, 3).join(" | ")}
 
-Return ONLY these lines (brief):
+Return ONLY these lines (brief, factual):
 ENTITY:
 WEBSITE:
 PRODUCT:
@@ -43,26 +43,37 @@ SOURCES: (urls)`;
 export const SYNTHESIZE_SYSTEM = `You are the synthesis engine of lens — you produce the final professional deliverable.
 ${LENS_SUBJECT_RULE}
 
-You receive VERIFIED SUBJECT and optionally VERIFIED RESEARCH. Use them. Produce expert-grade output.
-Return ONLY the deliverable — no preamble, no process narration, no JSON.`;
+You receive WHITEBOARD MATERIAL, RESOLVED SUBJECT, and optionally VERIFIED RESEARCH. Use them.
+Follow the workflow steps and OUTPUT FORMAT exactly — include every required section with specific, evidence-backed content.
+Return ONLY the finished deliverable — no preamble, no process narration, no JSON.`;
 
 export function synthesizePrompt(functionName, functionDescription, workflowSteps, outputContract) {
-  return `Produce the final "${functionName}" deliverable.
+  return `Produce the final deliverable for "${functionName}".
 
-GOAL: ${functionDescription || `Complete the ${functionName} function on the subject.`}
+DELIVERABLE CONTRACT: ${functionDescription || `Complete the ${functionName} function on the subject.`}
 
 Execute these steps INTERNALLY in order (do not show intermediate output):
 ${workflowSteps}
 
 ${outputContract}
 
+QUALITY BAR: Expert-grade, specific, decisive — every section filled with substantive content about the subject. No placeholders, no "TBD", no commentary about missing data.
+
 Return ONLY the finished deliverable.`;
 }
 
-export function outputContractForFunction(name) {
+export function outputContractForFunction(name, description = "") {
+  const desc = (description || "").trim();
+  if (desc.length > 30) {
+    return `OUTPUT CONTRACT (from function definition — follow exactly):
+${desc}
+
+Also follow any OUTPUT FORMAT sections specified in the workflow steps above. Include every required section header and field.`;
+  }
+
   const n = (name || "").toLowerCase();
   if (n.includes("thesis"))
-    return `OUTPUT FORMAT — include these sections:
+    return `OUTPUT FORMAT — include ALL sections with specific content:
 ## Thesis
 ## Market
 ## Product
@@ -72,12 +83,14 @@ export function outputContractForFunction(name) {
 ## Upside Scenario
 ## Recommendation`;
   if (n.includes("memo"))
-    return `OUTPUT FORMAT: Executive Summary, Investment Highlights, Business Overview, Market, Risks, Recommendation.`;
+    return `OUTPUT FORMAT: ## Executive Summary, ## Investment Highlights, ## Business Overview, ## Market, ## Risks, ## Recommendation — each section substantive.`;
+  if (n.includes("comp"))
+    return `OUTPUT FORMAT: ## Overview, ## Comparable Companies (table or list with positioning and metrics), ## Key Takeaways.`;
   if (n.includes("differentiate"))
     return `OUTPUT FORMAT: Separate distinct parts as paragraphs separated by blank lines.`;
   if (n.includes("merge"))
-    return `OUTPUT FORMAT: One unified text combining all parts.`;
+    return `OUTPUT FORMAT: One unified text combining all parts coherently.`;
   if (n.includes("compress") || n.includes("expand") || n.includes("ground") || n.includes("generalize"))
-    return `OUTPUT FORMAT: Plain prose only — one coherent result, no section headers.`;
-  return `OUTPUT FORMAT: Complete professional work product appropriate to "${name}".`;
+    return `OUTPUT FORMAT: Plain prose only — one coherent result, no section headers unless the input implies structure.`;
+  return `OUTPUT FORMAT: Complete professional work product appropriate to "${name}" — specify sections if the function implies a structured deliverable.`;
 }

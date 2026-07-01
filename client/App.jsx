@@ -8,6 +8,7 @@ import {
 } from "../shared/transform-primitives.js";
 import { scaleEta, ETA } from "../shared/eta.js";
 import { phaseClientAbortMs } from "../shared/phase-timeouts.js";
+import { FUNCTION_ARCHITECT_STANDARDS } from "../shared/function-standards.js";
 
 const ITEMS_KEY = "lens.board.items.v1";
 const CAMERA_KEY = "lens.board.camera.v1";
@@ -220,23 +221,20 @@ const LENS_SYSTEM = `You are the function-architect for "lens" — an infinite t
 LENS EXECUTION ARCHITECTURE (design functions for this)
 Functions can have infinite nested sub-steps in the UI, but at runtime a PLAN COMPILER flattens them into 1–3 PHASES:
 
-PHASE 1 — RESOLVE (~15s): Identify the subject entity from sparse input. Output: ENTITY, SEARCH_TERMS.
-PHASE 2 — RESEARCH (~45s, if needed): Dedicated web_search pass using SEARCH_TERMS. Mark ONE leaf with "research": true.
-PHASE 3 — SYNTHESIZE (~90s): ALL remaining steps compiled into one prompt. Uses research findings. Outputs final deliverable.
+PHASE 1 — RESOLVE: Identify the subject entity from sparse input. Output: ENTITY, SEARCH_TERMS.
+PHASE 2 — RESEARCH (if needed): Dedicated web_search pass using SEARCH_TERMS. Mark ONE leaf with "research": true.
+PHASE 3 — SYNTHESIZE: ALL remaining steps compiled into one prompt. Uses research findings. Outputs final deliverable.
 
 Design implications:
 - Sub-steps are organizational — write leaf prompts as instructions that will be MERGED into the synthesize phase.
 - Only ONE "research" leaf per function — it powers the research phase.
-- parse step: extract entity name and search terms.
-- analyze/draft steps: specify exact output sections — they run in synthesize phase.
+- Resolve step: name it descriptively (e.g. "Identify Subject Entity"); prompt must extract ENTITY and SEARCH_TERMS.
+- Analyze/draft steps: leaf prompts must specify exact OUTPUT FORMAT — they run in synthesize phase.
 - NEVER design functions that refuse, discuss missing data, or meta-comment on the process.
 
-RECOMMENDED SHAPE: parse → research (research:true) → analyze → draft
+${FUNCTION_ARCHITECT_STANDARDS}
 
-JSON RULES: composites have "steps", leaves have "prompt". Optional "research": true on ONE leaf.
-ONE-word names. Return ONLY valid JSON.
-
-For thesis deliverables specify: Thesis, Market, Product, Traction, Team, Risks, Upside, Recommendation.`;
+Return ONLY valid JSON.`;
 
 // summarize the user's personal library so Claude can tailor every prompt
 function summarizeLibrary(operators, opMap, { compact = false } = {}) {
@@ -293,14 +291,15 @@ CRITICAL RULES:
 1. ORIGINAL SUBJECT — the user dragged this function onto specific board material. Stay locked to that subject in every sentence.
 2. NEVER write about insufficient documentation, information gaps, evaluation process, or meta-risks in deal assessment. Always produce substantive content ABOUT the subject.
 3. If input is a company name or short phrase (e.g. "efference ai startup"), treat it as the entity to analyze — use web search to research it and deliver a complete professional output.
-4. For investment thesis: write an actual thesis ABOUT the named company — include Thesis, Market, Product, Traction, Team, Key Risks, Upside Scenario, Recommendation.`;
+4. Follow the OUTPUT FORMAT in the workflow exactly — include every required section with specific, evidence-backed content.
+5. Match the function description's deliverable shape precisely — this is the quality bar.`;
 
   if (researching) {
     sys += `\n\nWEB SEARCH ENABLED: Research the subject thoroughly using current web sources before writing your deliverable. Cite key facts you find.`;
   }
   if (activeOp?.name) {
     sys += `\n\nActive function: "${activeOp.name}"`;
-    if (activeOp.description) sys += ` — ${activeOp.description}`;
+    if (activeOp.description) sys += `\nDeliverable contract: ${activeOp.description}`;
   }
   if (originalMaterial?.trim()) {
     sys += `\n\nORIGINAL BOARD MATERIAL (this is the subject — transform THIS):\n"""${originalMaterial.slice(0, 1500)}${originalMaterial.length > 1500 ? "…" : ""}"""`;
@@ -328,12 +327,15 @@ async function generateFunctionList(role, operators, opMap) {
 
 Design the 10 most valuable FUNCTIONS for their lens whiteboard. Each function must work on SPARSE input (a company name, one-line note) and produce a FULL professional deliverable using web research.
 
-${hasLib ? "Complement existing library — no duplicate names.\n" : ""}
+${hasLib ? "Complement existing library — no duplicate names or purposes.\n" : ""}
 For each function:
-- "name": ONE word (thesis, memo, comps, flags, diligence, signal, etc.)
-- "description": what deliverable it produces when dropped onto e.g. "acme ai startup"
+- "name": 3–7 words — specific and descriptive (e.g. "Build Full Investment Thesis", "Write IC Investment Memo", "Map Comparable Companies")
+- "description": one sentence stating input → exact deliverable shape (sections, format, decision output)
 
-Investor examples: thesis → full investment thesis with sections; memo → investment memo; comps → comparable companies analysis.
+Investor examples:
+- "Build Full Investment Thesis" → structured thesis with Thesis, Market, Product, Traction, Team, Risks, Upside, Recommendation
+- "Write IC Investment Memo" → executive summary, highlights, business overview, risks, recommendation
+- "Map Comparable Companies" → table of comps with positioning and metrics
 
 Return ONLY JSON: {"functions":[{"name":"...","description":"..."}]} — exactly 10, ordered by frequency. No markdown, no commentary outside the JSON object.`;
   const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 2000 });
@@ -348,19 +350,23 @@ async function decomposeFunction(role, fn, operators, opMap) {
   const prompt = `The user is a: ${role}.
 
 Decompose this function for lens's 3-phase runtime: resolve → research → synthesize.
+Apply the FUNCTION ARCHITECT STANDARDS from system context to every node.
 
 FUNCTION: ${fn.name}
 ${fn.description ? `Description: ${fn.description}` : ""}
 
-Shape: parse → research (research:true, exactly ONE research leaf) → analyze → draft
-- parse: extract ENTITY and SEARCH_TERMS from sparse input like "bobyard ai startup"
-- research: "research": true — web search using SEARCH_TERMS; return structured facts
-- analyze + draft: specify sections for final deliverable — these compile into synthesize phase
-- For "thesis": output sections — Thesis Statement, Market, Product, Traction, Team, Risks, Upside, Recommendation.
-- ONE word names at every level.
+Pipeline (use these descriptive step names — adapt to the function):
+1. Identify Subject Entity — extract ENTITY + SEARCH_TERMS from sparse input like "bobyard ai startup"
+2. Gather Verified Facts — exactly ONE leaf with "research": true; hyper-specific prompt with OUTPUT FORMAT for fact bullets
+3. Analyze Using Framework — apply the function's analytical frame; leaf prompt must specify exact sections to produce
+4. Draft Final Deliverable — compile the finished work product; leaf prompt must specify exact OUTPUT FORMAT (all sections, tone, length)
+
+For investment thesis functions, final OUTPUT FORMAT must include: ## Thesis, ## Market, ## Product, ## Traction, ## Team, ## Key Risks, ## Upside Scenario, ## Recommendation
+
+Every leaf prompt must include GOAL, INPUT, PROCESS, OUTPUT FORMAT, QUALITY BAR, CONSTRAINTS sections.
 
 Return ONLY JSON:
-{"name":"...","description":"...","steps":[{"name":"parse","prompt":"..."},{"name":"research","research":true,"prompt":"..."},...]}
+{"name":"...","description":"...","steps":[{"name":"Identify Subject Entity","description":"...","prompt":"..."},{"name":"Gather Verified Facts","research":true,"description":"...","prompt":"..."},...]}
 
 Escape quotes and newlines inside all string values. No markdown fences.`;
   const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 8000 });
@@ -376,6 +382,20 @@ Escape quotes and newlines inside all string values. No markdown fences.`;
   }
 }
 
+// fallback leaf prompt when Claude omits one — still follows standards
+function buildDefaultLeafPrompt(name, description) {
+  const desc = (description || "").trim() || `Complete the "${name}" step on the subject material.`;
+  return `GOAL: ${desc}
+INPUT: Prior step output or whiteboard material about the subject.
+PROCESS:
+1. Read the input carefully and stay locked to the subject entity.
+2. Execute "${name}" with professional specificity — use verified facts when available.
+OUTPUT FORMAT:
+Return the finished result for this step only. Match the deliverable shape implied by: ${desc}
+QUALITY BAR: Specific, decisive, expert-grade — no vague generalities.
+CONSTRAINTS: Return ONLY the step output. No preamble. No meta-commentary. Never refuse sparse input.`;
+}
+
 // flatten a decomposition tree into flat operators; returns the root id
 function materializeTree(node, role, top, out) {
   const id = uid();
@@ -385,7 +405,7 @@ function materializeTree(node, role, top, out) {
     const steps = node.steps.map((s) => materializeTree(s, role, false, out));
     out.push({ id, name, description, kind: "pipeline", steps, role, top });
   } else {
-    const prompt = (node.prompt || "").trim() || `Apply "${name}" to the input and return only the deliverable result.`;
+    const prompt = (node.prompt || "").trim() || buildDefaultLeafPrompt(name, description);
     const research = !!node.research;
     out.push({ id, name, description, kind: "prompt", prompt, role, top, research });
   }
@@ -467,32 +487,34 @@ function collectSubtreeIds(rootId, opMap) {
 async function createFunctionFromProse(description, operators, opMap) {
   const prompt = `The user wants to CREATE a new function for their lens whiteboard toolbox.
 Tailor it to their personal library (see system context) — complement existing functions, reuse their vocabulary and prompt style.
+Apply FUNCTION ARCHITECT STANDARDS from system context to EVERY node.
 
 They described it in their own words:
 """
 ${description}
 """
 
-Design this as a complete function tree: decompose it into ordered sub-functions ending in primitive operators, exactly as lens executes them (pipeline where each step's output feeds the next).
+Design a complete function tree: ordered sub-functions ending in leaves with hyper-specific prompts (pipeline where each step's output feeds the next).
 
 Requirements:
-- Infer a sharp 2-4 word name and one-sentence description for the top function.
-- Break into 2-5 ordered sub-functions; recurse 2-4 layers until every leaf is one atomic primitive.
-- Every LEAF has a max-strength "prompt" tailored to this user's library. Composites have "steps" and NO "prompt".
+- Root name: 3–7 words, descriptive. Root description: input → deliverable shape.
+- Break into 2–5 ordered sub-functions with descriptive names and descriptions at every level.
+- Recurse 2–4 layers until every leaf is one atomic step with a full prompt (GOAL, INPUT, PROCESS, OUTPUT FORMAT, QUALITY BAR, CONSTRAINTS).
+- Composites have "steps" and NO "prompt". Leaves have hyper-specific "prompt" only.
 - Do not duplicate functions already in their library unless the user explicitly asks to recreate one.
 
 Return ONLY JSON:
 {"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}
 
 Escape quotes and newlines inside strings. No markdown fences.`;
-  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 6000 });
+  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 8000 });
   try {
     return parseJSON(out);
   } catch {
     const retry = await runClaude(
       `${prompt}\n\nPrevious reply was invalid JSON. Return ONLY one minified JSON object.`,
       "",
-      { system: librarySystem(operators, opMap), maxTokens: 6000 }
+      { system: librarySystem(operators, opMap), maxTokens: 8000 }
     );
     return parseJSON(retry);
   }
@@ -503,6 +525,7 @@ async function editFunctionWithProse(op, opMap, instruction, operators) {
   const current = serializeTree(op, opMap);
   const prompt = `The user is EDITING an existing function on their lens whiteboard.
 Keep it consistent with their personal library (see system context) — same vocabulary, style, and transformation patterns.
+Apply FUNCTION ARCHITECT STANDARDS from system context to EVERY node you touch or add.
 
 CURRENT FUNCTION (tree — composites have steps, leaves have prompts):
 ${current}
@@ -512,23 +535,26 @@ The user wants these changes (in their own words):
 ${instruction}
 """
 
-Apply their request. Preserve anything they didn't ask to change. You may rename, re-describe, re-prompt, reorder, add, remove, or split steps. Keep decomposing until leaves are single atomic primitives with excellent prompts tailored to this user's library.
+Apply their request. Preserve anything they didn't ask to change. You may rename, re-describe, re-prompt, reorder, add, remove, or split steps.
+- Every name: 3–7 words, descriptive.
+- Every node: required description (input → output).
+- Every leaf: hyper-specific prompt with GOAL, INPUT, PROCESS, OUTPUT FORMAT, QUALITY BAR, CONSTRAINTS.
 
 Return ONLY JSON for the COMPLETE updated function (same shape as create):
 {"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}
 
-If this should become a single primitive with no sub-steps, return a leaf:
+If this should become a single leaf with no sub-steps, return:
 {"name":"...","description":"...","prompt":"..."}
 
 Escape quotes and newlines inside strings. No markdown fences.`;
-  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 6000 });
+  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 8000 });
   try {
     return parseJSON(out);
   } catch {
     const retry = await runClaude(
       `${prompt}\n\nPrevious reply was invalid JSON. Return ONLY one minified JSON object.`,
       "",
-      { system: librarySystem(operators, opMap), maxTokens: 6000 }
+      { system: librarySystem(operators, opMap), maxTokens: 8000 }
     );
     return parseJSON(retry);
   }
@@ -1964,7 +1990,7 @@ export default function App() {
             tree = {
               name: fn.name,
               description: fn.description,
-              prompt: `Apply the function "${fn.name}" (${fn.description}) to the input text and return only the result.`,
+              prompt: buildDefaultLeafPrompt(fn.name, fn.description),
             };
           }
           done += 1;
@@ -3896,7 +3922,7 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
 
           {!rootDraft && isCreate && (
             <p className="fn-hint">
-              Describe what this function should do, or fill in the fields below for a simple one-step function.
+              Describe what this function should do, or fill in the fields below. Use descriptive 3–7 word names and hyper-specific prompts with clear output format.
             </p>
           )}
 
@@ -3913,7 +3939,7 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. stress-test thesis"
+                placeholder="e.g. Build Full Investment Thesis"
               />
 
               <label>description</label>
@@ -3930,7 +3956,7 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
                     rows={6}
                     value={prompt}
                     onChange={(e) => setPrompt(e.target.value)}
-                    placeholder="Instruction for this step — return only the result."
+                    placeholder="Instruction for this step — include GOAL, OUTPUT FORMAT, and quality bar."
                   />
                 </>
               )}

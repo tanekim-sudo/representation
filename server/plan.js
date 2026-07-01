@@ -13,6 +13,7 @@ import {
   primitiveNeedsResolve,
 } from "../shared/transform-primitives.js";
 import { PHASE_TIMEOUT } from "../shared/phase-timeouts.js";
+import { isResolveLeaf } from "../shared/function-standards.js";
 
 /** Flatten any-depth operator tree to ordered leaves (depth-first). */
 export function collectLeaves(op, opMap, out = []) {
@@ -62,7 +63,8 @@ function compileWorkflowSteps(leaves) {
   return leaves
     .map((leaf, i) => {
       const body = leaf.prompt || `Apply "${leaf.name}" to the subject.`;
-      return `${i + 1}. ${leaf.name}\n   ${body}`;
+      const desc = leaf.description ? `\n   Description: ${leaf.description}` : "";
+      return `${i + 1}. ${leaf.name}${desc}\n   ${body}`;
     })
     .join("\n\n");
 }
@@ -133,9 +135,9 @@ export function compileExecutionPlan(op, opMap, material) {
   const sparse = (material || "").trim().length < 500;
   const needsResearch = shouldEnableResearch(op, opMap, material);
 
-  const parseLeaves = leaves.filter((l) => /^parse$/i.test(l.name));
+  const parseLeaves = leaves.filter(isResolveLeaf);
   const researchLeaves = leaves.filter((l) => l.research);
-  const synthesizeLeaves = leaves.filter((l) => !l.research && !/^parse$/i.test(l.name));
+  const synthesizeLeaves = leaves.filter((l) => !l.research && !isResolveLeaf(l));
 
   let workflowForSynth =
     synthesizeLeaves.length > 0 ? synthesizeLeaves : leaves.filter((l) => !l.research);
@@ -182,7 +184,7 @@ export function compileExecutionPlan(op, opMap, material) {
     op?.name || "function",
     op?.description || "",
     compileWorkflowSteps(workflowForSynth),
-    outputContractForFunction(op?.name)
+    outputContractForFunction(op?.name, op?.description)
   );
 
   phases.push({
