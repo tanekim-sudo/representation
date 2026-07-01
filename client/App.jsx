@@ -33,6 +33,63 @@ const DEFAULT_OPERATORS = [
     prompt: "Explain this as simply and concretely as possible, like to a smart friend. Return only the explanation." },
 ];
 
+const HIGHLIGHT_SYSTEM = `You are the cognition engine of lens — a whiteboard for thought particles.
+
+Rules:
+- Operate on the HIGHLIGHTED fragment as a discrete thought particle.
+- Never meta-comment. Never say "here is" or explain your process.
+- Deliver substantive content the user can think WITH.
+- Each output should feel like a portal — same deep structure, new surface.`;
+
+const HIGHLIGHT_OPS = {
+  isolate: {
+    label: "isolate",
+    title: "Extract pure thought particle",
+    prompt:
+      "ISOLATE this highlighted fragment as a standalone thought particle. Distill to its essential structure. Return ONLY the isolated particle — sharper, more itself than the original.",
+  },
+  collide: {
+    label: "collide",
+    title: "Force creative collision",
+    prompt:
+      "COLLIDE the highlighted thought particle with the collision material. Force an impact — fracture, fusion, or unexpected third thing. Return ONLY what emerges from the collision.",
+  },
+  synthesize: {
+    label: "synthesize",
+    title: "Unify into one insight",
+    prompt:
+      "SYNTHESIZE the highlight with its surrounding context into one unified insight. Return ONLY the synthesis.",
+  },
+  mutate: {
+    label: "mutate",
+    title: "Extend perceptual field",
+    multi: true,
+    prompt: `EXTEND the perceptual field around this highlight. Do NOT explain. Do NOT summarize the instruction.
+
+Spawn parallel expressions of the SAME underlying structure across different domains — each a portal.
+
+Format each portal as:
+[DOMAIN]
+One vivid paragraph expressing the same deep pattern in that domain.
+
+Include 5–8 portals from wherever the pattern genuinely lives: painting, literature, memory, film, psychology, biology, scripture, history, music, science, etc.
+
+The feeling: I have never run out of places to go.`,
+  },
+  compare: {
+    label: "compare",
+    title: "Find structural parallels",
+    multi: true,
+    prompt: `COMPARE this highlight to structurally parallel expressions elsewhere. Same deep structure, different surfaces.
+
+Format each as:
+[PARALLEL]
+Brief expression of the shared pattern
+
+Include 4–6 parallels from art, literature, history, science, personal life, myth, etc.`,
+  },
+};
+
 const RESEARCH_STEP_PROMPT =
   "Quick web search: find the entity name, product, funding, and team. Use 1–2 searches max. Then continue to analyze and draft the final deliverable in the same response.";
 
@@ -788,6 +845,16 @@ function estimatePlanMs(plan) {
   return plan.phases.reduce((sum, p) => sum + (p.timeoutMs || 55000) + 5000, 8000);
 }
 
+function parseHighlightPortals(out) {
+  const blocks = out
+    .split(/\n{2,}/)
+    .map((p) => p.replace(/^\s*(?:\[[^\]]+\]|[-*•]|\d+[.)])\s*/m, "").trim())
+    .filter((p) => p.length > 8);
+  if (blocks.length >= 2) return blocks;
+  const lines = out.split(/\n+/).map((l) => l.trim()).filter((l) => l.length > 8);
+  return lines.length >= 2 ? lines : [out.trim()];
+}
+
 function formatJobEta(ms) {
   if (ms <= 0) return "finishing…";
   const s = Math.ceil(ms / 1000);
@@ -971,6 +1038,7 @@ export default function App() {
   const [expanded, setExpanded] = useState({});
   const [dropReady, setDropReady] = useState(false);
   const [dropTargetId, setDropTargetId] = useState(null);
+  const [highlight, setHighlight] = useState(null); // { itemId, quote, context, rect }
   const [railTab, setRailTab] = useState("functions"); // functions | structures
   const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
 
@@ -993,6 +1061,59 @@ export default function App() {
   useEffect(() => localStorage.setItem(CAMERA_KEY, JSON.stringify(camera)), [camera]);
   useEffect(() => localStorage.setItem(OPERATORS_KEY, JSON.stringify(operators)), [operators]);
   useEffect(() => localStorage.setItem(STRUCTURES_KEY, JSON.stringify(structures)), [structures]);
+
+  // ---- highlighter: detect text selection in thought particles ----
+  useEffect(() => {
+    function onSelectionChange() {
+      const t = toolRef.current;
+      if (t !== "highlight" && t !== "select") return;
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) {
+        if (t === "highlight") setHighlight(null);
+        return;
+      }
+      const quote = sel.toString().trim();
+      if (quote.length < 2) {
+        setHighlight(null);
+        return;
+      }
+      const node = sel.anchorNode;
+      const el =
+        node?.nodeType === Node.TEXT_NODE
+          ? node.parentElement?.closest?.("[data-item].board-text")
+          : node?.closest?.("[data-item].board-text");
+      if (!el) {
+        setHighlight(null);
+        return;
+      }
+      const itemId = el.getAttribute("data-item");
+      const item = itemsRef.current.find((i) => i.id === itemId);
+      if (!item?.text) return;
+      const range = sel.getRangeAt(0);
+      const rect = range.getBoundingClientRect();
+      if (!rect.width && !rect.height) return;
+      setHighlight({
+        itemId,
+        quote,
+        context: item.text,
+        rect: {
+          left: rect.left,
+          top: rect.top,
+          bottom: rect.bottom,
+          right: rect.right,
+          width: rect.width,
+          height: rect.height,
+        },
+      });
+      setSelection([itemId]);
+    }
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () => document.removeEventListener("selectionchange", onSelectionChange);
+  }, []);
+
+  useEffect(() => {
+    if (tool !== "highlight" && tool !== "select") setHighlight(null);
+  }, [tool]);
 
   function showToast(msg) {
     setToast(msg);
@@ -1234,6 +1355,7 @@ export default function App() {
         deleteSelection();
       }
       if (e.key === "v" || e.key === "1") setTool("select");
+      if (e.key === "g" || e.key === "7") setTool("highlight");
       if (e.key === "t" || e.key === "2") setTool("text");
       if (e.key === "p" || e.key === "3") setTool("pen");
       if (e.key === "m" || e.key === "4") setTool("marker");
@@ -1724,7 +1846,7 @@ export default function App() {
   // ---- pointer gestures on the board ----
   function onPointerDown(e) {
     if (e.button !== 0) return;
-    if (e.target.closest?.(".xform-handle, .xform-screen-layer, .board-rail, .dock, .zoom, .palette, .op-drag-grip, .struct-card")) return;
+    if (!e.target.closest?.(".xform-handle, .xform-screen-layer, .board-rail, .dock, .zoom, .palette, .op-drag-grip, .struct-card, .highlight-toolbar")) return;
     const cx = e.clientX;
     const cy = e.clientY;
     const panning = spaceRef.current || toolRef.current === "hand";
@@ -1762,6 +1884,24 @@ export default function App() {
       setSelection([id]);
       setEditing(id);
       setTool("select");
+      return;
+    }
+
+    if (t === "highlight") {
+      const hit = itemAtPoint(cx, cy);
+      if (hit?.type === "text") {
+        setSelection([hit.id]);
+        return;
+      }
+      setHighlight(null);
+      if (!e.shiftKey) setSelection([]);
+      gesture.current = { mode: "lasso", x0: lp.x, y0: lp.y, x1: lp.x, y1: lp.y };
+      setLasso({ x0: lp.x, y0: lp.y, x1: lp.x, y1: lp.y });
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
       return;
     }
 
@@ -1883,6 +2023,66 @@ export default function App() {
     spawnNewObject(out, sourceIds, atWorld);
   }
 
+  async function runHighlightAction(opKey, hl) {
+    const op = HIGHLIGHT_OPS[opKey];
+    if (!op) return;
+    const collideIds = selRef.current.filter((id) => id !== hl.itemId);
+    let collideText = "";
+    if (opKey === "collide" && collideIds.length) {
+      collideText = itemsRef.current
+        .filter((it) => collideIds.includes(it.id) && it.type === "text" && it.text?.trim())
+        .map((it) => it.text.trim())
+        .join("\n\n");
+    }
+    let prompt = op.prompt;
+    if (opKey === "collide" && collideText) {
+      prompt += `\n\nCOLLISION MATERIAL:\n"""\n${collideText}\n"""`;
+    } else if (opKey === "collide") {
+      prompt += `\n\nCOLLISION MATERIAL: the surrounding context — force it against the full parent text.`;
+    }
+    const material = `HIGHLIGHTED THOUGHT PARTICLE:\n"""\n${hl.quote}\n"""\n\nFULL CONTEXT:\n"""\n${hl.context}\n"""`;
+    return runClaude(prompt, material, { system: HIGHLIGHT_SYSTEM, maxTokens: 4096 });
+  }
+
+  async function executeHighlightOp(opKey, hl) {
+    const op = HIGHLIGHT_OPS[opKey];
+    const jobId = pushJob({
+      id: uid(),
+      label: `✦ ${op.label}`,
+      type: "highlight",
+      status: "running",
+      step: op.title,
+      startedAt: Date.now(),
+      estimatedMs: op.multi ? 75000 : 45000,
+    });
+    window.getSelection()?.removeAllRanges();
+    setHighlight(null);
+
+    try {
+      const out = await runHighlightAction(opKey, hl);
+      if (!out?.trim()) throw new Error("empty result");
+
+      const cx = hl.rect.left + hl.rect.width / 2;
+      const cy = hl.rect.bottom + 12;
+      const atWorld = clientToWorld(cx, cy);
+
+      if (op.multi) {
+        const parts = parseHighlightPortals(out);
+        if (parts.length >= 2) {
+          spawnMultipleObjects(parts, [hl.itemId], atWorld);
+        } else {
+          spawnNewObject(out, [hl.itemId], atWorld);
+        }
+      } else {
+        spawnNewObject(out, [hl.itemId], atWorld);
+      }
+      finishJob(jobId, "done", `✦ ${op.label}`);
+    } catch (err) {
+      finishJob(jobId, "error", err.message || "failed");
+      showToast(err.message || "highlight failed");
+    }
+  }
+
   async function combineItemsByDrag(draggedIds, targetIds) {
     const ids = [...new Set([...draggedIds, ...targetIds])];
     const combineOp = operators.find((o) => o.name === "combine" && !o.role) || DEFAULT_OPERATORS[0];
@@ -1990,6 +2190,8 @@ export default function App() {
   const cursorClass =
     spaceDown || tool === "hand"
       ? "cur-grab"
+      : tool === "highlight"
+      ? "cur-text"
       : tool === "text"
       ? "cur-text"
       : tool === "pen" || tool === "marker"
@@ -2130,7 +2332,7 @@ export default function App() {
         )}
       </aside>
 
-      <div className={"board-main" + (dropReady ? " drop-ready" : "")}>
+      <div className={"board-main" + (dropReady ? " drop-ready" : "") + (tool === "highlight" ? " highlight-mode" : "")}>
       <div
         ref={viewportRef}
         className={"viewport " + cursorClass}
@@ -2299,12 +2501,24 @@ export default function App() {
       {/* empty hint */}
       {items.length === 0 && (
         <div className="empty-hint">
-          double-click to write · drag functions onto ideas · drag ideas together to combine
+          double-click to write · ✦ highlight text to operate on thought particles
         </div>
       )}
 
+      {highlight && !editing && (
+        <HighlightToolbar
+          highlight={highlight}
+          collideReady={selection.filter((id) => id !== highlight.itemId).length > 0}
+          onOp={(opKey) => executeHighlightOp(opKey, highlight)}
+          onDismiss={() => {
+            window.getSelection()?.removeAllRanges();
+            setHighlight(null);
+          }}
+        />
+      )}
+
       {/* AI palette over the selection */}
-      {aiMenuPos && (
+      {aiMenuPos && !highlight && (
         <ExportPalette
           pos={aiMenuPos}
           selectionCount={selection.length}
@@ -2318,6 +2532,7 @@ export default function App() {
       <div className="dock">
         {[
           ["select", "↖", "select / move (V)"],
+          ["highlight", "✦", "highlight cognition (G)"],
           ["hand", "✋", "pan (H)"],
           ["text", "T", "text (T)"],
           ["pen", "✎", "pen (P)"],
@@ -2478,6 +2693,42 @@ function startStructDrag(e, struct) {
   e.stopPropagation();
   e.dataTransfer.setData(STRUCT_MIME, struct.id);
   e.dataTransfer.effectAllowed = "copy";
+}
+
+function HighlightToolbar({ highlight, collideReady, onOp, onDismiss }) {
+  const cx = highlight.rect.left + highlight.rect.width / 2;
+  const above = highlight.rect.top > 100;
+  const style = {
+    left: cx,
+    top: above ? highlight.rect.top - 10 : highlight.rect.bottom + 10,
+    transform: above ? "translate(-50%, -100%)" : "translate(-50%, 0)",
+  };
+  const quote =
+    highlight.quote.length > 48 ? `${highlight.quote.slice(0, 48)}…` : highlight.quote;
+
+  return (
+    <div className="highlight-toolbar" style={style} onPointerDown={(e) => e.stopPropagation()}>
+      <div className="highlight-toolbar-head">
+        <span className="highlight-mark">✦</span>
+        <span className="highlight-quote">"{quote}"</span>
+        <button className="highlight-close" onClick={onDismiss} title="dismiss">
+          ×
+        </button>
+      </div>
+      <div className="highlight-actions">
+        {Object.entries(HIGHLIGHT_OPS).map(([key, op]) => (
+          <button
+            key={key}
+            className="highlight-btn"
+            title={op.title + (key === "collide" && collideReady ? " (2 objects selected)" : "")}
+            onClick={() => onOp(key)}
+          >
+            {op.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function JobRow({ job, onDismiss }) {

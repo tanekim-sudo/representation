@@ -529,6 +529,15 @@ body {
 .world .board-img {
   pointer-events: none;
 }
+.board-main.highlight-mode .world .board-text {
+  pointer-events: auto;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+.board-main.highlight-mode .world .board-text::selection {
+  background: color-mix(in srgb, #c9a227 35%, transparent);
+}
 .world .board-text.editing {
   pointer-events: auto;
   user-select: text;
@@ -704,6 +713,89 @@ body {
 }
 
 /* ---- AI palette ---- */
+/* ---- highlight toolbar ---- */
+.highlight-toolbar {
+  position: fixed;
+  z-index: 45;
+  min-width: 280px;
+  max-width: min(420px, 92vw);
+  padding: 10px 12px;
+  background: var(--card);
+  border: 1px solid color-mix(in srgb, #c9a227 40%, var(--line-2));
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(32, 32, 29, 0.14);
+  animation: highlight-in 0.18s ease;
+}
+@keyframes highlight-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -92%);
+  }
+  to {
+    opacity: 1;
+  }
+}
+.highlight-toolbar-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.highlight-mark {
+  color: #c9a227;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.highlight-quote {
+  flex: 1;
+  font-size: 11px;
+  color: var(--ink-2);
+  font-style: italic;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.highlight-close {
+  border: none;
+  background: transparent;
+  color: var(--faint);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.highlight-close:hover {
+  color: var(--ink);
+}
+.highlight-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.highlight-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+.highlight-btn:hover {
+  background: color-mix(in srgb, #c9a227 12%, var(--bg));
+  border-color: color-mix(in srgb, #c9a227 35%, var(--line-2));
+  color: var(--ink);
+}
+
 .palette {
   position: fixed;
   display: flex;
