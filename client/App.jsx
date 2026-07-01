@@ -41,7 +41,7 @@ const CANVAS_TOOLS = {
     group: "think",
     label: "Highlighter",
     icon: "▬",
-    hint: "Draw over text · same primitives as the toolbox — expand, compress, translate…",
+    hint: "Draw over text to transform · scribble to erase · circle to delete everything inside",
     swatch: HIGHLIGHT_INK,
   },
   select: {
@@ -922,6 +922,126 @@ function sampleStrokePoints(points) {
   return samples;
 }
 
+function strokePathLength(points) {
+  let len = 0;
+  for (let i = 1; i < points.length; i++) {
+    len += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+  }
+  return len;
+}
+
+function isClosedHighlightLoop(points) {
+  if (points.length < 10) return false;
+  const first = points[0];
+  const last = points[points.length - 1];
+  const closeDist = Math.hypot(last.x - first.x, last.y - first.y);
+  const pathLen = strokePathLength(points);
+  if (closeDist > Math.max(36, pathLen * 0.2)) return false;
+  const bb = strokeWorldBBox(points, HIGHLIGHT_W * 0.5);
+  if (!bb) return false;
+  return bb.maxx - bb.minx > 48 && bb.maxy - bb.miny > 48;
+}
+
+function pointInPolygon(x, y, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x;
+    const yi = polygon[i].y;
+    const xj = polygon[j].x;
+    const yj = polygon[j].y;
+    const denom = yj - yi || 1e-9;
+    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / denom + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function clientBoundsForItem(it, worldToClient) {
+  if (it.type === "stroke") {
+    if (!it.points?.length) return null;
+    const xs = it.points.map((p) => worldToClient(p.x, p.y).x);
+    const ys = it.points.map((p) => worldToClient(p.x, p.y).y);
+    return {
+      left: Math.min(...xs),
+      top: Math.min(...ys),
+      right: Math.max(...xs),
+      bottom: Math.max(...ys),
+    };
+  }
+  const scale = it.scale ?? 1;
+  const tl = worldToClient(it.x, it.y);
+  if (it.type === "image") {
+    const w = (it.w || 200) * scale;
+    const h = (it.h || Math.round((it.w || 200) * 0.75)) * scale;
+    return { left: tl.x, top: tl.y, right: tl.x + w, bottom: tl.y + h };
+  }
+  if (it.type === "text") {
+    const w = (it.w || 360) * scale;
+    const h = itemHeight(it) * scale;
+    return { left: tl.x, top: tl.y, right: tl.x + w, bottom: tl.y + h };
+  }
+  return null;
+}
+
+function brushHitsItem(it, cx, cy, lastCx, lastCy, brush, worldToClient) {
+  if (it.type === "text") return false;
+  if (it.type === "stroke") {
+    for (let k = 1; k < it.points.length; k++) {
+      const a = worldToClient(it.points[k - 1].x, it.points[k - 1].y);
+      const b = worldToClient(it.points[k].x, it.points[k].y);
+      if (Math.hypot(cx - a.x, cy - a.y) <= brush || Math.hypot(cx - b.x, cy - b.y) <= brush) return true;
+      if (distToSeg(cx, cy, a.x, a.y, b.x, b.y) <= brush) return true;
+      if (lastCx != null && distToSeg(lastCx, lastCy, a.x, a.y, b.x, b.y) <= brush) return true;
+    }
+    return false;
+  }
+  const bb = clientBoundsForItem(it, worldToClient);
+  if (!bb) return false;
+  const pad = brush;
+  const inRect = (x, y) =>
+    x >= bb.left - pad && x <= bb.right + pad && y >= bb.top - pad && y <= bb.bottom + pad;
+  if (inRect(cx, cy)) return true;
+  if (lastCx != null) {
+    for (let t = 0; t <= 1; t += 0.25) {
+      const x = lastCx + (cx - lastCx) * t;
+      const y = lastCy + (cy - lastCy) * t;
+      if (inRect(x, y)) return true;
+    }
+  }
+  return false;
+}
+
+function highlightErasureHits(items, cx, cy, lastCx, lastCy, scale, worldToClient, skipIds) {
+  const brush = Math.max(14, HIGHLIGHT_W * scale * 0.52);
+  const hits = [];
+  for (const it of items) {
+    if (skipIds?.has(it.id)) continue;
+    if (brushHitsItem(it, cx, cy, lastCx, lastCy, brush, worldToClient)) hits.push(it.id);
+  }
+  return hits;
+}
+
+function itemsInsideHighlightLoop(points, itemList) {
+  if (points.length < 3) return [];
+  const ids = [];
+  for (const it of itemList) {
+    const bb = itemWorldBBox(it);
+    if (!bb) continue;
+    const cx = (bb.minx + bb.maxx) / 2;
+    const cy = (bb.miny + bb.maxy) / 2;
+    const corners = [
+      { x: bb.minx, y: bb.miny },
+      { x: bb.maxx, y: bb.miny },
+      { x: bb.maxx, y: bb.maxy },
+      { x: bb.minx, y: bb.maxy },
+    ];
+    if (pointInPolygon(cx, cy, points) || corners.some((c) => pointInPolygon(c.x, c.y, points))) {
+      ids.push(it.id);
+    }
+  }
+  return [...new Set(ids)];
+}
+
 function extractTextFromHighlightStroke(points, strokeWidth, itemList, worldToClient) {
   const bb = strokeWorldBBox(points, strokeWidth * 0.65);
   const textItems = itemList.filter(
@@ -1200,6 +1320,8 @@ export default function App() {
   const combineRef = useRef(null);
   const showToastRef = useRef(() => {});
   const pendingImageRef = useRef(null);
+  const lastPointerRef = useRef(null);
+  const eraseAtPointerRef = useRef(() => false);
   const historyRef = useRef({ past: [], future: [] });
   const pushHistoryRef = useRef(() => {});
   camRef.current = camera;
@@ -1339,6 +1461,7 @@ export default function App() {
   useEffect(() => {
     function onMove(e) {
       const g = gesture.current;
+      lastPointerRef.current = { cx: e.clientX, cy: e.clientY };
       if (!g) return;
       const cx = e.clientX;
       const cy = e.clientY;
@@ -1347,8 +1470,32 @@ export default function App() {
         setCamera({ ...g.cam, x: g.cam.x + (cx - g.cx), y: g.cam.y + (cy - g.cy) });
       } else if (g.mode === "draw") {
         const w = clientToWorld(cx, cy);
+        if (g.highlight) {
+          const erased = highlightErasureHits(
+            itemsRef.current,
+            cx,
+            cy,
+            g.lastCx,
+            g.lastCy,
+            camRef.current.scale,
+            worldToClient,
+            g.deletedIds
+          );
+          if (erased.length) {
+            if (!g.deletedIds) g.deletedIds = new Set();
+            erased.forEach((id) => g.deletedIds.add(id));
+            setItems((arr) => arr.filter((it) => !g.deletedIds.has(it.id)));
+            setHighlight((hl) => {
+              if (hl && g.deletedIds.has(hl.itemId)) return null;
+              return hl;
+            });
+          }
+          g.lastCx = cx;
+          g.lastCy = cy;
+        }
         g.points.push(w);
-        setDraft({ points: g.points.slice(), marker: g.marker, highlight: g.highlight });
+        const loop = g.highlight && g.points.length > 8 && isClosedHighlightLoop(g.points);
+        setDraft({ points: g.points.slice(), marker: g.marker, highlight: g.highlight, loop });
       } else if (g.mode === "erase") {
         const hit = itemAtPoint(cx, cy);
         if (hit) setItems((arr) => arr.filter((it) => it.id !== hit.id));
@@ -1424,34 +1571,64 @@ export default function App() {
       if (g.mode === "draw") {
         if (g.points.length > 1) {
           const isHighlight = !!g.highlight;
-          const strokeId = uid();
-          setItems((arr) => [
-            ...arr,
-            {
-              id: strokeId,
-              type: "stroke",
-              points: g.points,
-              color: isHighlight ? HIGHLIGHT_INK : INK,
-              width: isHighlight ? HIGHLIGHT_W : g.marker ? MARKER_W : PEN_W,
-              marker: g.marker || isHighlight,
-              highlight: isHighlight,
-              ephemeral: isHighlight,
-            },
-          ]);
           if (isHighlight) {
             const pts = g.points.slice();
-            requestAnimationFrame(() => {
+            if (isClosedHighlightLoop(pts)) {
+              const inside = itemsInsideHighlightLoop(pts, itemsRef.current);
+              if (inside.length) {
+                setItems((arr) => arr.filter((it) => !inside.includes(it.id)));
+                showToastRef.current(`cleared ${inside.length} item${inside.length > 1 ? "s" : ""}`);
+              } else {
+                showToastRef.current("nothing inside the circle");
+              }
+              setHighlight(null);
+            } else {
+              const strokeId = uid();
+              setItems((arr) => [
+                ...arr,
+                {
+                  id: strokeId,
+                  type: "stroke",
+                  points: pts,
+                  color: HIGHLIGHT_INK,
+                  width: HIGHLIGHT_W,
+                  marker: true,
+                  highlight: true,
+                  ephemeral: true,
+                },
+              ]);
               requestAnimationFrame(() => {
-                const extracted = extractTextFromHighlightStroke(
-                  pts,
-                  HIGHLIGHT_W,
-                  itemsRef.current,
-                  worldToClient
-                );
-                if (extracted) setHighlight({ ...extracted, strokeId });
-                else showToastRef.current("draw over text to capture a thought particle");
+                requestAnimationFrame(() => {
+                  const extracted = extractTextFromHighlightStroke(
+                    pts,
+                    HIGHLIGHT_W,
+                    itemsRef.current.filter((it) => it.id !== strokeId),
+                    worldToClient
+                  );
+                  if (extracted) {
+                    setHighlight({ ...extracted, strokeId });
+                  } else {
+                    setItems((arr) => arr.filter((it) => it.id !== strokeId));
+                    if (!g.deletedIds?.size) {
+                      showToastRef.current("scribble to erase · circle to delete · draw over text to think");
+                    }
+                  }
+                });
               });
-            });
+            }
+          } else {
+            setItems((arr) => [
+              ...arr,
+              {
+                id: uid(),
+                type: "stroke",
+                points: g.points,
+                color: INK,
+                width: g.marker ? MARKER_W : PEN_W,
+                marker: g.marker,
+                highlight: false,
+              },
+            ]);
           }
         }
         setDraft(null);
@@ -1536,6 +1713,15 @@ export default function App() {
       if ((e.key === "Delete" || e.key === "Backspace") && selRef.current.length) {
         e.preventDefault();
         deleteSelection();
+        return;
+      }
+      if (
+        (e.key === "Delete" || e.key === "Backspace") &&
+        toolRef.current === "highlight" &&
+        lastPointerRef.current
+      ) {
+        e.preventDefault();
+        eraseAtPointerRef.current(lastPointerRef.current.cx, lastPointerRef.current.cy);
       }
     }
     window.addEventListener("keydown", down);
@@ -2089,12 +2275,43 @@ export default function App() {
     return { minx, miny, maxx, maxy };
   }
 
+  function eraseAtPointer(cx, cy) {
+    const hits = highlightErasureHits(
+      itemsRef.current,
+      cx,
+      cy,
+      null,
+      null,
+      camRef.current.scale,
+      worldToClient,
+      null
+    );
+    for (const it of itemsRef.current) {
+      if (it.type !== "text") continue;
+      const bb = clientBoundsForItem(it, worldToClient);
+      if (!bb) continue;
+      const pad = Math.max(14, HIGHLIGHT_W * camRef.current.scale * 0.52);
+      if (cx >= bb.left - pad && cx <= bb.right + pad && cy >= bb.top - pad && cy <= bb.bottom + pad) {
+        hits.push(it.id);
+      }
+    }
+    const uniq = [...new Set(hits)];
+    if (!uniq.length) return false;
+    pushHistory();
+    setItems((arr) => arr.filter((it) => !uniq.includes(it.id)));
+    setHighlight((hl) => (hl && uniq.includes(hl.itemId) ? null : hl));
+    setSelection((sel) => sel.filter((id) => !uniq.includes(id)));
+    return true;
+  }
+  eraseAtPointerRef.current = eraseAtPointer;
+
   // ---- pointer gestures on the board ----
   function onPointerDown(e) {
     if (e.button !== 0) return;
     setGesturing(true);
     const cx = e.clientX;
     const cy = e.clientY;
+    lastPointerRef.current = { cx, cy };
     const panning = toolRef.current === "hand";
     const t = toolRef.current;
 
@@ -2130,7 +2347,14 @@ export default function App() {
     }
 
     if (t === "highlight") {
-      gesture.current = { mode: "draw", highlight: true, points: [w] };
+      gesture.current = {
+        mode: "draw",
+        highlight: true,
+        points: [w],
+        deletedIds: new Set(),
+        lastCx: cx,
+        lastCy: cy,
+      };
       setDraft({ points: [w], highlight: true });
       try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
       return;
@@ -2608,16 +2832,35 @@ export default function App() {
                     fillOpacity={draft.highlight ? 0.72 : draft.marker ? 0.32 : 0.95}
                   />
                 ) : (
-                  <polyline
-                    className={"draft-stroke" + (draft.highlight ? " hl-stroke" : "")}
-                    points={draft.points.map((p) => `${p.x},${p.y}`).join(" ")}
-                    fill="none"
-                    stroke={draft.highlight ? HIGHLIGHT_INK : INK}
-                    strokeWidth={draft.highlight ? HIGHLIGHT_W : draft.marker ? MARKER_W : PEN_W}
-                    strokeOpacity={draft.highlight ? 0.72 : draft.marker ? 0.32 : 0.95}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
+                  <>
+                    <polyline
+                      className={
+                        "draft-stroke" +
+                        (draft.highlight ? " hl-stroke" : "") +
+                        (draft.loop ? " hl-loop" : "")
+                      }
+                      points={draft.points.map((p) => `${p.x},${p.y}`).join(" ")}
+                      fill={draft.loop ? "rgba(224, 82, 82, 0.08)" : "none"}
+                      stroke={draft.loop ? "#c94444" : draft.highlight ? HIGHLIGHT_INK : INK}
+                      strokeWidth={draft.highlight ? HIGHLIGHT_W : draft.marker ? MARKER_W : PEN_W}
+                      strokeOpacity={draft.loop ? 0.55 : draft.highlight ? 0.72 : draft.marker ? 0.32 : 0.95}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    {draft.loop && draft.points.length > 2 && (
+                      <line
+                        className="hl-loop-close"
+                        x1={draft.points[draft.points.length - 1].x}
+                        y1={draft.points[draft.points.length - 1].y}
+                        x2={draft.points[0].x}
+                        y2={draft.points[0].y}
+                        stroke="#c94444"
+                        strokeWidth={2}
+                        strokeOpacity={0.45}
+                        strokeDasharray="6 4"
+                      />
+                    )}
+                  </>
                 )}
               </>
             )}
@@ -2972,7 +3215,7 @@ function CanvasHud({ tool, selectionCount, imageArmed }) {
   } else if (selectionCount > 0 && tool === "select") {
     hint = `${selectionCount} selected · drag to move · drop on another idea to merge`;
   } else if (tool === "highlight") {
-    hint = "Draw over text · pick a primitive — same operators as the toolbox";
+    hint = "Text → primitives · scribble erases · closed circle deletes inside · ⌫ at cursor";
   }
 
   return (

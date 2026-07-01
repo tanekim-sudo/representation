@@ -578,6 +578,12 @@ body {
 .ink-layer polyline.draft-stroke {
   pointer-events: none;
 }
+.ink-layer polyline.hl-loop {
+  mix-blend-mode: normal;
+}
+.ink-layer line.hl-loop-close {
+  pointer-events: none;
+}
 .ink-layer circle.draft-dot {
   pointer-events: none;
 }
