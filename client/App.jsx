@@ -33,6 +33,22 @@ const DEFAULT_OPERATORS = [
     prompt: "Explain this as simply and concretely as possible, like to a smart friend. Return only the explanation." },
 ];
 
+const RESEARCH_STEP_PROMPT =
+  'Use web_search to research the subject. Search: "[entity name] startup", "[entity name] funding Series A", "[entity name] product construction AI". Return: ENTITY, WEBSITE, PRODUCT, FUNDING, TEAM, TRACTION, SOURCES with URLs. Never skip searching.';
+
+function migrateOperators(ops) {
+  if (!Array.isArray(ops)) return ops;
+  return ops.map((o) => {
+    if (o.name === "research" && (o.kind === "prompt" || !o.kind || o.kind === "pipeline")) {
+      const prompt = o.prompt?.toLowerCase().includes("web_search") || o.prompt?.toLowerCase().includes("web search")
+        ? o.prompt
+        : RESEARCH_STEP_PROMPT;
+      return { ...o, research: true, prompt };
+    }
+    return o;
+  });
+}
+
 const ONBOARDED_KEY = "lens.onboarded.v1";
 
 const ROLES = [
@@ -291,15 +307,18 @@ FUNCTION: ${fn.name}
 ${fn.description ? `Description: ${fn.description}` : ""}
 
 REQUIRED PIPELINE PATTERN for ${role}:
-1. parse — extract subject/entities from input (one short output)
-2. research — "research": true — web search for current facts about the subject
+1. parse — extract subject/entities from input (one short output). Example: "bobyard ai startup" → ENTITY: Bobyard
+2. research — MUST have "research": true — prompt MUST instruct web_search for funding, product, team, traction
 3. analyze — apply ${fn.name} framework using research findings
 4. draft — final professional deliverable with clear sections
 
+Research step prompt example:
+"Use web_search to research the entity. Search company name + funding + product. Return ENTITY, WEBSITE, PRODUCT, FUNDING, TEAM, TRACTION, SOURCES."
+
 Requirements:
 - 3–5 top-level steps minimum following parse → research → analyze → draft pattern where applicable.
-- Every research step MUST have "research": true and a prompt that uses web search.
-- Leaf prompts must produce REAL deliverables, never meta-commentary about missing data.
+- Every research step MUST have "research": true.
+- draft/analyze steps must say: use VERIFIED WEB RESEARCH and prior step outputs — never claim insufficient data.
 - For "thesis": output sections — Thesis Statement, Market, Product, Traction, Team, Risks, Upside, Recommendation.
 - ONE word names at every level.
 
@@ -806,7 +825,7 @@ async function runPipelineOnServer({ op, opMap, operators, material, image, onPr
   let elapsed = 0;
   const progressTimer = setInterval(() => {
     elapsed += 5;
-    onProgress?.(`${op.name} · ${elapsed}s`, Math.min(0.88, 0.18 + (elapsed / 240) * 0.7));
+    onProgress?.(`web research · ${op.name} · ${elapsed}s`, Math.min(0.88, 0.18 + (elapsed / 240) * 0.7));
   }, 5000);
 
   try {
@@ -905,7 +924,8 @@ export default function App() {
     if (!Array.isArray(s)) return DEFAULT_OPERATORS;
     const names = new Set(s.map((o) => o.name));
     const missing = DEFAULT_OPERATORS.filter((o) => o.primitive && !names.has(o.name));
-    return missing.length ? [...s, ...missing] : s;
+    const merged = missing.length ? [...s, ...missing] : s;
+    return migrateOperators(merged);
   });
   const [structures, setStructures] = useState(() => {
     const saved = load(STRUCTURES_KEY, null);
