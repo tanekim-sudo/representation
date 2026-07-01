@@ -14,9 +14,12 @@ import { compileExecutionPlan } from "../server/plan.js";
 
 describe("transform primitives", () => {
   it("defines the canonical grammar", () => {
-    assert.equal(TRANSFORM_PRIMITIVES.length, 15);
+    assert.equal(TRANSFORM_PRIMITIVES.length, 22);
     assert.ok(PRIMITIVE_NAMES.has("expand"));
     assert.ok(PRIMITIVE_NAMES.has("compress"));
+    assert.ok(PRIMITIVE_NAMES.has("collapse scales"));
+    assert.ok(PRIMITIVE_NAMES.has("elevate the overlooked"));
+    assert.equal(TRANSFORM_PRIMITIVES.filter((p) => p.move).length, 7);
     assert.ok(PRIMITIVE_NAMES.has("merge"));
     assert.ok(PRIMITIVE_NAMES.has("translate"));
     assert.equal(TRANSFORM_PRIMITIVES.filter((p) => p.multi).length, 1);
@@ -34,7 +37,7 @@ describe("transform primitives", () => {
       { id: "x1", name: "thesis", top: true, kind: "pipeline", steps: [] },
     ];
     const next = migrateOperatorStore(legacy);
-    assert.equal(next.filter((o) => o.primitive).length, 15);
+    assert.equal(next.filter((o) => o.primitive).length, 22);
     assert.ok(next.some((o) => o.name === "thesis"));
     assert.ok(!next.some((o) => o.name === "combine"));
   });

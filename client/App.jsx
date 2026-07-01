@@ -22,6 +22,9 @@ const OLD_SEEDS_KEY = "lens.seeds.v2";
 const OP_MIME = "application/lens-op";
 const STRUCT_MIME = "application/lens-structure";
 const SEL_MIME = "application/lens-selection";
+const LENS_MIME = "application/lens-lens";
+const LENSES_KEY = "lens.lenses.v1";
+const ACTIVE_LENS_KEY = "lens.activeLens.v1";
 const RAIL_W = 280;
 const COMBINE_THRESHOLD = 14; // px moved before drop-on-item triggers combine
 
@@ -1404,6 +1407,11 @@ export default function App() {
   });
   // walking: { nodeId, title, steps: [...], stepIndex } — derived from a node's history on demand
   const [walking, setWalking] = useState(null);
+  // lenses: named sets of recurring moves — git for perception
+  const [lenses, setLenses] = useState(() => load(LENSES_KEY, []));
+  const [activeLensId, setActiveLensId] = useState(() => load(ACTIVE_LENS_KEY, null));
+  const [lensEditor, setLensEditor] = useState(null); // { id|null, name, moveIds }
+  const [lensCompare, setLensCompare] = useState(null); // { aId, bId? }
 
   const [tool, setTool] = useState("highlight"); // highlight | select | text | pen | marker | eraser | hand
   const [selection, setSelection] = useState([]);
@@ -1457,6 +1465,8 @@ export default function App() {
   useEffect(() => localStorage.setItem(CAMERA_KEY, JSON.stringify(camera)), [camera]);
   useEffect(() => localStorage.setItem(OPERATORS_KEY, JSON.stringify(operators)), [operators]);
   useEffect(() => localStorage.setItem(STRUCTURES_KEY, JSON.stringify(structures)), [structures]);
+  useEffect(() => localStorage.setItem(LENSES_KEY, JSON.stringify(lenses)), [lenses]);
+  useEffect(() => localStorage.setItem(ACTIVE_LENS_KEY, JSON.stringify(activeLensId)), [activeLensId]);
 
   useEffect(() => {
     if (!["select", "highlight"].includes(tool)) setHighlight(null);
@@ -1896,6 +1906,21 @@ export default function App() {
         pendingImageRef.current = null;
         setImageArmed(false);
       }
+      // space toggles between the two modes: highlighter on, then off —
+      // leaving the highlighter wipes every highlight and returns to the mouse
+      if (e.key === " " && !e.repeat && !walkingRef.current) {
+        e.preventDefault();
+        pendingImageRef.current = null;
+        setImageArmed(false);
+        if (toolRef.current === "highlight") {
+          setItems((arr) => arr.filter((it) => !(it.type === "stroke" && it.highlight)));
+          setHighlight(null);
+          setTool("select");
+        } else {
+          setTool("highlight");
+        }
+        return;
+      }
       if ((e.key === "Delete" || e.key === "Backspace") && selRef.current.length) {
         e.preventDefault();
         deleteSelection();
@@ -2061,7 +2086,7 @@ export default function App() {
     return newIds;
   }
 
-  function spawnMultipleObjects(texts, sourceIds, atWorld) {
+  function spawnMultipleObjects(texts, sourceIds, atWorld, via = null) {
     const idSet = new Set(sourceIds || []);
     const sel = itemsRef.current.filter((it) => idSet.has(it.id));
     const boxes = sel.map(itemWorldBBox).filter(Boolean);
@@ -2075,7 +2100,7 @@ export default function App() {
       const id = uid();
       newIds.push(id);
       const w = Math.min(520, Math.max(260, Math.round(clean.length * 0.5 + 180)));
-      newItems.push(normalizeItem({ id, type: "text", x, y, text: clean, w, bornFrom: sourceIds || [] }));
+      newItems.push(normalizeItem({ id, type: "text", x, y, text: clean, w, bornFrom: sourceIds || [], via }));
       y += Math.max(80, Math.min(200, clean.length * 0.3 + 60));
     }
     if (newItems.length) {
@@ -2127,21 +2152,21 @@ export default function App() {
         if (lines.length >= 2) {
           const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
           pushHistory();
-          spawnMultipleObjects(lines, targetIds, atWorld);
+          spawnMultipleObjects(lines, targetIds, atWorld, { opId: op.id, name: op.name });
           return;
         }
         throw new Error(`${op.name} produced only one part`);
       }
       const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
       pushHistory();
-      spawnMultipleObjects(parts, targetIds, atWorld);
+      spawnMultipleObjects(parts, targetIds, atWorld, { opId: op.id, name: op.name });
       return;
     }
 
     if (!out?.trim()) throw new Error("empty output");
     patchJob(jobId, { step: "spawning object…", progress: 0.98 });
     const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
-    applyTransformResult(out, targetIds, atWorld);
+    applyTransformResult(out, targetIds, atWorld, { opId: op.id, name: op.name });
   }
 
   function runOperator(op, targetIds, opts = {}) {
@@ -2385,14 +2410,15 @@ export default function App() {
       .sort((a, b) => (a.bornAt || 0) - (b.bornAt || 0) || (a.id === nodeId ? 1 : b.id === nodeId ? -1 : 0));
     const steps = involved.map((it, i) => {
       const parents = nodeParents(it, allItems).filter((pid) => seen.has(pid));
-      const caption =
-        parents.length === 0
-          ? i === 0
-            ? "where it began"
-            : "a separate spark"
-          : parents.length === 1
-          ? "grew out of the previous thought"
-          : `drawn together from ${parents.length} thoughts`;
+      const caption = it.via?.name
+        ? `through “${it.via.name}”`
+        : parents.length === 0
+        ? i === 0
+          ? "where it began"
+          : "a separate spark"
+        : parents.length === 1
+        ? "grew out of the previous thought"
+        : `drawn together from ${parents.length} thoughts`;
       return {
         id: uid(),
         // for convergence moments, illuminate the parents alongside the child
@@ -2425,6 +2451,43 @@ export default function App() {
 
   function endWalk() {
     setWalking(null);
+  }
+
+  /**
+   * Distill the full transformation thread behind a node into one reusable
+   * operator: the sequence of moves that produced it becomes a pipeline that
+   * replays automatically on any new material.
+   */
+  function captureThreadAsOperator(nodeId) {
+    const journey = buildNodeJourney(nodeId);
+    if (!journey) return;
+    const vias = journey.steps
+      .map((s) => itemsRef.current.find((it) => it.id === s.focusId)?.via)
+      .filter(Boolean);
+    if (!vias.length) {
+      showToast("no transformations on this thread yet — apply some operators first");
+      return;
+    }
+    const stepNodes = vias.map((via) => {
+      const src = (via.opId && opMap[via.opId]) || operators.find((o) => o.name === via.name);
+      if (src) return opToJsonTree(src, opMap);
+      return {
+        name: via.name,
+        description: `Reapply the move "${via.name}"`,
+        prompt: `Apply the cognitive move "${via.name}" to the input material. Perform the transformation fully and return ONLY the transformed text.`,
+      };
+    });
+    const moveNames = vias.map((v) => v.name);
+    const shortChain = moveNames.slice(0, 4).join(" → ") + (moveNames.length > 4 ? " → …" : "");
+    const tree = {
+      name: `thread: ${shortChain}`.slice(0, 72),
+      description: `Replays a captured thread of seeing — ${moveNames.join(", then ")} — on any material, ending where "${journey.title}" ended.`,
+      steps: stepNodes,
+    };
+    const { ops } = treeToOperators(tree, { top: true });
+    setOperators((prev) => [...prev, ...ops]);
+    setRailTab("functions");
+    showToast(`distilled · ${vias.length} move${vias.length === 1 ? "" : "s"} → one operator`);
   }
 
   // leave the walk holding the current thought — tendrils are ready, continuing is branching
@@ -2598,6 +2661,41 @@ export default function App() {
     showToast(`saved · ${op.name}`);
   }
 
+  /** Fork: copy an operator (whole subtree) into yours for divergent evolution. */
+  function forkOperator(opId) {
+    const op = opMap[opId];
+    if (!op) return;
+    const tree = opToJsonTree(op, opMap);
+    tree.name = `${op.name} (fork)`;
+    const { ops, rootId } = treeToOperators(tree, { role: op.role || null, top: true });
+    setOperators((prev) => [
+      ...prev,
+      ...ops.map((o) => (o.id === rootId ? { ...o, forkedFrom: op.id } : o)),
+    ]);
+    setRailTab("functions");
+    showToast(`forked · ${op.name} — now evolve it your way`);
+  }
+
+  /** Merge: drop one operator onto another → a compound pipeline (A, then B). */
+  function composeOperators(draggedId, targetId) {
+    if (!draggedId || draggedId === targetId) return;
+    const a = opMap[draggedId];
+    const b = opMap[targetId];
+    if (!a || !b) return;
+    const tree = {
+      name: `${a.name} → ${b.name}`.slice(0, 72),
+      description: `Compound move: apply "${a.name}", then "${b.name}" to its result. Forged from two moves; now a first-class object you can fork, extend, or fold into larger procedures.`,
+      steps: [opToJsonTree(a, opMap), opToJsonTree(b, opMap)],
+    };
+    const { ops, rootId } = treeToOperators(tree, { top: true });
+    setOperators((prev) => [
+      ...prev,
+      ...ops.map((o) => (o.id === rootId ? { ...o, mergedFrom: [a.id, b.id] } : o)),
+    ]);
+    setRailTab("functions");
+    showToast(`compound forged · ${a.name} → ${b.name}`);
+  }
+
   function deleteStructure(id) {
     setStructures((arr) => arr.filter((s) => s.id !== id));
   }
@@ -2650,7 +2748,7 @@ export default function App() {
       const title = `#${num} · ${parsed.name}`;
       const center = viewportCenterWorld();
       const body = `${parsed.name.toUpperCase()}\n\n${parsed.body}`;
-      spawnNewObject(body, nodes.map((n) => n.id), center);
+      spawnNewObject(body, nodes.map((n) => n.id), center, { name: "sameness" });
       const struct = {
         id: uid(),
         title,
@@ -2670,14 +2768,134 @@ export default function App() {
   }
 
   const topFunctions = operators.filter((o) => o.top);
-  const primitives = useMemo(() => {
+  const canonicalPrimitives = useMemo(() => {
     const byName = Object.fromEntries(
       operators.filter((o) => o.primitive && !o.role && !o.top).map((o) => [o.name, o])
     );
     return TRANSFORM_PRIMITIVES.map((t) => byName[t.name] || t);
   }, [operators]);
+  const moves = useMemo(() => canonicalPrimitives.filter((o) => o.move), [canonicalPrimitives]);
+  const primitives = useMemo(() => canonicalPrimitives.filter((o) => !o.move), [canonicalPrimitives]);
   const basics = operators.filter((o) => !o.role && !o.top && !o.primitive);
-  const selectionQuickOps = primitives;
+  const activeLens = lenses.find((l) => l.id === activeLensId) || null;
+  // your active lens IS your quick palette — style as recurring transformations
+  const selectionQuickOps = useMemo(() => {
+    if (activeLens) {
+      const ops = (activeLens.moveIds || []).map((id) => opMap[id]).filter(Boolean);
+      if (ops.length) return ops;
+    }
+    return [...moves, ...primitives];
+  }, [activeLens, opMap, moves, primitives]);
+
+  // ---- lenses: create, evolve, fork, merge, compare, inherit — git for perception ----
+  function saveLens(draft) {
+    const name = (draft.name || "").trim() || "unnamed lens";
+    const moveIds = [...new Set(draft.moveIds || [])];
+    if (!moveIds.length) {
+      showToast("a lens needs at least one move");
+      return;
+    }
+    if (draft.id) {
+      setLenses((ls) =>
+        ls.map((l) => (l.id === draft.id ? { ...l, name, moveIds, evolvedAt: Date.now() } : l))
+      );
+      showToast(`lens evolved · ${name}`);
+    } else {
+      const lens = { id: uid(), name, moveIds, createdAt: Date.now() };
+      setLenses((ls) => [lens, ...ls]);
+      setActiveLensId(lens.id);
+      showToast(`lens created · ${name} — now active`);
+    }
+    setLensEditor(null);
+  }
+
+  function forkLens(id) {
+    const l = lenses.find((x) => x.id === id);
+    if (!l) return;
+    const fork = { ...l, id: uid(), name: `${l.name} (fork)`, forkedFrom: l.id, createdAt: Date.now() };
+    delete fork.mergedFrom;
+    setLenses((ls) => [fork, ...ls]);
+    showToast(`forked · ${l.name}`);
+  }
+
+  function mergeLenses(aId, bId) {
+    if (!aId || aId === bId) return;
+    const a = lenses.find((x) => x.id === aId);
+    const b = lenses.find((x) => x.id === bId);
+    if (!a || !b) return;
+    const lens = {
+      id: uid(),
+      name: `${a.name} ⚭ ${b.name}`.slice(0, 60),
+      moveIds: [...new Set([...(a.moveIds || []), ...(b.moveIds || [])])],
+      mergedFrom: [a.id, b.id],
+      createdAt: Date.now(),
+    };
+    setLenses((ls) => [lens, ...ls]);
+    showToast(`lenses merged · ${lens.name}`);
+  }
+
+  function deleteLens(id) {
+    setLenses((ls) => ls.filter((l) => l.id !== id));
+    if (activeLensId === id) setActiveLensId(null);
+    setLensCompare(null);
+  }
+
+  /** Send a lens: its moves travel as full operator trees so anyone can inherit it. */
+  function exportLens(id) {
+    const l = lenses.find((x) => x.id === id);
+    if (!l) return;
+    const opTrees = (l.moveIds || [])
+      .map((oid) => opMap[oid])
+      .filter(Boolean)
+      .map((op) => opToJsonTree(op, opMap));
+    const blob = JSON.stringify({ kind: "lens-lens", version: 1, name: l.name, opTrees }, null, 2);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([blob], { type: "application/json" }));
+    a.download = `lens-${l.name.replace(/\s+/g, "-").slice(0, 32)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    showToast("lens sent — someone can now inherit your way of seeing");
+  }
+
+  function importLens(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        if (data?.kind !== "lens-lens" || !Array.isArray(data.opTrees) || !data.opTrees.length) {
+          throw new Error("not a lens");
+        }
+        const moveIds = [];
+        const newOps = [];
+        for (const tree of data.opTrees) {
+          // reuse an identical existing op (canonical primitives keep their id)
+          const existing = operators.find((o) => o.name === tree.name && !o.top);
+          if (existing && !tree.steps) {
+            moveIds.push(existing.id);
+            continue;
+          }
+          const { ops, rootId } = treeToOperators(tree, { top: !!tree.steps });
+          newOps.push(...ops);
+          moveIds.push(rootId);
+        }
+        if (newOps.length) setOperators((prev) => [...prev, ...newOps]);
+        const lens = {
+          id: uid(),
+          name: data.name || "inherited lens",
+          moveIds,
+          inherited: true,
+          createdAt: Date.now(),
+        };
+        setLenses((ls) => [lens, ...ls]);
+        setActiveLensId(lens.id);
+        setRailTab("lenses");
+        showToast(`inherited · ${lens.name} — now looking through it`);
+      } catch {
+        showToast("could not read that lens file");
+      }
+    };
+    reader.readAsText(file);
+  }
 
   function plantStarterThought() {
     pushHistory();
@@ -3007,7 +3225,7 @@ export default function App() {
   }
 
   // ---- export / object helpers ----
-  function spawnNewObject(text, sourceIds, atWorld) {
+  function spawnNewObject(text, sourceIds, atWorld, via = null) {
     const clean = stripMd(text || "").trim();
     if (!clean) return null;
     const idSet = new Set(sourceIds || []);
@@ -3028,15 +3246,15 @@ export default function App() {
     }
     const id = uid();
     const w = Math.min(560, Math.max(280, Math.round(clean.length * 0.5 + 200)));
-    const item = normalizeItem({ id, type: "text", x, y, text: clean, w, bornFrom: sourceIds || [] });
+    const item = normalizeItem({ id, type: "text", x, y, text: clean, w, bornFrom: sourceIds || [], via });
     setItems((arr) => [...arr, item]);
     setSelection([id]);
     return id;
   }
 
-  function applyTransformResult(out, sourceIds, atWorld) {
+  function applyTransformResult(out, sourceIds, atWorld, via = null) {
     pushHistory();
-    spawnNewObject(out, sourceIds, atWorld);
+    spawnNewObject(out, sourceIds, atWorld, via);
   }
 
   function runHighlightPrimitive(op, hl) {
@@ -3267,8 +3485,66 @@ export default function App() {
           <button className={"rail-tab" + (railTab === "structures" ? " on" : "")} onClick={() => setRailTab("structures")}>
             structures {structures.length ? `(${structures.length})` : ""}
           </button>
+          <button className={"rail-tab" + (railTab === "lenses" ? " on" : "")} onClick={() => setRailTab("lenses")}>
+            lenses {lenses.length ? `(${lenses.length})` : ""}
+          </button>
         </div>
-        {railTab === "functions" ? (
+        {railTab === "lenses" ? (
+          <>
+            <button
+              className="rail-create"
+              onClick={() => setLensEditor({ id: null, name: "", moveIds: activeLens?.moveIds || [] })}
+            >
+              + lens
+            </button>
+            <button
+              className="rail-create ghost"
+              onClick={() => {
+                const input = document.createElement("input");
+                input.type = "file";
+                input.accept = "application/json";
+                input.onchange = () => input.files?.[0] && importLens(input.files[0]);
+                input.click();
+              }}
+            >
+              ↓ inherit a lens
+            </button>
+            <div className="rail-scroll">
+              {lenses.length === 0 ? (
+                <p className="rail-empty">
+                  A lens is your set of recurring moves — the transformations you keep reaching for.
+                  Style is recurring transformation. Create one, evolve it, fork it, merge two by
+                  dragging one onto another, or inherit someone else's.
+                </p>
+              ) : (
+                lenses.map((lens) => (
+                  <LensCard
+                    key={lens.id}
+                    lens={lens}
+                    active={lens.id === activeLensId}
+                    opMap={opMap}
+                    lenses={lenses}
+                    comparing={lensCompare?.aId === lens.id && !lensCompare?.bId}
+                    onUse={() => setActiveLensId(lens.id === activeLensId ? null : lens.id)}
+                    onEvolve={() => setLensEditor({ id: lens.id, name: lens.name, moveIds: lens.moveIds || [] })}
+                    onFork={() => forkLens(lens.id)}
+                    onSend={() => exportLens(lens.id)}
+                    onCompare={() => {
+                      if (lensCompare?.aId && lensCompare.aId !== lens.id) {
+                        setLensCompare({ aId: lensCompare.aId, bId: lens.id });
+                      } else {
+                        setLensCompare({ aId: lens.id });
+                        showToast("now pick the lens to compare against");
+                      }
+                    }}
+                    onMergeDrop={(draggedId) => mergeLenses(draggedId, lens.id)}
+                    onDelete={() => deleteLens(lens.id)}
+                  />
+                ))
+              )}
+            </div>
+          </>
+        ) : railTab === "functions" ? (
           <>
             <button className="rail-create" onClick={openCreateFunction}>
               + function
@@ -3285,6 +3561,26 @@ export default function App() {
                       expanded={expanded}
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
+                      onFork={forkOperator}
+                      onCompose={composeOperators}
+                    />
+                  ))}
+                </>
+              )}
+              {moves.length > 0 && (
+                <>
+                  <div className="rail-section">perceptual moves</div>
+                  {moves.map((op) => (
+                    <DraggableOpCard
+                      key={op.id}
+                      op={op}
+                      opMap={opMap}
+                      expanded={expanded}
+                      onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
+                      onEdit={openEditFunction}
+                      onFork={forkOperator}
+                      onCompose={composeOperators}
+                      flat
                     />
                   ))}
                 </>
@@ -3300,6 +3596,8 @@ export default function App() {
                       expanded={expanded}
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
+                      onFork={forkOperator}
+                      onCompose={composeOperators}
                       flat
                     />
                   ))}
@@ -3316,6 +3614,8 @@ export default function App() {
                       expanded={expanded}
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
+                      onFork={forkOperator}
+                      onCompose={composeOperators}
                       flat
                     />
                   ))}
@@ -3352,10 +3652,13 @@ export default function App() {
         )}
         <JobPanel jobs={jobs} onDismiss={(id) => setJobs((j) => j.filter((x) => x.id !== id))} />
         {railTab === "functions" && (
-          <div className="rail-hint">drag onto canvas to run · drop here to save</div>
+          <div className="rail-hint">drag onto canvas to run · drop op on op to forge a compound · ⑂ forks</div>
         )}
         {railTab === "structures" && (
           <div className="rail-hint">drop selection here to save · drag onto canvas to plant</div>
+        )}
+        {railTab === "lenses" && (
+          <div className="rail-hint">use → your quick palette · drag lens onto lens to merge</div>
         )}
       </aside>
 
@@ -3667,7 +3970,7 @@ export default function App() {
       {highlight && !editing && (
         <HighlightToolbar
           highlight={highlight}
-          primitives={primitives}
+          primitives={selectionQuickOps}
           mergeReady={selection.filter((id) => id !== highlight.itemId).length > 0}
           onOp={(op) => runHighlightPrimitive(op, highlight)}
           onDismiss={() => {
@@ -3699,6 +4002,11 @@ export default function App() {
             walking.stepIndex >= walking.steps.length - 1 ? endWalk() : walkTo(walking.stepIndex + 1)
           }
           onBranch={continueFromWalk}
+          onDistill={() => {
+            const nodeId = walking.nodeId;
+            endWalk();
+            captureThreadAsOperator(nodeId);
+          }}
           onLeave={endWalk}
         />
       )}
@@ -3720,6 +4028,11 @@ export default function App() {
           onDiscoverSameness={selection.length >= 2 ? runSamenessDiscovery : null}
           onWalkPath={selection.length === 1 && selItem && isNoteItem(selItem) ? () => walkNode(selItem.id) : null}
           onSendPath={selection.length === 1 && selItem && isNoteItem(selItem) ? () => sendNodePath(selItem.id) : null}
+          onDistill={
+            selection.length === 1 && selItem && (selItem.via || selItem.bornFrom?.length)
+              ? () => captureThreadAsOperator(selItem.id)
+              : null
+          }
         />
       )}
 
@@ -3755,6 +4068,30 @@ export default function App() {
           onSaveTree={saveFunctionTree}
           onSaveManual={saveManualOp}
           onDelete={deleteFunction}
+        />
+      )}
+
+      {lensEditor && (
+        <LensEditor
+          draft={lensEditor}
+          groups={[
+            { label: "perceptual moves", ops: moves },
+            { label: "primitives", ops: primitives },
+            { label: "yours", ops: topFunctions },
+            { label: "basics", ops: basics },
+          ]}
+          onChange={setLensEditor}
+          onSave={saveLens}
+          onClose={() => setLensEditor(null)}
+        />
+      )}
+
+      {lensCompare?.aId && lensCompare?.bId && (
+        <LensComparePanel
+          a={lenses.find((l) => l.id === lensCompare.aId)}
+          b={lenses.find((l) => l.id === lensCompare.bId)}
+          opMap={opMap}
+          onClose={() => setLensCompare(null)}
         />
       )}
     </div>
@@ -3793,7 +4130,7 @@ function BranchCompass({ item, worldToClient, expanded, subtle, onStartDrag }) {
   );
 }
 
-function WalkOverlay({ walk, stepIndex, step, rects, onPrev, onNext, onBranch, onLeave }) {
+function WalkOverlay({ walk, stepIndex, step, rects, onPrev, onNext, onBranch, onDistill, onLeave }) {
   const last = stepIndex >= walk.steps.length - 1;
   const pad = 16;
   const missing = rects.length === 0;
@@ -3860,6 +4197,15 @@ function WalkOverlay({ walk, stepIndex, step, rects, onPrev, onNext, onBranch, o
           <button className="walk-btn branch" onClick={onBranch} title="stop here and continue your own way (b)">
             ⑂ continue from here
           </button>
+          {onDistill && (
+            <button
+              className="walk-btn branch"
+              onClick={onDistill}
+              title="save this whole thread of transformations as one reusable operator"
+            >
+              ◈ distill
+            </button>
+          )}
           <button className="walk-btn" onClick={onLeave} title="leave the walk (esc)">
             leave
           </button>
@@ -4005,7 +4351,9 @@ function CanvasHud({ tool, selectionCount, imageArmed }) {
   } else if (selectionCount > 0 && tool === "select") {
     hint = `${selectionCount} selected · double-tap to branch · drag nub for arrow · Enter to write`;
   } else if (tool === "highlight") {
-    hint = "Text → primitives · scribble erases · closed circle selects inside · ⌫ at cursor";
+    hint = "Text → primitives · scribble erases · closed circle selects inside · space → clear highlights, back to mouse";
+  } else if (tool === "select" && selectionCount === 0) {
+    hint = meta.hint + " · space → highlighter";
   }
 
   return (
@@ -4210,17 +4558,36 @@ function JobPanel({ jobs, onDismiss }) {
   );
 }
 
-function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, flat }) {
+function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onFork, onCompose, flat }) {
+  const [composeOver, setComposeOver] = useState(false);
   if (!op) return null;
   const steps = op.kind === "pipeline" && op.steps ? op.steps.map((id) => opMap[id]).filter(Boolean) : [];
   const open = expanded[op.id];
   return (
     <div className="op-card-wrap">
       <div
-        className="op-card"
+        className={"op-card" + (composeOver ? " compose-over" : "")}
         draggable
         onDragStart={(e) => startOpDrag(e, op)}
-        title="drag onto canvas"
+        onDragOver={(e) => {
+          if (onCompose && e.dataTransfer.types.includes(OP_MIME)) {
+            e.preventDefault();
+            e.stopPropagation();
+            setComposeOver(true);
+          }
+        }}
+        onDragLeave={() => setComposeOver(false)}
+        onDrop={(e) => {
+          if (!onCompose) return;
+          const draggedId = e.dataTransfer.getData(OP_MIME);
+          if (draggedId) {
+            e.preventDefault();
+            e.stopPropagation();
+            setComposeOver(false);
+            onCompose(draggedId, op.id);
+          }
+        }}
+        title="drag onto canvas to run · drop another operator here to forge a compound"
       >
         <div className="op-card-row">
           <span className="op-drag-grip" title="drag onto canvas">
@@ -4229,10 +4596,18 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, flat }) {
           <div className="op-card-label">
             <span className="op-card-name">{op.name}</span>
             {open && op.description && <span className="op-card-desc">{op.description}</span>}
+            {open && (op.forkedFrom || op.mergedFrom) && (
+              <span className="op-card-lineage">{op.forkedFrom ? "⑂ forked" : "⚭ compound"}</span>
+            )}
           </div>
           {!flat && steps.length > 0 && (
             <button className="op-card-toggle" onClick={() => onToggle(op.id)} title={`${steps.length} steps`}>
               {open ? "▾" : "▸"}
+            </button>
+          )}
+          {onFork && (
+            <button className="op-card-edit" onClick={() => onFork(op.id)} title="fork — copy into yours and evolve it">
+              ⑂
             </button>
           )}
           <button className="op-card-edit" onClick={() => onEdit(op)} title="edit">
@@ -4279,6 +4654,180 @@ function DraggableStep({ step, opMap, expanded, onToggle, onEdit, depth }) {
         sub.map((child) => (
           <DraggableStep key={child.id} step={child} opMap={opMap} expanded={expanded} onToggle={onToggle} onEdit={onEdit} depth={depth + 1} />
         ))}
+    </div>
+  );
+}
+
+function LensCard({ lens, active, opMap, lenses, comparing, onUse, onEvolve, onFork, onSend, onCompare, onMergeDrop, onDelete }) {
+  const [mergeOver, setMergeOver] = useState(false);
+  const moveNames = (lens.moveIds || []).map((id) => opMap[id]?.name).filter(Boolean);
+  const parentName = (id) => lenses.find((l) => l.id === id)?.name || "a lost lens";
+  return (
+    <div
+      className={"lens-card" + (active ? " active" : "") + (mergeOver ? " merge-over" : "") + (comparing ? " comparing" : "")}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData(LENS_MIME, lens.id);
+        e.dataTransfer.effectAllowed = "copy";
+      }}
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes(LENS_MIME)) {
+          e.preventDefault();
+          setMergeOver(true);
+        }
+      }}
+      onDragLeave={() => setMergeOver(false)}
+      onDrop={(e) => {
+        const draggedId = e.dataTransfer.getData(LENS_MIME);
+        setMergeOver(false);
+        if (draggedId && draggedId !== lens.id) {
+          e.preventDefault();
+          e.stopPropagation();
+          onMergeDrop(draggedId);
+        }
+      }}
+      title="drag onto another lens to merge them"
+    >
+      <div className="lens-card-top">
+        <span className="lens-card-name">{lens.name}</span>
+        {active && <span className="lens-card-live">looking through</span>}
+      </div>
+      <div className="lens-card-moves">
+        {moveNames.slice(0, 6).map((n, i) => (
+          <span key={i} className="lens-move-chip">{n}</span>
+        ))}
+        {moveNames.length > 6 && <span className="lens-move-chip more">+{moveNames.length - 6}</span>}
+      </div>
+      <div className="lens-card-meta">
+        {lens.forkedFrom && <span>⑂ forked from “{parentName(lens.forkedFrom)}”</span>}
+        {lens.mergedFrom && <span>⚭ merged from “{parentName(lens.mergedFrom[0])}” + “{parentName(lens.mergedFrom[1])}”</span>}
+        {lens.inherited && <span>↓ inherited</span>}
+      </div>
+      <div className="lens-card-actions">
+        <button className={"lens-btn" + (active ? " on" : "")} onClick={onUse} title="make this your quick palette">
+          {active ? "◉ in use" : "use"}
+        </button>
+        <button className="lens-btn" onClick={onEvolve} title="evolve — change its moves">
+          evolve
+        </button>
+        <button className="lens-btn" onClick={onFork} title="fork a copy to diverge">
+          ⑂
+        </button>
+        <button className={"lens-btn" + (comparing ? " on" : "")} onClick={onCompare} title="compare with another lens">
+          ≍
+        </button>
+        <button className="lens-btn" onClick={onSend} title="send — someone else can inherit it">
+          ↗
+        </button>
+        <button className="lens-btn danger" onClick={onDelete} title="delete lens">
+          ×
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function LensEditor({ draft, groups, onChange, onSave, onClose }) {
+  const selected = new Set(draft.moveIds || []);
+  const toggle = (id) =>
+    onChange((d) => {
+      const next = new Set(d.moveIds || []);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return { ...d, moveIds: [...next] };
+    });
+  return (
+    <div className="onboard-scrim" onClick={onClose}>
+      <div className="lens-editor" onClick={(e) => e.stopPropagation()}>
+        <h3 className="lens-editor-title">{draft.id ? "evolve lens" : "new lens"}</h3>
+        <p className="lens-editor-sub">
+          Pick the moves you keep reaching for. This becomes your quick palette — your recognizable way
+          of transforming what you see.
+        </p>
+        <input
+          className="lens-editor-name"
+          autoFocus
+          placeholder="name it — e.g. everything is a garden"
+          value={draft.name}
+          onChange={(e) => {
+            const name = e.target.value;
+            onChange((d) => ({ ...d, name }));
+          }}
+          onKeyDown={(e) => e.key === "Enter" && onSave(draft)}
+        />
+        <div className="lens-editor-groups">
+          {groups
+            .filter((g) => g.ops.length)
+            .map((g) => (
+              <div key={g.label}>
+                <div className="rail-section">{g.label}</div>
+                <div className="lens-editor-chips">
+                  {g.ops.map((op) => (
+                    <button
+                      key={op.id}
+                      className={"lens-pick" + (selected.has(op.id) ? " on" : "")}
+                      title={op.description || op.name}
+                      onClick={() => toggle(op.id)}
+                    >
+                      {op.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+        </div>
+        <div className="lens-editor-foot">
+          <span className="lens-editor-count">{selected.size} move{selected.size === 1 ? "" : "s"}</span>
+          <button className="rec-btn" onClick={onClose}>
+            cancel
+          </button>
+          <button className="rec-btn primary" disabled={!selected.size} onClick={() => onSave(draft)}>
+            {draft.id ? "save evolution" : "create lens"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LensComparePanel({ a, b, opMap, onClose }) {
+  if (!a || !b) return null;
+  const nameOf = (id) => opMap[id]?.name || "?";
+  const aSet = new Set(a.moveIds || []);
+  const bSet = new Set(b.moveIds || []);
+  const shared = [...aSet].filter((id) => bSet.has(id));
+  const onlyA = [...aSet].filter((id) => !bSet.has(id));
+  const onlyB = [...bSet].filter((id) => !aSet.has(id));
+  return (
+    <div className="onboard-scrim" onClick={onClose}>
+      <div className="lens-compare" onClick={(e) => e.stopPropagation()}>
+        <h3 className="lens-editor-title">
+          “{a.name}” ≍ “{b.name}”
+        </h3>
+        <p className="lens-editor-sub">
+          Two ways of seeing, side by side. The shared moves are common ground; the unique ones are
+          each lens's signature.
+        </p>
+        <div className="lens-compare-cols">
+          <div className="lens-compare-col">
+            <div className="rail-section">only “{a.name}”</div>
+            {onlyA.length ? onlyA.map((id) => <span key={id} className="lens-move-chip">{nameOf(id)}</span>) : <span className="lens-compare-none">nothing unique</span>}
+          </div>
+          <div className="lens-compare-col shared">
+            <div className="rail-section">shared</div>
+            {shared.length ? shared.map((id) => <span key={id} className="lens-move-chip shared">{nameOf(id)}</span>) : <span className="lens-compare-none">no common ground</span>}
+          </div>
+          <div className="lens-compare-col">
+            <div className="rail-section">only “{b.name}”</div>
+            {onlyB.length ? onlyB.map((id) => <span key={id} className="lens-move-chip">{nameOf(id)}</span>) : <span className="lens-compare-none">nothing unique</span>}
+          </div>
+        </div>
+        <div className="lens-editor-foot">
+          <button className="rec-btn" onClick={onClose}>
+            close
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -4332,6 +4881,7 @@ function SelectionMenu({
   onDiscoverSameness,
   onWalkPath,
   onSendPath,
+  onDistill,
 }) {
   const [open, setOpen] = useState(false);
   const transform = pos.below ? "translate(-50%, 0)" : "translate(-50%, -100%)";
@@ -4388,6 +4938,15 @@ function SelectionMenu({
         {onSendPath && (
           <button className="p-btn" onClick={onSendPath} title="send this thought with its whole journey">
             ↗ send
+          </button>
+        )}
+        {onDistill && (
+          <button
+            className="p-btn distill"
+            onClick={onDistill}
+            title="capture the thread of transformations behind this node as one reusable operator"
+          >
+            ◈ distill
           </button>
         )}
         <button className="p-btn" onClick={() => setOpen(true)}>
