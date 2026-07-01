@@ -2043,6 +2043,37 @@ export default function App() {
   const topFunctions = operators.filter((o) => o.top);
   const primitives = operators.filter((o) => !o.role && !o.top && (o.primitive || ["combine", "split"].includes(o.name)));
   const basics = operators.filter((o) => !o.role && !o.top && !o.primitive && !["combine", "split"].includes(o.name));
+  const selectionQuickOps = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    for (const op of [...topFunctions, ...primitives, ...basics]) {
+      if (seen.has(op.id)) continue;
+      seen.add(op.id);
+      out.push(op);
+      if (out.length >= 8) break;
+    }
+    return out;
+  }, [operators, topFunctions, primitives, basics]);
+
+  function plantStarterThought() {
+    pushHistory();
+    const c = viewportCenterWorld();
+    const id = uid();
+    const text = "The father runs to the prodigal son.";
+    setItems([
+      normalizeItem({
+        id,
+        type: "text",
+        x: c.x - 160,
+        y: c.y - 36,
+        text,
+        w: 360,
+      }),
+    ]);
+    setSelection([id]);
+    setTool("highlight");
+    showToast("draw over the text with the highlighter");
+  }
 
   function itemScreenBBox(it) {
     if (it.type === "stroke") {
@@ -2309,6 +2340,7 @@ export default function App() {
   }
 
   function applyTransformResult(out, sourceIds, atWorld) {
+    pushHistory();
     spawnNewObject(out, sourceIds, atWorld);
   }
 
@@ -2358,6 +2390,7 @@ export default function App() {
 
       if (op.multi) {
         const portals = parseHighlightPortals(out);
+        pushHistory();
         if (portals.length >= 2) {
           spawnPortalObjects(portals, [hl.itemId], atWorld);
         } else if (portals.length === 1) {
@@ -2366,6 +2399,7 @@ export default function App() {
           spawnNewObject(out, [hl.itemId], atWorld);
         }
       } else {
+        pushHistory();
         spawnNewObject(out, [hl.itemId], atWorld);
       }
       finishJob(jobId, "done", `✦ ${op.label}`);
@@ -2807,7 +2841,10 @@ export default function App() {
       {/* empty hint */}
       {items.length === 0 && (
         <div className="empty-hint">
-          pick a tool below · double-click to write · draw highlighter over text to think
+          <p>pick a tool below · or start with a thought</p>
+          <button type="button" className="starter-btn" onClick={plantStarterThought}>
+            ✦ try the highlighter
+          </button>
         </div>
       )}
 
@@ -2831,9 +2868,11 @@ export default function App() {
 
       {/* AI palette over the selection */}
       {aiMenuPos && !highlight && (
-        <ExportPalette
+        <SelectionMenu
           pos={aiMenuPos}
           selectionCount={selection.length}
+          quickOps={selectionQuickOps}
+          onRunOp={(op) => runOperator(op, selection, { atClient: { x: aiMenuPos.x, y: aiMenuPos.y } })}
           onExport={exportSelection}
           onDelete={deleteSelection}
           onSaveStructure={() => captureSelectionAsStructure()}
@@ -3332,7 +3371,16 @@ function escapeHtml(s) {
     .replace(/\n/g, "<br>");
 }
 
-function ExportPalette({ pos, selectionCount, onExport, onDelete, onSaveStructure, onDiscoverSameness }) {
+function SelectionMenu({
+  pos,
+  selectionCount,
+  quickOps,
+  onRunOp,
+  onExport,
+  onDelete,
+  onSaveStructure,
+  onDiscoverSameness,
+}) {
   const [open, setOpen] = useState(false);
   const transform = pos.below ? "translate(-50%, 0)" : "translate(-50%, -100%)";
   const style = { left: pos.x, top: pos.y, transform };
@@ -3356,25 +3404,41 @@ function ExportPalette({ pos, selectionCount, onExport, onDelete, onSaveStructur
   }
 
   return (
-    <div className="palette" style={style}>
-      {onDiscoverSameness && (
-        <>
-          <button className="p-btn sameness" onClick={onDiscoverSameness} title="find shared structure across selection">
-            sameness
-          </button>
-          <span className="p-sep" />
-        </>
+    <div className="palette selection-menu" style={style}>
+      {quickOps.length > 0 && (
+        <div className="selection-ops">
+          {quickOps.map((op) => (
+            <button
+              key={op.id}
+              className="p-btn op-chip"
+              title={op.description || op.name}
+              onClick={() => onRunOp(op)}
+            >
+              {op.name}
+            </button>
+          ))}
+        </div>
       )}
-      <button className="p-btn" onClick={() => setOpen(true)}>
-        export
-      </button>
-      <button className="p-btn" onClick={onSaveStructure} disabled={!selectionCount} title="save to structures">
-        save
-      </button>
-      <span className="p-sep" />
-      <button className="p-btn danger" onClick={onDelete} title="delete selection">
-        ⌫
-      </button>
+      <div className="selection-actions">
+        {onDiscoverSameness && (
+          <>
+            <button className="p-btn sameness" onClick={onDiscoverSameness} title="find shared structure">
+              sameness
+            </button>
+            <span className="p-sep" />
+          </>
+        )}
+        <button className="p-btn" onClick={() => setOpen(true)}>
+          export
+        </button>
+        <button className="p-btn" onClick={onSaveStructure} disabled={!selectionCount} title="save to structures">
+          save
+        </button>
+        <span className="p-sep" />
+        <button className="p-btn danger" onClick={onDelete} title="delete selection">
+          ⌫
+        </button>
+      </div>
     </div>
   );
 }

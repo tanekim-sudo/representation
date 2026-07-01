@@ -658,6 +658,62 @@ body {
   letter-spacing: 0.02em;
   pointer-events: none;
   z-index: 1;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.empty-hint p {
+  margin: 0;
+}
+.starter-btn {
+  pointer-events: auto;
+  border: 1px solid color-mix(in srgb, #c9a227 45%, var(--line-2));
+  background: color-mix(in srgb, #c9a227 10%, var(--card));
+  color: #7a6520;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 10px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.starter-btn:hover {
+  background: color-mix(in srgb, #c9a227 18%, var(--card));
+  border-color: #c9a227;
+  color: #5c4a12;
+}
+
+.palette.selection-menu {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  max-width: min(400px, 92vw);
+  padding: 8px 10px;
+}
+.selection-ops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: center;
+}
+.selection-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  justify-content: center;
+}
+.p-btn.op-chip {
+  font-size: 11px;
+  padding: 5px 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--paper);
+}
+.p-btn.op-chip:hover {
+  border-color: var(--ink);
+  background: color-mix(in srgb, var(--ink) 6%, var(--paper));
 }
 
 /* ---- canvas HUD — active mode readout ---- */
