@@ -1414,6 +1414,7 @@ export default function App() {
   const [canRedo, setCanRedo] = useState(false);
   const [railTab, setRailTab] = useState("functions"); // functions | structures
   const [railDropOver, setRailDropOver] = useState(false);
+  const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
   const [expandPulse, setExpandPulse] = useState(null); // item id — compass enlarged after double-tap
   const [linkDraft, setLinkDraft] = useState(null); // { fromX, fromY, toX, toY }
 
