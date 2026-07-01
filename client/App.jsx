@@ -1254,6 +1254,7 @@ export default function App() {
   const [gesturing, setGesturing] = useState(false);
   const [imageArmed, setImageArmed] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
   const [railTab, setRailTab] = useState("functions"); // functions | structures
   const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
 
@@ -1297,6 +1298,7 @@ export default function App() {
     past.push(snap);
     if (past.length > 50) past.shift();
     historyRef.current.future = [];
+    setCanRedo(false);
     setCanUndo(true);
   }
   pushHistoryRef.current = pushHistory;
@@ -1307,10 +1309,24 @@ export default function App() {
     future.push(JSON.stringify(itemsRef.current));
     setItems(JSON.parse(past.pop()));
     setCanUndo(past.length > 0);
+    setCanRedo(future.length > 0);
     setHighlight(null);
     setSelection([]);
     setEditing(null);
     showToast("undone");
+  }
+
+  function redo() {
+    const { past, future } = historyRef.current;
+    if (!future.length) return;
+    past.push(JSON.stringify(itemsRef.current));
+    setItems(JSON.parse(future.pop()));
+    setCanUndo(true);
+    setCanRedo(future.length > 0);
+    setHighlight(null);
+    setSelection([]);
+    setEditing(null);
+    showToast("redone");
   }
 
   function removeHighlightStroke(strokeId) {
@@ -2884,6 +2900,7 @@ export default function App() {
         tool={tool}
         imageArmed={imageArmed}
         canUndo={canUndo}
+        canRedo={canRedo}
         onSelectTool={(id) => {
           if (id !== "image") {
             pendingImageRef.current = null;
@@ -2893,6 +2910,7 @@ export default function App() {
         }}
         onPickImage={pickImage}
         onUndo={undo}
+        onRedo={redo}
       />
 
       {/* zoom controls */}
@@ -3048,6 +3066,8 @@ function CanvasHud({ tool, selectionCount, imageArmed }) {
     hint = "Click on the canvas to place your image";
   } else if (tool === "highlight" && selectionCount > 1) {
     hint = `${selectionCount} ideas selected · draw over text · collide fuses with the other selection`;
+  } else if (selectionCount >= 2 && tool === "select") {
+    hint = `${selectionCount} selected · selection menu → sameness or combine · drag to move`;
   } else if (selectionCount > 0 && tool === "select") {
     hint = `${selectionCount} selected · drag to move · drop on another idea to combine`;
   } else if (tool === "highlight") {
@@ -3074,14 +3094,19 @@ function CanvasHud({ tool, selectionCount, imageArmed }) {
   );
 }
 
-function InputDeck({ tool, imageArmed, canUndo, onSelectTool, onPickImage, onUndo }) {
+function InputDeck({ tool, imageArmed, canUndo, canRedo, onSelectTool, onPickImage, onUndo, onRedo }) {
   return (
     <div className="input-deck" onPointerDown={(e) => e.stopPropagation()}>
       <div className="input-deck-head">
         <span>input</span>
-        <button type="button" className="input-undo" disabled={!canUndo} onClick={onUndo} title="undo">
-          ↩ undo
-        </button>
+        <div className="input-history">
+          <button type="button" className="input-undo" disabled={!canUndo} onClick={onUndo} title="undo">
+            ↩ undo
+          </button>
+          <button type="button" className="input-undo" disabled={!canRedo} onClick={onRedo} title="redo">
+            redo ↪
+          </button>
+        </div>
       </div>
       <div className="input-deck-groups">
         {TOOL_GROUPS.map((group) => {

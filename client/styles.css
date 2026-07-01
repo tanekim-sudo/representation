@@ -799,6 +799,11 @@ body {
   text-transform: uppercase;
   color: var(--faint);
 }
+.input-history {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 .input-undo {
   border: 1px solid var(--line-2);
   background: var(--paper);
