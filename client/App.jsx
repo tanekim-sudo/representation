@@ -6,6 +6,7 @@ import {
   isTransformPrimitive,
   estimatePrimitiveMs,
 } from "../shared/transform-primitives.js";
+import { scaleEta, ETA } from "../shared/eta.js";
 
 const ITEMS_KEY = "lens.board.items.v1";
 const CAMERA_KEY = "lens.board.camera.v1";
@@ -850,8 +851,9 @@ function parseApiResponse(res, raw) {
 }
 
 function estimatePlanMs(plan) {
-  if (!plan?.phases?.length) return 90000;
-  return plan.phases.reduce((sum, p) => sum + (p.timeoutMs || 55000) + 5000, 8000);
+  if (!plan?.phases?.length) return ETA.default;
+  const raw = plan.phases.reduce((sum, p) => sum + (p.timeoutMs || 55000) + 5000, 8000);
+  return scaleEta(raw);
 }
 
 function parseHighlightPortals(out) {
@@ -1916,7 +1918,7 @@ export default function App() {
       step: "starting…",
       progress: 0,
       startedAt: Date.now(),
-      estimatedMs: isTransformPrimitive(op) ? estimatePrimitiveMs(op, "") : 90000,
+      estimatedMs: isTransformPrimitive(op) ? estimatePrimitiveMs(op, "") : ETA.default,
     });
     executeOperatorJob(jobId, op, ids, atClient, opts)
       .then(() => finishJob(jobId, "done", `done · ${op.name}`))
@@ -1940,7 +1942,7 @@ export default function App() {
   }
 
   async function expandFunction(op) {
-    const jobId = pushJob({ id: uid(), label: `expand · ${op.name}`, type: "expand", status: "running", step: "expanding…", startedAt: Date.now(), estimatedMs: 60000 });
+    const jobId = pushJob({ id: uid(), label: `expand · ${op.name}`, type: "expand", status: "running", step: "expanding…", startedAt: Date.now(), estimatedMs: ETA.expandFunction });
     try {
       const tree = await expandOperatorSubtree(op, opMap, operators);
       const { rootId, ops } = treeToOperators(tree, { role: op.role || null, top: !!op.top });
@@ -1975,7 +1977,7 @@ export default function App() {
       status: "running",
       step: "imagining functions…",
       startedAt: Date.now(),
-      estimatedMs: 120000,
+      estimatedMs: ETA.onboarding,
     });
     try {
       const list = await generateFunctionList(role, operators, opMap);
@@ -2149,7 +2151,7 @@ export default function App() {
     const labels = nodes.map((n) =>
       n.type === "text" ? n.text.trim() : "[image]"
     );
-    const jobId = pushJob({ label: "discover sameness", kind: "sameness", status: "running", step: "starting…", startedAt: Date.now(), estimatedMs: 45000 });
+    const jobId = pushJob({ label: "discover sameness", kind: "sameness", status: "running", step: "starting…", startedAt: Date.now(), estimatedMs: ETA.sameness });
     try {
       patchJob(jobId, { status: "running", step: "finding shared structure" });
       const out = await runClaude(samenessPrompt(labels), "", { system: boardSystem(operators, opMap), maxTokens: 2000 });
@@ -3355,7 +3357,7 @@ function JobRow({ job, onDismiss }) {
     if (job.status !== "running") return;
 
     const start = job.startedAt || Date.now();
-    const total = job.estimatedMs || 90000;
+    const total = job.estimatedMs || ETA.default;
 
     const tick = () => {
       const elapsed = Date.now() - start;

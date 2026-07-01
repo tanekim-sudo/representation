@@ -1,5 +1,11 @@
 /** Transform primitive grammar — single source of truth for toolbox + highlighter. */
 
+import { scaleEta } from "./eta.js";
+
+/** Legacy phase overhead before ETA_SCALE (resolve / research). */
+const PRIMITIVE_RESOLVE_ETA_MS = 18000;
+const PRIMITIVE_RESEARCH_ETA_MS = 42000;
+
 export const PRIMITIVE_SYSTEM = `You are a transform engine on a thinking whiteboard. One step. Readable in ~10–20 seconds.
 
 Rules:
@@ -279,9 +285,9 @@ export function primitiveNeedsResearch(op, material) {
 
 export function estimatePrimitiveMs(op, material) {
   let ms = op.estimatedMs || 15000;
-  if (primitiveNeedsResolve(op, material)) ms += 18000;
-  if (primitiveNeedsResearch(op, material)) ms += 42000;
-  return ms;
+  if (primitiveNeedsResolve(op, material)) ms += PRIMITIVE_RESOLVE_ETA_MS;
+  if (primitiveNeedsResearch(op, material)) ms += PRIMITIVE_RESEARCH_ETA_MS;
+  return scaleEta(ms);
 }
 
 /** Merge saved operators with canonical primitive definitions; keep user role/top functions. */

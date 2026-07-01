@@ -9,6 +9,7 @@ import {
   primitiveNeedsResolve,
   estimatePrimitiveMs,
 } from "./transform-primitives.js";
+import { scaleEta, ETA } from "./eta.js";
 import { compileExecutionPlan } from "../server/plan.js";
 
 describe("transform primitives", () => {
@@ -43,7 +44,8 @@ describe("transform primitives", () => {
     const material = "bobyard ai startup";
     assert.ok(primitiveNeedsResolve(expand, material));
     assert.ok(primitiveNeedsResearch(expand, material));
-    assert.ok(estimatePrimitiveMs(expand, material) > 60000);
+    assert.ok(estimatePrimitiveMs(expand, material) >= ETA.sameness);
+    assert.ok(estimatePrimitiveMs(expand, material) < 60000);
 
     const plan = compileExecutionPlan(expand, { [expand.id]: expand }, material);
     assert.equal(plan.phases.length, 3);

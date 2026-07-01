@@ -10,7 +10,7 @@
     "dev:client": "vite",
     "build": "vite build",
     "start": "node server/index.js",
-    "test": "node --test shared/transform-primitives.test.js"
+    "test": "node --test shared/transform-primitives.test.js shared/eta.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.107.0",
