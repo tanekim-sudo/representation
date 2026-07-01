@@ -1579,6 +1579,14 @@ export default function App() {
         finishEditing();
         setSelection([]);
         setLasso(null);
+        setHighlight((hl) => {
+          if (hl?.strokeId) {
+            setItems((arr) => arr.filter((it) => it.id !== hl.strokeId));
+          }
+          return null;
+        });
+        pendingImageRef.current = null;
+        setImageArmed(false);
       }
       if ((e.key === "Delete" || e.key === "Backspace") && selRef.current.length) {
         e.preventDefault();
@@ -2799,7 +2807,7 @@ export default function App() {
       {/* empty hint */}
       {items.length === 0 && (
         <div className="empty-hint">
-          choose a mode below · double-click empty space to write
+          pick a tool below · double-click to write · draw highlighter over text to think
         </div>
       )}
 
@@ -2829,6 +2837,7 @@ export default function App() {
           onExport={exportSelection}
           onDelete={deleteSelection}
           onSaveStructure={() => captureSelectionAsStructure()}
+          onDiscoverSameness={selection.length >= 2 ? runSamenessDiscovery : null}
         />
       )}
 
@@ -3195,7 +3204,7 @@ function JobPanel({ jobs, onDismiss }) {
   if (!jobs.length) return null;
   return (
     <div className="job-panel">
-      <div className="job-panel-head">running</div>
+      <div className="job-panel-head">in progress</div>
       {jobs.map((job) => (
         <JobRow key={job.id} job={job} onDismiss={onDismiss} />
       ))}
@@ -3323,7 +3332,7 @@ function escapeHtml(s) {
     .replace(/\n/g, "<br>");
 }
 
-function ExportPalette({ pos, selectionCount, onExport, onDelete, onSaveStructure }) {
+function ExportPalette({ pos, selectionCount, onExport, onDelete, onSaveStructure, onDiscoverSameness }) {
   const [open, setOpen] = useState(false);
   const transform = pos.below ? "translate(-50%, 0)" : "translate(-50%, -100%)";
   const style = { left: pos.x, top: pos.y, transform };
@@ -3348,6 +3357,14 @@ function ExportPalette({ pos, selectionCount, onExport, onDelete, onSaveStructur
 
   return (
     <div className="palette" style={style}>
+      {onDiscoverSameness && (
+        <>
+          <button className="p-btn sameness" onClick={onDiscoverSameness} title="find shared structure across selection">
+            sameness
+          </button>
+          <span className="p-sep" />
+        </>
+      )}
       <button className="p-btn" onClick={() => setOpen(true)}>
         export
       </button>

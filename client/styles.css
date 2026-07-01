@@ -1057,6 +1057,14 @@ body {
 .p-btn.danger:hover {
   background: rgba(176, 64, 48, 0.12);
 }
+.p-btn.sameness {
+  color: #7a6520;
+  font-weight: 600;
+}
+.p-btn.sameness:hover {
+  background: color-mix(in srgb, #c9a227 14%, var(--paper));
+  color: #5c4a12;
+}
 .p-sep {
   width: 1px;
   height: 20px;
