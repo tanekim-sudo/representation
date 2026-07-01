@@ -17,8 +17,8 @@ const COMBINE_THRESHOLD = 14; // px moved before drop-on-item triggers combine
 const INK = "#20201d";
 const PEN_W = 2.4; // world units
 const MARKER_W = 16;
-const HIGHLIGHT_INK = "#E5C04A";
-const HIGHLIGHT_W = 22;
+const HIGHLIGHT_INK = "#F2D04E";
+const HIGHLIGHT_W = 26;
 
 const DEFAULT_OPERATORS = [
   { id: "op-combine", name: "combine", kind: "prompt", primitive: true,
@@ -721,7 +721,7 @@ async function compositeItemsToImage(items) {
       ctx.lineWidth = it.width || PEN_W;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      ctx.globalAlpha = it.highlight ? 0.45 : it.marker ? 0.35 : 0.95;
+      ctx.globalAlpha = it.highlight ? 0.72 : it.marker ? 0.35 : 0.95;
       ctx.stroke();
       ctx.globalAlpha = 1;
     } else if (it.type === "image" && it.src) {
@@ -1517,10 +1517,7 @@ export default function App() {
                   worldToClient
                 );
                 if (extracted) setHighlight({ ...extracted, strokeId });
-                else {
-                  setItems((arr) => arr.filter((it) => it.id !== strokeId));
-                  showToastRef.current("draw over text to capture a thought particle");
-                }
+                else showToastRef.current("draw over text to capture a thought particle");
               });
             });
           }
@@ -2702,22 +2699,36 @@ export default function App() {
                   fill="none"
                   stroke={it.highlight ? HIGHLIGHT_INK : it.color}
                   strokeWidth={it.width}
-                  strokeOpacity={it.highlight ? 0.45 : it.marker ? 0.32 : 0.95}
+                  strokeOpacity={it.highlight ? 0.72 : it.marker ? 0.32 : 0.95}
                   strokeLinecap="round"
                   strokeLinejoin="round"
                   className={(selection.includes(it.id) ? "sel" : "") + (it.highlight ? " hl-stroke" : "")}
                 />
               ))}
-            {draft && draft.points.length > 1 && (
-              <polyline
-                points={draft.points.map((p) => `${p.x},${p.y}`).join(" ")}
-                fill="none"
-                stroke={draft.highlight ? HIGHLIGHT_INK : INK}
-                strokeWidth={draft.highlight ? HIGHLIGHT_W : draft.marker ? MARKER_W : PEN_W}
-                strokeOpacity={draft.highlight ? 0.45 : draft.marker ? 0.32 : 0.95}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
+            {draft && draft.points.length >= 1 && (
+              <>
+                {draft.points.length === 1 ? (
+                  <circle
+                    className="draft-dot"
+                    cx={draft.points[0].x}
+                    cy={draft.points[0].y}
+                    r={draft.highlight ? HIGHLIGHT_W / 2 : draft.marker ? MARKER_W / 2 : PEN_W}
+                    fill={draft.highlight ? HIGHLIGHT_INK : INK}
+                    fillOpacity={draft.highlight ? 0.72 : draft.marker ? 0.32 : 0.95}
+                  />
+                ) : (
+                  <polyline
+                    className={"draft-stroke" + (draft.highlight ? " hl-stroke" : "")}
+                    points={draft.points.map((p) => `${p.x},${p.y}`).join(" ")}
+                    fill="none"
+                    stroke={draft.highlight ? HIGHLIGHT_INK : INK}
+                    strokeWidth={draft.highlight ? HIGHLIGHT_W : draft.marker ? MARKER_W : PEN_W}
+                    strokeOpacity={draft.highlight ? 0.72 : draft.marker ? 0.32 : 0.95}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                )}
+              </>
             )}
           </svg>
 
@@ -2864,7 +2875,16 @@ export default function App() {
         </div>
       )}
 
-      {/* driver's seat — mode HUD + input deck */}
+      {/* zoom controls */}
+      <div className="zoom" onPointerDown={(e) => e.stopPropagation()}>
+        <button onClick={() => setCamera((c) => zoomCamera(c, 1 / 1.2))}>−</button>
+        <button className="zoom-pct" onClick={() => setCamera((c) => ({ ...c, scale: 1 }))}>
+          {Math.round(camera.scale * 100)}%
+        </button>
+        <button onClick={() => setCamera((c) => zoomCamera(c, 1.2))}>+</button>
+      </div>
+      </div>
+
       {!editing && (
         <CanvasHud tool={tool} selectionCount={selection.length} imageArmed={imageArmed} />
       )}
@@ -2882,7 +2902,6 @@ export default function App() {
         />
       )}
 
-      {/* AI palette over the selection */}
       {aiMenuPos && !highlight && (
         <SelectionMenu
           pos={aiMenuPos}
@@ -2912,16 +2931,6 @@ export default function App() {
         onUndo={undo}
         onRedo={redo}
       />
-
-      {/* zoom controls */}
-      <div className="zoom" onPointerDown={(e) => e.stopPropagation()}>
-        <button onClick={() => setCamera((c) => zoomCamera(c, 1 / 1.2))}>−</button>
-        <button className="zoom-pct" onClick={() => setCamera((c) => ({ ...c, scale: 1 }))}>
-          {Math.round(camera.scale * 100)}%
-        </button>
-        <button onClick={() => setCamera((c) => zoomCamera(c, 1.2))}>+</button>
-      </div>
-      </div>
 
       {toast && <div className="toast">{toast}</div>}
 
