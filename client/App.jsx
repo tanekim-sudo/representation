@@ -135,8 +135,7 @@ const CANVAS_TOOLS = {
     group: "input",
     label: "Image",
     icon: "▢",
-    hint: "Import an image — or drag & drop onto the canvas.",
-    action: "image",
+    hint: "Pick an image, then click the canvas to place it.",
   },
   pen: {
     id: "pen",
@@ -1251,8 +1250,10 @@ export default function App() {
   const [expanded, setExpanded] = useState({});
   const [dropReady, setDropReady] = useState(false);
   const [dropTargetId, setDropTargetId] = useState(null);
-  const [highlight, setHighlight] = useState(null); // { itemId, quote, context, rect }
+  const [highlight, setHighlight] = useState(null); // { itemId, quote, context, rect, strokeId? }
   const [gesturing, setGesturing] = useState(false);
+  const [imageArmed, setImageArmed] = useState(false);
+  const [canUndo, setCanUndo] = useState(false);
   const [railTab, setRailTab] = useState("functions"); // functions | structures
   const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
 
@@ -1265,6 +1266,9 @@ export default function App() {
   const editingRef = useRef(editing);
   const combineRef = useRef(null);
   const showToastRef = useRef(() => {});
+  const pendingImageRef = useRef(null);
+  const historyRef = useRef({ past: [], future: [] });
+  const pushHistoryRef = useRef(() => {});
   camRef.current = camera;
   itemsRef.current = items;
   toolRef.current = tool;
@@ -1285,6 +1289,34 @@ export default function App() {
     setTimeout(() => setToast((t) => (t === msg ? null : t)), 3200);
   }
   showToastRef.current = showToast;
+
+  function pushHistory() {
+    const snap = JSON.stringify(itemsRef.current);
+    const { past } = historyRef.current;
+    if (past.length && past[past.length - 1] === snap) return;
+    past.push(snap);
+    if (past.length > 50) past.shift();
+    historyRef.current.future = [];
+    setCanUndo(true);
+  }
+  pushHistoryRef.current = pushHistory;
+
+  function undo() {
+    const { past, future } = historyRef.current;
+    if (!past.length) return;
+    future.push(JSON.stringify(itemsRef.current));
+    setItems(JSON.parse(past.pop()));
+    setCanUndo(past.length > 0);
+    setHighlight(null);
+    setSelection([]);
+    setEditing(null);
+    showToast("undone");
+  }
+
+  function removeHighlightStroke(strokeId) {
+    if (!strokeId) return;
+    setItems((arr) => arr.filter((it) => it.id !== strokeId));
+  }
 
   function pushJob(job) {
     const id = job.id || uid();
@@ -1391,6 +1423,7 @@ export default function App() {
       } else if (g.mode === "pending") {
         const dist = Math.hypot(cx - g.cx, cy - g.cy);
         if (dist > 4) {
+          pushHistoryRef.current();
           g.mode = "move";
           g.moved = 0;
           g.lastCx = cx;
@@ -1414,10 +1447,14 @@ export default function App() {
         const dw = (cx - g.cx) / camRef.current.scale;
         const dh = (cy - g.cy) / camRef.current.scale;
         if (it.type === "image") {
-          let nw = Math.max(40, g.startW + dw);
+          let nw = Math.max(40, g.startW + (g.corner.includes("w") ? -dw : dw));
           let nh = Math.max(30, g.startH + (g.corner.includes("n") ? -dh : dh));
           if (g.aspect) nh = Math.round(nw * (g.startH / g.startW));
-          updateItem(g.id, { w: Math.round(nw), h: Math.round(nh) });
+          let nx = g.startX ?? it.x;
+          let ny = g.startY ?? it.y;
+          if (g.corner.includes("w")) nx = (g.startX ?? it.x) + g.startW - nw;
+          if (g.corner.includes("n")) ny = (g.startY ?? it.y) + g.startH - nh;
+          updateItem(g.id, { w: Math.round(nw), h: Math.round(nh), x: Math.round(nx), y: Math.round(ny) });
         } else if (it.type === "text") {
           updateItem(g.id, { w: Math.max(120, Math.round(g.startW + dw)) });
         }
@@ -1439,16 +1476,18 @@ export default function App() {
       if (g.mode === "draw") {
         if (g.points.length > 1) {
           const isHighlight = !!g.highlight;
+          const strokeId = uid();
           setItems((arr) => [
             ...arr,
             {
-              id: uid(),
+              id: strokeId,
               type: "stroke",
               points: g.points,
               color: isHighlight ? HIGHLIGHT_INK : INK,
               width: isHighlight ? HIGHLIGHT_W : g.marker ? MARKER_W : PEN_W,
               marker: g.marker || isHighlight,
               highlight: isHighlight,
+              ephemeral: isHighlight,
             },
           ]);
           if (isHighlight) {
@@ -1461,8 +1500,11 @@ export default function App() {
                   itemsRef.current,
                   worldToClient
                 );
-                if (extracted) setHighlight(extracted);
-                else showToastRef.current("draw over text to capture a thought particle");
+                if (extracted) setHighlight({ ...extracted, strokeId });
+                else {
+                  setItems((arr) => arr.filter((it) => it.id !== strokeId));
+                  showToastRef.current("draw over text to capture a thought particle");
+                }
               });
             });
           }
@@ -1581,6 +1623,7 @@ export default function App() {
     setItems((arr) => arr.map((it) => (it.id === id ? { ...it, ...patch } : it)));
   }
   function deleteSelection() {
+    pushHistory();
     const ids = new Set(selRef.current);
     setItems((arr) => arr.filter((it) => !ids.has(it.id)));
     setSelection([]);
@@ -2081,6 +2124,19 @@ export default function App() {
       return;
     }
 
+    if (t === "image") {
+      if (pendingImageRef.current) {
+        placeArmedImage(w);
+        return;
+      }
+      pickImage();
+      return;
+    }
+
+    if (t === "pen" || t === "marker" || t === "highlight" || t === "eraser" || t === "text") {
+      pushHistory();
+    }
+
     if (t === "pen" || t === "marker") {
       gesture.current = { mode: "draw", marker: t === "marker", points: [w] };
       setDraft({ points: [w], marker: t === "marker" });
@@ -2139,6 +2195,7 @@ export default function App() {
   function startHandleGesture(e, mode, payload) {
     e.stopPropagation();
     e.preventDefault();
+    pushHistory();
     gesture.current = { mode, cx: e.clientX, cy: e.clientY, ...payload };
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -2161,6 +2218,7 @@ export default function App() {
   // ---- images ----
   async function addImage(file, at) {
     try {
+      pushHistory();
       const { src, w, h } = await fileToImage(file);
       const center = at || viewportCenterWorld();
       const scale = Math.min(1, 260 / w);
@@ -2175,8 +2233,23 @@ export default function App() {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "image/*";
-    input.onchange = () => input.files && input.files[0] && addImage(input.files[0]);
+    input.onchange = () => {
+      if (!input.files?.[0]) return;
+      pendingImageRef.current = input.files[0];
+      setImageArmed(true);
+      setTool("image");
+      showToast("click on the canvas to place the image");
+    };
     input.click();
+  }
+
+  function placeArmedImage(atWorld) {
+    const file = pendingImageRef.current;
+    if (!file) return;
+    pendingImageRef.current = null;
+    setImageArmed(false);
+    addImage(file, atWorld);
+    setTool("select");
   }
 
   // double-click: edit an existing text, or write a new one
@@ -2264,6 +2337,7 @@ export default function App() {
       estimatedMs: op.multi ? 75000 : 45000,
     });
     window.getSelection()?.removeAllRanges();
+    removeHighlightStroke(hl.strokeId);
     setHighlight(null);
 
     try {
@@ -2709,6 +2783,8 @@ export default function App() {
               corner,
               startW: itemWidth(selItem),
               startH: itemHeight(selItem),
+              startX: selItem.x,
+              startY: selItem.y,
               aspect: selItem.type === "image",
             });
           }}
@@ -2729,7 +2805,7 @@ export default function App() {
 
       {/* driver's seat — mode HUD + input deck */}
       {!editing && (
-        <CanvasHud tool={tool} selectionCount={selection.length} />
+        <CanvasHud tool={tool} selectionCount={selection.length} imageArmed={imageArmed} />
       )}
 
       {highlight && !editing && (
@@ -2739,6 +2815,7 @@ export default function App() {
           onOp={(opKey) => executeHighlightOp(opKey, highlight)}
           onDismiss={() => {
             window.getSelection()?.removeAllRanges();
+            removeHighlightStroke(highlight.strokeId);
             setHighlight(null);
           }}
         />
@@ -2755,7 +2832,20 @@ export default function App() {
         />
       )}
 
-      <InputDeck tool={tool} onSelectTool={setTool} onPickImage={pickImage} />
+      <InputDeck
+        tool={tool}
+        imageArmed={imageArmed}
+        canUndo={canUndo}
+        onSelectTool={(id) => {
+          if (id !== "image") {
+            pendingImageRef.current = null;
+            setImageArmed(false);
+          }
+          setTool(id);
+        }}
+        onPickImage={pickImage}
+        onUndo={undo}
+      />
 
       {/* zoom controls */}
       <div className="zoom" onPointerDown={(e) => e.stopPropagation()}>
@@ -2903,10 +2993,12 @@ function startStructDrag(e, struct) {
   e.dataTransfer.effectAllowed = "copy";
 }
 
-function CanvasHud({ tool, selectionCount }) {
+function CanvasHud({ tool, selectionCount, imageArmed }) {
   const meta = CANVAS_TOOLS[tool] || CANVAS_TOOLS.select;
   let hint = meta.hint;
-  if (tool === "highlight" && selectionCount > 1) {
+  if (imageArmed && tool === "image") {
+    hint = "Click on the canvas to place your image";
+  } else if (tool === "highlight" && selectionCount > 1) {
     hint = `${selectionCount} ideas selected · draw over text · collide fuses with the other selection`;
   } else if (selectionCount > 0 && tool === "select") {
     hint = `${selectionCount} selected · drag to move · drop on another idea to combine`;
@@ -2934,10 +3026,15 @@ function CanvasHud({ tool, selectionCount }) {
   );
 }
 
-function InputDeck({ tool, onSelectTool, onPickImage }) {
+function InputDeck({ tool, imageArmed, canUndo, onSelectTool, onPickImage, onUndo }) {
   return (
     <div className="input-deck" onPointerDown={(e) => e.stopPropagation()}>
-      <div className="input-deck-head">input</div>
+      <div className="input-deck-head">
+        <span>input</span>
+        <button type="button" className="input-undo" disabled={!canUndo} onClick={onUndo} title="undo">
+          ↩ undo
+        </button>
+      </div>
       <div className="input-deck-groups">
         {TOOL_GROUPS.map((group) => {
           const tools = Object.values(CANVAS_TOOLS).filter((t) => t.group === group.id);
@@ -2947,15 +3044,15 @@ function InputDeck({ tool, onSelectTool, onPickImage }) {
               <span className="input-group-label">{group.label}</span>
               <div className="input-group-tools">
                 {tools.map((t) => {
-                  const active = tool === t.id;
-                  const isImage = t.action === "image";
+                  const isImage = t.id === "image";
+                  const active = tool === t.id || (isImage && imageArmed);
                   return (
                     <button
                       key={t.id}
                       type="button"
                       className={
                         "input-tool" +
-                        (active && !isImage ? " on" : "") +
+                        (active ? " on" : "") +
                         (t.id === "highlight" ? " highlight-tool" : "")
                       }
                       title={t.label}

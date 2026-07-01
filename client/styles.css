@@ -732,11 +732,36 @@ body {
   max-width: calc(100vw - 320px);
 }
 .input-deck-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0 4px;
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--faint);
+}
+.input-undo {
+  border: 1px solid var(--line-2);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.input-undo:hover:not(:disabled) {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+.input-undo:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 .input-deck-groups {
   display: flex;
