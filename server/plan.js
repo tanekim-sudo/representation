@@ -6,7 +6,12 @@ import {
   synthesizePrompt,
   outputContractForFunction,
 } from "./prompts.js";
-import { isFastPrimitive, PRIMITIVE_SYSTEM } from "../shared/transform-primitives.js";
+import {
+  isTransformPrimitive,
+  PRIMITIVE_SYSTEM,
+  primitiveNeedsResearch,
+  primitiveNeedsResolve,
+} from "../shared/transform-primitives.js";
 
 /** Flatten any-depth operator tree to ordered leaves (depth-first). */
 export function collectLeaves(op, opMap, out = []) {
@@ -34,7 +39,7 @@ export function opTreeNeedsResearch(op, opMap) {
 }
 
 export function shouldEnableResearch(op, opMap, material) {
-  if (isFastPrimitive(op)) return false;
+  if (isTransformPrimitive(op)) return primitiveNeedsResearch(op, material);
   if (opTreeNeedsResearch(op, opMap)) return true;
   const sparse = (material || "").trim().length < 500;
   const named = /\b(startup|ai|inc|corp|llc|labs|tech|company|platform|app)\b/i.test(material || "");
@@ -62,34 +67,68 @@ function compileWorkflowSteps(leaves) {
 }
 
 /**
+ * Primitives: resolve and/or research when appropriate, then one transform step.
+ * Output stays a single coherent result — never multi-portal fan-out.
+ */
+function compilePrimitivePlan(op, material) {
+  const prompt = (op.prompt || "").trim() || `Apply ${op.name} to the input.`;
+  const phases = [];
+  const plan = {
+    functionName: op.name,
+    functionDescription: op.description || "",
+    phases,
+    primitive: true,
+  };
+
+  if (primitiveNeedsResolve(op, material)) {
+    phases.push({
+      id: "resolve",
+      label: "identify subject",
+      timeoutMs: 18000,
+      maxTokens: 1024,
+      prompt: RESOLVE_PROMPT,
+    });
+    plan.resolve = { prompt: RESOLVE_PROMPT };
+  }
+
+  if (primitiveNeedsResearch(op, material)) {
+    phases.push({
+      id: "research",
+      label: "research",
+      timeoutMs: 42000,
+      maxTokens: 2048,
+      research: true,
+      maxSearchUses: 2,
+      system: RESEARCH_SYSTEM,
+    });
+    plan.research = { system: RESEARCH_SYSTEM };
+  }
+
+  phases.push({
+    id: "synthesize",
+    label: op.name,
+    timeoutMs: op.estimatedMs || 22000,
+    maxTokens: op.maxTokens || 1400,
+    prompt,
+    system: PRIMITIVE_SYSTEM,
+  });
+  plan.synthesize = { prompt, system: PRIMITIVE_SYSTEM };
+  plan.parseResolve = parseResolveOutput;
+  return plan;
+}
+
+/**
  * Compile an infinitely nested function into a 1–3 phase execution plan.
  * - resolve: fast subject ID (sparse input)
  * - research: dedicated web search pass
  * - synthesize: all quality work in one compiled prompt (uses research context)
  */
 export function compileExecutionPlan(op, opMap, material) {
-  const leaves = collectLeaves(op, opMap);
-
-  if (isFastPrimitive(op)) {
-    const prompt = (op.prompt || "").trim() || `Apply ${op.name} to the input.`;
-    const phases = [
-      {
-        id: "synthesize",
-        label: op.name,
-        timeoutMs: op.estimatedMs || 20000,
-        maxTokens: op.maxTokens || 1200,
-        prompt,
-        system: PRIMITIVE_SYSTEM,
-      },
-    ];
-    return {
-      functionName: op.name,
-      functionDescription: op.description || "",
-      phases,
-      synthesize: { prompt, system: PRIMITIVE_SYSTEM },
-    };
+  if (isTransformPrimitive(op)) {
+    return compilePrimitivePlan(op, material);
   }
 
+  const leaves = collectLeaves(op, opMap);
   const sparse = (material || "").trim().length < 500;
   const needsResearch = shouldEnableResearch(op, opMap, material);
 

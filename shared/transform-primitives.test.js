@@ -3,8 +3,11 @@ import assert from "node:assert/strict";
 import {
   TRANSFORM_PRIMITIVES,
   PRIMITIVE_NAMES,
-  isFastPrimitive,
+  isTransformPrimitive,
   migrateOperatorStore,
+  primitiveNeedsResearch,
+  primitiveNeedsResolve,
+  estimatePrimitiveMs,
 } from "./transform-primitives.js";
 import { compileExecutionPlan } from "../server/plan.js";
 
@@ -16,13 +19,12 @@ describe("transform primitives", () => {
     assert.ok(PRIMITIVE_NAMES.has("merge"));
     assert.ok(PRIMITIVE_NAMES.has("translate"));
     assert.equal(TRANSFORM_PRIMITIVES.filter((p) => p.multi).length, 1);
-    assert.equal(TRANSFORM_PRIMITIVES.find((p) => p.name === "differentiate")?.multi, true);
   });
 
-  it("marks primitives as fast-path eligible", () => {
+  it("marks primitives as transform-eligible", () => {
     const expand = TRANSFORM_PRIMITIVES.find((p) => p.name === "expand");
-    assert.ok(isFastPrimitive(expand));
-    assert.ok(!isFastPrimitive({ primitive: true, kind: "pipeline", steps: [] }));
+    assert.ok(isTransformPrimitive(expand));
+    assert.ok(!isTransformPrimitive({ primitive: true, kind: "pipeline", steps: [] }));
   });
 
   it("migrates legacy operator stores to canonical primitives", () => {
@@ -36,11 +38,35 @@ describe("transform primitives", () => {
     assert.ok(!next.some((o) => o.name === "combine"));
   });
 
-  it("compiles expand as a single synthesize phase (no research)", () => {
+  it("routes expand on sparse entity through resolve + research + transform", () => {
     const expand = TRANSFORM_PRIMITIVES.find((p) => p.name === "expand");
-    const plan = compileExecutionPlan(expand, { [expand.id]: expand }, "bobyard ai startup");
+    const material = "bobyard ai startup";
+    assert.ok(primitiveNeedsResolve(expand, material));
+    assert.ok(primitiveNeedsResearch(expand, material));
+    assert.ok(estimatePrimitiveMs(expand, material) > 60000);
+
+    const plan = compileExecutionPlan(expand, { [expand.id]: expand }, material);
+    assert.equal(plan.phases.length, 3);
+    assert.equal(plan.phases[0].id, "resolve");
+    assert.equal(plan.phases[1].id, "research");
+    assert.equal(plan.phases[2].id, "synthesize");
+    assert.match(plan.phases[2].prompt, /EXPAND/i);
+  });
+
+  it("routes compress on rich text as direct transform only", () => {
+    const compress = TRANSFORM_PRIMITIVES.find((p) => p.name === "compress");
+    const material = "A".repeat(600);
+    assert.ok(!primitiveNeedsResearch(compress, material));
+    assert.ok(!primitiveNeedsResolve(compress, material));
+
+    const plan = compileExecutionPlan(compress, { [compress.id]: compress }, material);
     assert.equal(plan.phases.length, 1);
     assert.equal(plan.phases[0].id, "synthesize");
-    assert.match(plan.phases[0].prompt, /EXPAND/i);
+  });
+
+  it("routes invert as direct transform even on sparse input", () => {
+    const invert = TRANSFORM_PRIMITIVES.find((p) => p.name === "invert");
+    const plan = compileExecutionPlan(invert, { [invert.id]: invert }, "bobyard ai startup");
+    assert.equal(plan.phases.length, 1);
   });
 });

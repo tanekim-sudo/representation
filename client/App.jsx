@@ -2,9 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { jsonrepair } from "jsonrepair";
 import {
   TRANSFORM_PRIMITIVES,
-  PRIMITIVE_SYSTEM,
   migrateOperatorStore,
-  isFastPrimitive,
+  isTransformPrimitive,
+  estimatePrimitiveMs,
 } from "../shared/transform-primitives.js";
 
 const ITEMS_KEY = "lens.board.items.v1";
@@ -424,7 +424,7 @@ function opTreeNeedsResearch(op, opMap) {
 }
 
 function shouldEnableResearch(op, opMap, originalMaterial) {
-  if (isFastPrimitive(op)) return false;
+  if (isTransformPrimitive(op)) return false; // plan compiler handles primitive research
   if (opTreeNeedsResearch(op, opMap)) return true;
   const sparse = (originalMaterial || "").trim().length < 500;
   const named = /\b(startup|ai|inc|corp|llc|labs|tech|company|platform|app)\b/i.test(originalMaterial || "");
@@ -1665,35 +1665,23 @@ export default function App() {
     }
 
     let out;
-    if (isFastPrimitive(op)) {
-      patchJob(jobId, {
-        step: op.name,
-        startedAt: Date.now(),
-        estimatedMs: op.estimatedMs || 15000,
-      });
-      out = await runClaude(op.prompt, text, {
-        system: PRIMITIVE_SYSTEM,
-        maxTokens: op.maxTokens || 1200,
-      });
-    } else {
-      const { plan } = await fetchExecutionPlan(op, opMap, text);
-      const estimatedMs = estimatePlanMs(plan);
-      patchJob(jobId, {
-        step: `running · ${op.name}`,
-        startedAt: Date.now(),
-        estimatedMs,
-      });
-      const onProgress = (step) => patchJob(jobId, { step });
-      out = await runExecutionOnServer({
-        op,
-        opMap,
-        operators,
-        material: text,
-        image,
-        onProgress,
-        plan,
-      });
-    }
+    const { plan } = await fetchExecutionPlan(op, opMap, text);
+    const estimatedMs = estimatePlanMs(plan);
+    patchJob(jobId, {
+      step: plan.phases?.[0]?.label || op.name,
+      startedAt: Date.now(),
+      estimatedMs,
+    });
+    const onProgress = (step) => patchJob(jobId, { step });
+    out = await runExecutionOnServer({
+      op,
+      opMap,
+      operators,
+      material: text,
+      image,
+      onProgress,
+      plan,
+    });
 
     if (op.multi || op.name === "differentiate") {
       const parts = out
@@ -1742,7 +1730,7 @@ export default function App() {
       step: "starting…",
       progress: 0,
       startedAt: Date.now(),
-      estimatedMs: isFastPrimitive(op) ? op.estimatedMs || 15000 : 90000,
+      estimatedMs: isTransformPrimitive(op) ? estimatePrimitiveMs(op, "") : 90000,
     });
     executeOperatorJob(jobId, op, ids, atClient, opts)
       .then(() => finishJob(jobId, "done", `done · ${op.name}`))
