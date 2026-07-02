@@ -34,6 +34,11 @@ const MARKER_W = 16;
 const HIGHLIGHT_INK = "#F2D04E";
 const HIGHLIGHT_W = 14;
 
+/** Highlight ink stays the same thickness on screen at any zoom. */
+function highlightWorldWidth(scale) {
+  return HIGHLIGHT_W / Math.max(scale, 0.12);
+}
+
 /** Six hex directions for branching — angles from +x axis, counter-clockwise from east; we use standard math angles. */
 const EXPAND_DIRS = [
   { id: "n", label: "↑", angle: -Math.PI / 2 },
@@ -1045,14 +1050,14 @@ function strokePathLength(points) {
   return len;
 }
 
-function isClosedHighlightLoop(points) {
+function isClosedHighlightLoop(points, scale = 1) {
   if (points.length < 10) return false;
   const first = points[0];
   const last = points[points.length - 1];
   const closeDist = Math.hypot(last.x - first.x, last.y - first.y);
   const pathLen = strokePathLength(points);
   if (closeDist > Math.max(36, pathLen * 0.2)) return false;
-  const bb = strokeWorldBBox(points, HIGHLIGHT_W * 0.5);
+  const bb = strokeWorldBBox(points, highlightWorldWidth(scale) * 0.5);
   if (!bb) return false;
   return bb.maxx - bb.minx > 48 && bb.maxy - bb.miny > 48;
 }
@@ -1155,6 +1160,21 @@ function itemsInsideHighlightLoop(points, itemList) {
     }
   }
   return [...new Set(ids)];
+}
+
+function extractTextFromLoopSelection(itemIds, itemList) {
+  const texts = itemList.filter((it) => itemIds.includes(it.id) && it.type === "text" && it.text?.trim());
+  if (!texts.length) return null;
+  const item = texts[0];
+  const el = document.querySelector(`[data-item="${item.id}"].board-text`);
+  const quote = (texts.length === 1 ? item.text : texts.map((t) => t.text.trim()).join("\n\n")).trim();
+  const short = quote.length > 400 ? `${quote.slice(0, 400)}…` : quote;
+  let rect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+  if (el) {
+    const r = el.getBoundingClientRect();
+    rect = { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+  }
+  return { itemId: item.id, quote: short, context: quote, rect };
 }
 
 function extractTextFromHighlightStroke(points, strokeWidth, itemList, worldToClient) {
@@ -1414,6 +1434,7 @@ export default function App() {
   const [lensCompare, setLensCompare] = useState(null); // { aId, bId? }
 
   const [tool, setTool] = useState("highlight"); // highlight | select | text | pen | marker | eraser | hand
+  const [moveDraft, setMoveDraft] = useState("");
   const [selection, setSelection] = useState([]);
   const [editing, setEditing] = useState(null);
   const [draft, setDraft] = useState(null);
@@ -1627,7 +1648,7 @@ export default function App() {
           g.lastCy = cy;
         }
         g.points.push(w);
-        const loop = g.highlight && g.points.length > 8 && isClosedHighlightLoop(g.points);
+        const loop = g.highlight && g.points.length > 8 && isClosedHighlightLoop(g.points, camRef.current.scale);
         setDraft({ points: g.points.slice(), marker: g.marker, highlight: g.highlight, loop });
       } else if (g.mode === "erase") {
         const hit = itemAtPoint(cx, cy);
@@ -1711,15 +1732,35 @@ export default function App() {
           const isHighlight = !!g.highlight;
           if (isHighlight) {
             const pts = g.points.slice();
-            if (isClosedHighlightLoop(pts)) {
-              const inside = itemsInsideHighlightLoop(pts, itemsRef.current);
+            const hlW = highlightWorldWidth(camRef.current.scale);
+            if (isClosedHighlightLoop(pts, camRef.current.scale)) {
+              const strokeId = uid();
+              setItems((arr) => [
+                ...arr,
+                {
+                  id: strokeId,
+                  type: "stroke",
+                  points: pts,
+                  color: HIGHLIGHT_INK,
+                  width: hlW,
+                  marker: true,
+                  highlight: true,
+                },
+              ]);
+              const inside = itemsInsideHighlightLoop(
+                pts,
+                itemsRef.current.filter((it) => it.id !== strokeId)
+              );
               if (inside.length) {
                 setSelection(inside);
                 showToastRef.current(`selected ${inside.length} item${inside.length > 1 ? "s" : ""}`);
+                requestAnimationFrame(() => {
+                  const extracted = extractTextFromLoopSelection(inside, itemsRef.current);
+                  if (extracted) setHighlight({ ...extracted, strokeId });
+                });
               } else {
                 showToastRef.current("nothing inside the circle");
               }
-              setHighlight(null);
             } else {
               const strokeId = uid();
               setItems((arr) => [
@@ -1729,17 +1770,16 @@ export default function App() {
                   type: "stroke",
                   points: pts,
                   color: HIGHLIGHT_INK,
-                  width: HIGHLIGHT_W,
+                  width: hlW,
                   marker: true,
                   highlight: true,
-                  ephemeral: true,
                 },
               ]);
               requestAnimationFrame(() => {
                 requestAnimationFrame(() => {
                   const extracted = extractTextFromHighlightStroke(
                     pts,
-                    HIGHLIGHT_W,
+                    hlW,
                     itemsRef.current.filter((it) => it.id !== strokeId),
                     worldToClient
                   );
@@ -2267,6 +2307,35 @@ export default function App() {
     setOpEditor({ mode: "create" });
   }
 
+  /** One line → a perceptual move you can drag, compound, and lens. */
+  function createMove(phrase) {
+    const name = (phrase || moveDraft || "").trim();
+    if (!name) {
+      showToast("name your move — e.g. see as monastery");
+      return;
+    }
+    const exists = operators.some((o) => o.move && o.name.toLowerCase() === name.toLowerCase());
+    if (exists) {
+      showToast("you already have that move");
+      return;
+    }
+    const op = {
+      id: uid(),
+      name,
+      kind: "prompt",
+      move: true,
+      description: `Your way of seeing: ${name}`,
+      prompt: `${name.toUpperCase()} — apply this perceptual move to the input. Re-see the whole through this lens. One vivid paragraph. Return ONLY the transformed text.`,
+      maxTokens: 800,
+      estimatedMs: 13000,
+      resolveWhen: "never",
+      researchWhen: "never",
+    };
+    setOperators((arr) => [...arr, op]);
+    setMoveDraft("");
+    showToast(`move · ${name}`);
+  }
+
   function openEditFunction(op) {
     setOpEditor({ mode: "edit", op });
   }
@@ -2661,21 +2730,6 @@ export default function App() {
     showToast(`saved · ${op.name}`);
   }
 
-  /** Fork: copy an operator (whole subtree) into yours for divergent evolution. */
-  function forkOperator(opId) {
-    const op = opMap[opId];
-    if (!op) return;
-    const tree = opToJsonTree(op, opMap);
-    tree.name = `${op.name} (fork)`;
-    const { ops, rootId } = treeToOperators(tree, { role: op.role || null, top: true });
-    setOperators((prev) => [
-      ...prev,
-      ...ops.map((o) => (o.id === rootId ? { ...o, forkedFrom: op.id } : o)),
-    ]);
-    setRailTab("functions");
-    showToast(`forked · ${op.name} — now evolve it your way`);
-  }
-
   /** Merge: drop one operator onto another → a compound pipeline (A, then B). */
   function composeOperators(draggedId, targetId) {
     if (!draggedId || draggedId === targetId) return;
@@ -2684,7 +2738,7 @@ export default function App() {
     if (!a || !b) return;
     const tree = {
       name: `${a.name} → ${b.name}`.slice(0, 72),
-      description: `Compound move: apply "${a.name}", then "${b.name}" to its result. Forged from two moves; now a first-class object you can fork, extend, or fold into larger procedures.`,
+      description: `Compound move: apply "${a.name}", then "${b.name}" to its result. Forged from two moves; now a first-class object you can extend or fold into larger procedures.`,
       steps: [opToJsonTree(a, opMap), opToJsonTree(b, opMap)],
     };
     const { ops, rootId } = treeToOperators(tree, { top: true });
@@ -2767,15 +2821,15 @@ export default function App() {
     }
   }
 
-  const topFunctions = operators.filter((o) => o.top);
+  const topFunctions = operators.filter((o) => o.top && !o.move);
   const canonicalPrimitives = useMemo(() => {
     const byName = Object.fromEntries(
       operators.filter((o) => o.primitive && !o.role && !o.top).map((o) => [o.name, o])
     );
     return TRANSFORM_PRIMITIVES.map((t) => byName[t.name] || t);
   }, [operators]);
-  const moves = useMemo(() => canonicalPrimitives.filter((o) => o.move), [canonicalPrimitives]);
-  const primitives = useMemo(() => canonicalPrimitives.filter((o) => !o.move), [canonicalPrimitives]);
+  const moves = useMemo(() => operators.filter((o) => o.move && !o.primitive), [operators]);
+  const primitives = useMemo(() => canonicalPrimitives, [canonicalPrimitives]);
   const basics = operators.filter((o) => !o.role && !o.top && !o.primitive);
   const activeLens = lenses.find((l) => l.id === activeLensId) || null;
   // your active lens IS your quick palette — style as recurring transformations
@@ -2787,7 +2841,7 @@ export default function App() {
     return [...moves, ...primitives];
   }, [activeLens, opMap, moves, primitives]);
 
-  // ---- lenses: create, evolve, fork, merge, compare, inherit — git for perception ----
+  // ---- lenses: create, evolve, merge, compare, inherit — git for perception ----
   function saveLens(draft) {
     const name = (draft.name || "").trim() || "unnamed lens";
     const moveIds = [...new Set(draft.moveIds || [])];
@@ -2807,15 +2861,6 @@ export default function App() {
       showToast(`lens created · ${name} — now active`);
     }
     setLensEditor(null);
-  }
-
-  function forkLens(id) {
-    const l = lenses.find((x) => x.id === id);
-    if (!l) return;
-    const fork = { ...l, id: uid(), name: `${l.name} (fork)`, forkedFrom: l.id, createdAt: Date.now() };
-    delete fork.mergedFrom;
-    setLenses((ls) => [fork, ...ls]);
-    showToast(`forked · ${l.name}`);
   }
 
   function mergeLenses(aId, bId) {
@@ -3513,8 +3558,8 @@ export default function App() {
               {lenses.length === 0 ? (
                 <p className="rail-empty">
                   A lens is your set of recurring moves — the transformations you keep reaching for.
-                  Style is recurring transformation. Create one, evolve it, fork it, merge two by
-                  dragging one onto another, or inherit someone else's.
+                  Create moves in the functions tab (one line), then gather them here. Style is
+                  recurring transformation.
                 </p>
               ) : (
                 lenses.map((lens) => (
@@ -3527,7 +3572,6 @@ export default function App() {
                     comparing={lensCompare?.aId === lens.id && !lensCompare?.bId}
                     onUse={() => setActiveLensId(lens.id === activeLensId ? null : lens.id)}
                     onEvolve={() => setLensEditor({ id: lens.id, name: lens.name, moveIds: lens.moveIds || [] })}
-                    onFork={() => forkLens(lens.id)}
                     onSend={() => exportLens(lens.id)}
                     onCompare={() => {
                       if (lensCompare?.aId && lensCompare.aId !== lens.id) {
@@ -3549,7 +3593,44 @@ export default function App() {
             <button className="rail-create" onClick={openCreateFunction}>
               + function
             </button>
+            <div className="move-quick-add">
+              <input
+                className="move-quick-input"
+                placeholder="your move — e.g. treat as garden"
+                value={moveDraft}
+                onChange={(e) => setMoveDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") createMove();
+                }}
+              />
+              <button
+                type="button"
+                className="move-quick-btn"
+                title="add perceptual move"
+                disabled={!moveDraft.trim()}
+                onClick={() => createMove()}
+              >
+                +
+              </button>
+            </div>
             <div className="rail-scroll">
+              {moves.length > 0 && (
+                <>
+                  <div className="rail-section">your moves</div>
+                  {moves.map((op) => (
+                    <DraggableOpCard
+                      key={op.id}
+                      op={op}
+                      opMap={opMap}
+                      expanded={expanded}
+                      onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
+                      onEdit={openEditFunction}
+                      onCompose={composeOperators}
+                      flat
+                    />
+                  ))}
+                </>
+              )}
               {topFunctions.length > 0 && (
                 <>
                   <div className="rail-section">yours</div>
@@ -3561,26 +3642,7 @@ export default function App() {
                       expanded={expanded}
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
-                      onFork={forkOperator}
                       onCompose={composeOperators}
-                    />
-                  ))}
-                </>
-              )}
-              {moves.length > 0 && (
-                <>
-                  <div className="rail-section">perceptual moves</div>
-                  {moves.map((op) => (
-                    <DraggableOpCard
-                      key={op.id}
-                      op={op}
-                      opMap={opMap}
-                      expanded={expanded}
-                      onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
-                      onEdit={openEditFunction}
-                      onFork={forkOperator}
-                      onCompose={composeOperators}
-                      flat
                     />
                   ))}
                 </>
@@ -3596,7 +3658,6 @@ export default function App() {
                       expanded={expanded}
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
-                      onFork={forkOperator}
                       onCompose={composeOperators}
                       flat
                     />
@@ -3614,7 +3675,6 @@ export default function App() {
                       expanded={expanded}
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
-                      onFork={forkOperator}
                       onCompose={composeOperators}
                       flat
                     />
@@ -3652,7 +3712,7 @@ export default function App() {
         )}
         <JobPanel jobs={jobs} onDismiss={(id) => setJobs((j) => j.filter((x) => x.id !== id))} />
         {railTab === "functions" && (
-          <div className="rail-hint">drag onto canvas to run · drop op on op to forge a compound · ⑂ forks</div>
+          <div className="rail-hint">type a move + enter · drag onto canvas · drop op on op to compound</div>
         )}
         {railTab === "structures" && (
           <div className="rail-hint">drop selection here to save · drag onto canvas to plant</div>
@@ -3743,7 +3803,7 @@ export default function App() {
                   points={it.points.map((p) => `${p.x},${p.y}`).join(" ")}
                   fill="none"
                   stroke={it.highlight ? HIGHLIGHT_INK : it.color}
-                  strokeWidth={it.width}
+                  strokeWidth={it.highlight ? highlightWorldWidth(camera.scale) : it.width}
                   strokeOpacity={it.highlight ? 0.72 : it.marker ? 0.32 : 0.95}
                   strokeLinecap="round"
                   strokeLinejoin="round"
@@ -3757,7 +3817,13 @@ export default function App() {
                     className="draft-dot"
                     cx={draft.points[0].x}
                     cy={draft.points[0].y}
-                    r={draft.highlight ? HIGHLIGHT_W / 2 : draft.marker ? MARKER_W / 2 : PEN_W}
+                    r={
+                      draft.highlight
+                        ? highlightWorldWidth(camera.scale) / 2
+                        : draft.marker
+                        ? MARKER_W / 2
+                        : PEN_W / 2
+                    }
                     fill={draft.highlight ? HIGHLIGHT_INK : INK}
                     fillOpacity={draft.highlight ? 0.72 : draft.marker ? 0.32 : 0.95}
                   />
@@ -3772,7 +3838,13 @@ export default function App() {
                       points={draft.points.map((p) => `${p.x},${p.y}`).join(" ")}
                       fill={draft.loop ? "rgba(32, 32, 29, 0.05)" : "none"}
                       stroke={draft.loop ? "var(--ink)" : draft.highlight ? HIGHLIGHT_INK : INK}
-                      strokeWidth={draft.highlight ? HIGHLIGHT_W : draft.marker ? MARKER_W : PEN_W}
+                      strokeWidth={
+                        draft.highlight
+                          ? highlightWorldWidth(camera.scale)
+                          : draft.marker
+                          ? MARKER_W
+                          : PEN_W
+                      }
                       strokeOpacity={draft.loop ? 0.4 : draft.highlight ? 0.72 : draft.marker ? 0.32 : 0.95}
                       strokeLinecap="round"
                       strokeLinejoin="round"
@@ -3785,9 +3857,9 @@ export default function App() {
                         x2={draft.points[0].x}
                         y2={draft.points[0].y}
                         stroke="var(--ink)"
-                        strokeWidth={1.5}
+                        strokeWidth={1.5 / camera.scale}
                         strokeOpacity={0.35}
-                        strokeDasharray="6 4"
+                        strokeDasharray={`${6 / camera.scale} ${4 / camera.scale}`}
                       />
                     )}
                   </>
@@ -4075,7 +4147,7 @@ export default function App() {
         <LensEditor
           draft={lensEditor}
           groups={[
-            { label: "perceptual moves", ops: moves },
+            { label: "your moves", ops: moves },
             { label: "primitives", ops: primitives },
             { label: "yours", ops: topFunctions },
             { label: "basics", ops: basics },
@@ -4558,7 +4630,7 @@ function JobPanel({ jobs, onDismiss }) {
   );
 }
 
-function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onFork, onCompose, flat }) {
+function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onCompose, flat }) {
   const [composeOver, setComposeOver] = useState(false);
   if (!op) return null;
   const steps = op.kind === "pipeline" && op.steps ? op.steps.map((id) => opMap[id]).filter(Boolean) : [];
@@ -4596,18 +4668,13 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onFork, onComp
           <div className="op-card-label">
             <span className="op-card-name">{op.name}</span>
             {open && op.description && <span className="op-card-desc">{op.description}</span>}
-            {open && (op.forkedFrom || op.mergedFrom) && (
-              <span className="op-card-lineage">{op.forkedFrom ? "⑂ forked" : "⚭ compound"}</span>
+            {open && op.mergedFrom && (
+              <span className="op-card-lineage">⚭ compound</span>
             )}
           </div>
           {!flat && steps.length > 0 && (
             <button className="op-card-toggle" onClick={() => onToggle(op.id)} title={`${steps.length} steps`}>
               {open ? "▾" : "▸"}
-            </button>
-          )}
-          {onFork && (
-            <button className="op-card-edit" onClick={() => onFork(op.id)} title="fork — copy into yours and evolve it">
-              ⑂
             </button>
           )}
           <button className="op-card-edit" onClick={() => onEdit(op)} title="edit">
@@ -4658,7 +4725,7 @@ function DraggableStep({ step, opMap, expanded, onToggle, onEdit, depth }) {
   );
 }
 
-function LensCard({ lens, active, opMap, lenses, comparing, onUse, onEvolve, onFork, onSend, onCompare, onMergeDrop, onDelete }) {
+function LensCard({ lens, active, opMap, lenses, comparing, onUse, onEvolve, onSend, onCompare, onMergeDrop, onDelete }) {
   const [mergeOver, setMergeOver] = useState(false);
   const moveNames = (lens.moveIds || []).map((id) => opMap[id]?.name).filter(Boolean);
   const parentName = (id) => lenses.find((l) => l.id === id)?.name || "a lost lens";
@@ -4699,7 +4766,6 @@ function LensCard({ lens, active, opMap, lenses, comparing, onUse, onEvolve, onF
         {moveNames.length > 6 && <span className="lens-move-chip more">+{moveNames.length - 6}</span>}
       </div>
       <div className="lens-card-meta">
-        {lens.forkedFrom && <span>⑂ forked from “{parentName(lens.forkedFrom)}”</span>}
         {lens.mergedFrom && <span>⚭ merged from “{parentName(lens.mergedFrom[0])}” + “{parentName(lens.mergedFrom[1])}”</span>}
         {lens.inherited && <span>↓ inherited</span>}
       </div>
@@ -4709,9 +4775,6 @@ function LensCard({ lens, active, opMap, lenses, comparing, onUse, onEvolve, onF
         </button>
         <button className="lens-btn" onClick={onEvolve} title="evolve — change its moves">
           evolve
-        </button>
-        <button className="lens-btn" onClick={onFork} title="fork a copy to diverge">
-          ⑂
         </button>
         <button className={"lens-btn" + (comparing ? " on" : "")} onClick={onCompare} title="compare with another lens">
           ≍
@@ -5068,54 +5131,19 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
 
   const [draftOps, setDraftOps] = useState(() => (isCreate ? [] : collectDraftOps(sourceRoot, opMap)));
   const [rootId, setRootId] = useState(() => sourceRoot?.id || null);
-  const [navPath, setNavPath] = useState([]);
-
-  const draftMap = useMemo(() => Object.fromEntries(draftOps.map((o) => [o.id, o])), [draftOps]);
-  const focusId = navPath.length ? navPath[navPath.length - 1] : rootId;
-  const focusOp = focusId ? draftMap[focusId] : null;
-  const rootDraft = rootId ? draftMap[rootId] : null;
-
-  const [name, setName] = useState(focusOp?.name || "");
-  const [description, setDescription] = useState(focusOp?.description || "");
-  const [prompt, setPrompt] = useState(focusOp?.prompt || "");
+  const [focusId, setFocusId] = useState(null);
+  const [createName, setCreateName] = useState("");
+  const [createDesc, setCreateDesc] = useState("");
+  const [createPrompt, setCreatePrompt] = useState("");
   const [prose, setProse] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
-  useEffect(() => {
-    setName(focusOp?.name || "");
-    setDescription(focusOp?.description || "");
-    setPrompt(focusOp?.prompt || "");
-  }, [focusId]);
+  const draftMap = useMemo(() => Object.fromEntries(draftOps.map((o) => [o.id, o])), [draftOps]);
+  const rootDraft = rootId ? draftMap[rootId] : null;
 
-  function patchFocus(patch) {
-    if (!focusId) return;
-    setDraftOps((ops) => ops.map((o) => (o.id === focusId ? { ...o, ...patch } : o)));
-  }
-
-  function flushFields() {
-    if (!focusId) return;
-    patchFocus({
-      name: name.trim(),
-      description: description.trim(),
-      prompt: prompt.trim(),
-    });
-  }
-
-  function navigateTo(id) {
-    flushFields();
-    if (id === rootId) {
-      setNavPath([]);
-      return;
-    }
-    const idx = navPath.indexOf(id);
-    if (idx >= 0) setNavPath(navPath.slice(0, idx + 1));
-    else setNavPath([...navPath, id]);
-  }
-
-  function navigateUp() {
-    flushFields();
-    setNavPath((p) => p.slice(0, -1));
+  function patchOp(id, patch) {
+    setDraftOps((ops) => ops.map((o) => (o.id === id ? { ...o, ...patch } : o)));
   }
 
   async function runProse() {
@@ -5124,12 +5152,11 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
     setBusy(true);
     setError(null);
     try {
-      flushFields();
       let tree;
       if (isCreate && !rootDraft) {
         tree = await createFunctionFromProse(instruction, operators, opMap);
       } else {
-        const target = focusOp || rootDraft;
+        const target = (focusId && draftMap[focusId]) || rootDraft;
         tree = await editFunctionWithProse(target, draftMap, instruction, operators);
       }
       const { rootId: rid, ops } = treeToOperators(tree, {
@@ -5138,7 +5165,7 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
       });
       setDraftOps(ops);
       setRootId(rid);
-      setNavPath([]);
+      setFocusId(null);
       setProse("");
     } catch (err) {
       setError(err.message || "Could not apply changes.");
@@ -5148,18 +5175,17 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
   }
 
   function saveAll() {
-    flushFields();
     let ops = draftOps;
     let rid = rootId;
-    if (!rid && name.trim() && prompt.trim()) {
+    if (!rid && createName.trim() && createPrompt.trim()) {
       rid = uid();
       ops = [
         {
           id: rid,
           kind: "prompt",
-          name: name.trim(),
-          description: description.trim(),
-          prompt: prompt.trim(),
+          name: createName.trim(),
+          description: createDesc.trim(),
+          prompt: createPrompt.trim(),
           top: true,
         },
       ];
@@ -5170,161 +5196,119 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
     onSaveTree(isCreate ? null : sourceRoot?.id, ops);
   }
 
-  const isPipeline = focusOp?.kind === "pipeline";
-  const steps =
-    isPipeline && focusOp?.steps ? focusOp.steps.map((id) => draftMap[id]).filter(Boolean) : [];
-  const crumbs = [];
-  if (rootDraft) {
-    crumbs.push({ id: rootId, name: rootDraft.name || "function" });
-    navPath.forEach((id) => {
-      const o = draftMap[id];
-      if (o) crumbs.push({ id, name: o.name });
-    });
-  }
-
   const canSave =
     !!rootDraft ||
-    (name.trim() && prompt.trim()) ||
+    (createName.trim() && createPrompt.trim()) ||
     (rootId && draftOps.some((o) => o.id === rootId && o.name?.trim()));
 
+  const focusLabel = focusId && draftMap[focusId] ? draftMap[focusId].name : rootDraft?.name;
+
   return (
-    <div className="modal-scrim" onClick={onClose}>
-      <div className="fn-editor" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-scrim fn-scrim-full" onClick={onClose}>
+      <div className="fn-editor fn-editor-fullscreen" onClick={(e) => e.stopPropagation()}>
         <div className="fn-head">
-          <h3>{isCreate ? "create function" : "edit function"}</h3>
-          <button className="fn-close" onClick={onClose}>
+          <div>
+            <h3>{isCreate ? "create function" : "edit function"}</h3>
+            {rootDraft && (
+              <p className="fn-head-sub">
+                Full structure — every step and prompt visible. Click a step to focus it for AI edits.
+              </p>
+            )}
+          </div>
+          <button className="fn-close" onClick={onClose} type="button">
             ×
           </button>
         </div>
 
-        <div className="fn-pane">
-          {rootDraft && crumbs.length > 0 && (
-            <nav className="fn-crumb" aria-label="function path">
-              {crumbs.map((c, i) => (
-                <span key={c.id} className="fn-crumb-item">
-                  {i > 0 && <span className="fn-crumb-sep">/</span>}
-                  <button
-                    type="button"
-                    className={"fn-crumb-btn" + (c.id === focusId ? " on" : "")}
-                    onClick={() => navigateTo(c.id)}
-                  >
-                    {c.name}
-                  </button>
-                </span>
-              ))}
-              {navPath.length > 0 && (
-                <button type="button" className="fn-crumb-up" onClick={navigateUp}>
-                  ← back
-                </button>
-              )}
-            </nav>
-          )}
-
-          {!rootDraft && isCreate && (
-            <p className="fn-hint">
-              Describe what this function should do, or fill in the fields below. Use descriptive 3–7 word names and hyper-specific prompts with clear output format.
-            </p>
-          )}
-
-          {rootDraft && (
-            <>
-              {steps.length > 0 && (
-                <div className="fn-blocks-wrap">
-                  <div className="fn-blocks-label">steps</div>
-                  <FunctionBlockNav steps={steps} focusId={focusId} onSelect={navigateTo} />
-                </div>
-              )}
-
-              <label>name</label>
-              <input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. Build Full Investment Thesis"
+        <div className="fn-editor-body">
+          <div className="fn-tree-scroll">
+            {rootDraft ? (
+              <FunctionTreeNode
+                op={rootDraft}
+                draftMap={draftMap}
+                depth={0}
+                focusId={focusId}
+                onFocus={setFocusId}
+                onPatch={patchOp}
+                pathLabels={[]}
               />
-
-              <label>description</label>
-              <input
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="what goes in, what comes out"
-              />
-
-              {!isPipeline && (
-                <>
-                  <label>prompt</label>
-                  <textarea
-                    rows={6}
-                    value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
-                    placeholder="Instruction for this step — include GOAL, OUTPUT FORMAT, and quality bar."
-                  />
-                </>
-              )}
-            </>
-          )}
-
-          {!rootDraft && isCreate && (
-            <>
-              <label>name</label>
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="function name" />
-              <label>description</label>
-              <input
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="what it does"
-              />
-              <label>prompt</label>
-              <textarea
-                rows={5}
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder="Or skip manual fields and describe below with AI."
-              />
-            </>
-          )}
-
-          <label>{rootDraft ? "revise with words" : "describe with words"}</label>
-          <textarea
-            className="fn-prose"
-            rows={3}
-            placeholder={
-              isCreate
-                ? 'e.g. "Extract action items, owners, and deadlines from messy meeting notes"'
-                : 'e.g. "Add a step that checks for contradictions" or "Make the output shorter"'
-            }
-            value={prose}
-            onChange={(e) => setProse(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) runProse();
-            }}
-          />
-
-          {error && <div className="fn-error">{error}</div>}
-
-          <button className="fn-generate" disabled={busy || !prose.trim()} onClick={runProse}>
-            {busy ? (
-              <>
-                <span className="spinner" /> building…
-              </>
-            ) : rootDraft ? (
-              "apply with AI"
             ) : (
-              "generate with AI"
+              <div className="fn-create-panel">
+                <p className="fn-hint">
+                  Describe what this function should do below, or fill in the fields. Once generated, the
+                  full tree appears here with every prompt visible.
+                </p>
+                <label>name</label>
+                <input
+                  value={createName}
+                  onChange={(e) => setCreateName(e.target.value)}
+                  placeholder="e.g. Build Full Investment Thesis"
+                />
+                <label>description</label>
+                <input
+                  value={createDesc}
+                  onChange={(e) => setCreateDesc(e.target.value)}
+                  placeholder="what goes in, what comes out"
+                />
+                <label>prompt</label>
+                <textarea
+                  rows={6}
+                  value={createPrompt}
+                  onChange={(e) => setCreatePrompt(e.target.value)}
+                  placeholder="Or skip and describe with AI below."
+                />
+              </div>
             )}
-          </button>
+          </div>
+
+          <aside className="fn-editor-side">
+            <label>{rootDraft ? "revise with words" : "describe with words"}</label>
+            {focusLabel && rootDraft && (
+              <p className="fn-focus-hint">
+                AI edits <strong>{focusLabel}</strong>
+                {focusId && focusId !== rootId ? " and its subtree" : ""}. Click another step to switch.
+              </p>
+            )}
+            <textarea
+              className="fn-prose"
+              rows={5}
+              placeholder={
+                isCreate
+                  ? 'e.g. "Extract action items, owners, and deadlines from messy meeting notes"'
+                  : 'e.g. "Add a step that checks for contradictions" or "Make every leaf prompt more specific"'
+              }
+              value={prose}
+              onChange={(e) => setProse(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) runProse();
+              }}
+            />
+            {error && <div className="fn-error">{error}</div>}
+            <button className="fn-generate" type="button" disabled={busy || !prose.trim()} onClick={runProse}>
+              {busy ? (
+                <>
+                  <span className="spinner" /> building…
+                </>
+              ) : rootDraft ? (
+                "apply with AI"
+              ) : (
+                "generate with AI"
+              )}
+            </button>
+          </aside>
         </div>
 
         <div className="fn-foot">
           {!isCreate && sourceRoot && (
-            <button className="fn-del" onClick={() => onDelete(sourceRoot.id)}>
+            <button className="fn-del" type="button" onClick={() => onDelete(sourceRoot.id)}>
               delete
             </button>
           )}
           <span style={{ flex: 1 }} />
-          <button className="fn-secondary" onClick={onClose}>
+          <button className="fn-secondary" type="button" onClick={onClose}>
             cancel
           </button>
-          <button className="fn-primary" disabled={!canSave} onClick={saveAll}>
+          <button className="fn-primary" type="button" disabled={!canSave} onClick={saveAll}>
             save
           </button>
         </div>
@@ -5333,23 +5317,84 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
   );
 }
 
-function FunctionBlockNav({ steps, focusId, onSelect }) {
-  if (!steps?.length) return null;
+function FunctionTreeNode({ op, draftMap, depth, focusId, onFocus, onPatch, pathLabels }) {
+  const cardRef = useRef(null);
+  const isPipeline = op.kind === "pipeline";
+  const steps =
+    isPipeline && op.steps ? op.steps.map((id) => draftMap[id]).filter(Boolean) : [];
+  const isFocused = focusId === op.id;
+  const promptRows = Math.min(14, Math.max(5, ((op.prompt || "").split("\n").length || 0) + 2));
+
+  useEffect(() => {
+    if (isFocused && cardRef.current) {
+      cardRef.current.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }, [isFocused]);
+
   return (
-    <div className="fn-blocks">
-      {steps.map((step, i) => (
-        <React.Fragment key={step.id}>
-          {i > 0 && <span className="fn-block-sep">→</span>}
-          <button
-            type="button"
-            className={"fn-block" + (focusId === step.id ? " on" : "") + (step.kind === "pipeline" ? " composite" : " leaf")}
-            onClick={() => onSelect(step.id)}
-            title={step.description || step.name}
-          >
-            {step.name}
-          </button>
-        </React.Fragment>
-      ))}
+    <div
+      ref={cardRef}
+      className={"fn-tree-card" + (isFocused ? " focused" : "") + (isPipeline ? " pipeline" : " leaf")}
+      style={{ marginLeft: depth * 20 }}
+      onClick={() => onFocus(op.id)}
+    >
+      <div className="fn-tree-card-head">
+        <span className={"fn-tree-badge" + (isPipeline ? " pipeline" : " leaf")}>
+          {isPipeline ? `pipeline · ${steps.length} step${steps.length === 1 ? "" : "s"}` : "leaf"}
+        </span>
+        {pathLabels.length > 0 && (
+          <span className="fn-tree-path">{pathLabels.join(" → ")}</span>
+        )}
+      </div>
+
+      <label className="fn-tree-label">name</label>
+      <input
+        className="fn-tree-input"
+        value={op.name || ""}
+        onChange={(e) => onPatch(op.id, { name: e.target.value })}
+        onClick={(e) => e.stopPropagation()}
+        placeholder="descriptive step name"
+      />
+
+      <label className="fn-tree-label">description</label>
+      <input
+        className="fn-tree-input"
+        value={op.description || ""}
+        onChange={(e) => onPatch(op.id, { description: e.target.value })}
+        onClick={(e) => e.stopPropagation()}
+        placeholder="what goes in, what comes out"
+      />
+
+      {!isPipeline && (
+        <>
+          <label className="fn-tree-label">prompt</label>
+          <textarea
+            className="fn-tree-prompt-input"
+            rows={promptRows}
+            value={op.prompt || ""}
+            onChange={(e) => onPatch(op.id, { prompt: e.target.value })}
+            onClick={(e) => e.stopPropagation()}
+            placeholder="GOAL, INPUT, PROCESS, OUTPUT FORMAT, QUALITY BAR…"
+          />
+        </>
+      )}
+
+      {steps.length > 0 && (
+        <div className="fn-tree-children">
+          {steps.map((step, i) => (
+            <FunctionTreeNode
+              key={step.id}
+              op={step}
+              draftMap={draftMap}
+              depth={depth + 1}
+              focusId={focusId}
+              onFocus={onFocus}
+              onPatch={onPatch}
+              pathLabels={[...pathLabels, step.name || `step ${i + 1}`]}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

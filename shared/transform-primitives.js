@@ -231,114 +231,6 @@ export const TRANSFORM_PRIMITIVES = [
   },
 ];
 
-/**
- * Perceptual moves — the starter set of cognitive transformations.
- * These are ways of seeing, not edits. Great thinkers have recurring moves;
- * these seven are the seed vocabulary users build personal styles from.
- */
-export const PERCEPTUAL_MOVES = [
-  {
-    id: "mv-elevate-overlooked",
-    name: "elevate the overlooked",
-    kind: "prompt",
-    primitive: true,
-    move: true,
-    resolveWhen: "never",
-    researchWhen: "never",
-    description: "Find the ignored element and make it central",
-    prompt:
-      "ELEVATE THE OVERLOOKED — find the element everyone ignores (the background detail, the minor character, the unglamorous part) and re-see the whole with that element as the center of gravity. Name what was overlooked, then show what the whole looks like once it is central. One paragraph. Return ONLY the re-seen whole.",
-    maxTokens: 800,
-    estimatedMs: 13000,
-  },
-  {
-    id: "mv-hidden-dependency",
-    name: "find the hidden dependency",
-    kind: "prompt",
-    primitive: true,
-    move: true,
-    resolveWhen: "never",
-    researchWhen: "never",
-    description: "Expose what this secretly relies on",
-    prompt:
-      "FIND THE HIDDEN DEPENDENCY — expose the thing this silently relies on to exist or function: the substrate, the maintainer, the assumption, the supply line nobody mentions. Name the dependency precisely, then show how the subject changes once you see it as dependent. One paragraph. Return ONLY the exposed dependency and its consequence.",
-    maxTokens: 800,
-    estimatedMs: 13000,
-  },
-  {
-    id: "mv-reverse-cause",
-    name: "reverse cause and effect",
-    kind: "prompt",
-    primitive: true,
-    move: true,
-    resolveWhen: "never",
-    researchWhen: "never",
-    description: "Swap which is cause and which is effect",
-    prompt:
-      "REVERSE CAUSE AND EFFECT — take the assumed causal arrow in this and flip it: treat the effect as the cause and the cause as the effect. Take the reversal seriously and show what becomes visible or explicable only under the reversed arrow. One paragraph. Return ONLY the reversed reading.",
-    maxTokens: 800,
-    estimatedMs: 13000,
-  },
-  {
-    id: "mv-process-organism",
-    name: "treat process as organism",
-    kind: "prompt",
-    primitive: true,
-    move: true,
-    resolveWhen: "never",
-    researchWhen: "never",
-    description: "See the process as a living thing",
-    prompt:
-      "TREAT PROCESS AS ORGANISM — re-see this process, system, or routine as a living organism: it is born, it feeds on something, it grows, it defends itself, it reproduces, it can sicken and die. Identify what it eats, how it defends itself, and what its health or sickness looks like. One paragraph. Return ONLY the organism reading.",
-    maxTokens: 850,
-    estimatedMs: 13000,
-  },
-  {
-    id: "mv-stewardship",
-    name: "search for stewardship",
-    kind: "prompt",
-    primitive: true,
-    move: true,
-    resolveWhen: "never",
-    researchWhen: "never",
-    description: "Ask who tends this, who is entrusted with it",
-    prompt:
-      "SEARCH FOR STEWARDSHIP — ask of this: who has been entrusted with it, who tends it, who will answer for its condition? Recast the subject from ownership/usage terms into stewardship terms: care, trust, tending, accountability across time. One paragraph. Return ONLY the stewardship reading.",
-    maxTokens: 800,
-    estimatedMs: 13000,
-  },
-  {
-    id: "mv-collapse-scales",
-    name: "collapse scales",
-    kind: "prompt",
-    primitive: true,
-    move: true,
-    resolveWhen: "never",
-    researchWhen: "never",
-    description: "See the same pattern at a much larger or smaller scale",
-    prompt:
-      "COLLAPSE SCALES — find the scale where this exact pattern repeats: the galaxy in the cell, the city in the ant colony, the family in the ecosystem. Pick ONE other scale (much larger or much smaller), show the correspondence point by point, and let the two scales illuminate each other. One paragraph. Return ONLY the collapsed-scale reading.",
-    maxTokens: 850,
-    estimatedMs: 13000,
-  },
-  {
-    id: "mv-cultivation",
-    name: "translate into cultivation",
-    kind: "prompt",
-    primitive: true,
-    move: true,
-    resolveWhen: "never",
-    researchWhen: "never",
-    description: "Recast as gardening: soil, seasons, pruning, harvest",
-    prompt:
-      "TRANSLATE INTO CULTIVATION — recast this entirely in the vocabulary of gardening and husbandry: soil, seed, seasons, pruning, grafting, fallow years, harvest. What is the soil here? What season is it in? What needs pruning? What cannot be rushed? One paragraph. Return ONLY the cultivation reading.",
-    maxTokens: 850,
-    estimatedMs: 13000,
-  },
-];
-
-TRANSFORM_PRIMITIVES.push(...PERCEPTUAL_MOVES);
-
 export const PRIMITIVE_NAMES = new Set(TRANSFORM_PRIMITIVES.map((p) => p.name));
 
 const LEGACY_DEFAULT_NAMES = new Set([
@@ -404,9 +296,10 @@ export function migrateOperatorStore(saved) {
 
   const userOps = saved.filter(
     (o) =>
-      o.top ||
+      (o.move && !o.primitive) ||
+      (o.top && !o.move) ||
       o.role ||
-      (!o.primitive && !LEGACY_DEFAULT_NAMES.has(o.name) && !PRIMITIVE_NAMES.has(o.name))
+      (!o.primitive && !o.move && !LEGACY_DEFAULT_NAMES.has(o.name) && !PRIMITIVE_NAMES.has(o.name))
   );
 
   return [...TRANSFORM_PRIMITIVES.map((p) => ({ ...p })), ...userOps];
