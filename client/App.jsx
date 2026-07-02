@@ -10,6 +10,17 @@ import { scaleEta, ETA } from "../shared/eta.js";
 import { phaseClientAbortMs, PHASE_TIMEOUT } from "../shared/phase-timeouts.js";
 import { compileExecutionPlan } from "../server/plan.js";
 import { FUNCTION_ARCHITECT_STANDARDS } from "../shared/function-standards.js";
+import {
+  createOperatorBundle,
+  createLensShareBundle,
+  createSymbolBundle,
+  createJourneyBundle,
+  createPathBundle,
+  buildShareUrl,
+  decodeShareToken,
+  parseShareFromLocation,
+  clearShareFromLocation,
+} from "../shared/share-bundle.js";
 
 const ITEMS_KEY = "lens.board.items.v1";
 const CAMERA_KEY = "lens.board.camera.v1";
