@@ -165,3 +165,207 @@ export function clearShareFromLocation(loc = {}) {
   url.hash = url.hash.replace(/[#&]?share=[^&]*/g, "").replace(/^#$/, "");
   return url.pathname + url.search + url.hash;
 }
+
+function cap(s) {
+  if (!s) return "";
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** Display name for any share bundle kind. */
+export function getBundleDisplayName(bundle) {
+  if (!bundle) return "shared";
+  switch (bundle.kind) {
+    case "operator":
+      return bundle.operators?.[0]?.name || bundle.meta?.name || "function";
+    case "lens":
+      return bundle.lens?.name || bundle.meta?.name || "lens";
+    case "journey":
+      return bundle.journey?.title || bundle.meta?.name || "journey";
+    case "symbol":
+      return bundle.symbols?.[0]?.title || bundle.meta?.name || "structure";
+    case "path":
+      return bundle.meta?.name || "shared path";
+    default:
+      return bundle.meta?.name || "shared";
+  }
+}
+
+/** One-line tagline for the reveal step. */
+export function shareTagline(bundle) {
+  const name = getBundleDisplayName(bundle);
+  switch (bundle.kind) {
+    case "operator":
+      return `A reusable move — ${name}`;
+    case "lens": {
+      const n = bundle.lens?.opTrees?.length || 0;
+      return `${n} move${n === 1 ? "" : "s"} in sequence — ${name}`;
+    }
+    case "journey":
+      return `See how ${name} was built, step by step`;
+    case "symbol":
+      return `A reusable template — ${name}`;
+    case "path":
+      return "A thought path someone shared with you";
+    default:
+      return `${name} was shared with you`;
+  }
+}
+
+const KEYWORD_USE_CASES = [
+  {
+    re: /compress|condense|distill|summar|tighten|shrink/,
+    cases: (n) => [`Compress messy notes with “${n}”`, "Distill meeting takeaways", "Sharpen before sharing"],
+  },
+  {
+    re: /expand|elaborat|develop|grow|flesh/,
+    cases: (n) => [`Expand rough ideas with “${n}”`, "Flesh out half-formed thoughts", "Build on a single spark"],
+  },
+  {
+    re: /invert|flip|reverse|opposite|counter/,
+    cases: (n) => [`Flip assumptions using “${n}”`, "Stress-test your first take", "Find the counter-view"],
+  },
+  {
+    re: /compare|contrast|weigh|balance/,
+    cases: (n) => [`Weigh options with “${n}”`, "See two sides clearly", "Decide with sharper tradeoffs"],
+  },
+  {
+    re: /garden|nature|organic|grow/,
+    cases: (n) => [`See ideas as living systems with “${n}”`, "Find what wants to grow", "Tend messy notes like a garden"],
+  },
+  {
+    re: /merge|combine|blend|synth/,
+    cases: (n) => [`Combine threads with “${n}”`, "Merge overlapping notes", "Find the through-line"],
+  },
+  {
+    re: /question|probe|ask|interrog/,
+    cases: (n) => [`Ask sharper questions with “${n}”`, "Probe weak spots in an argument", "Turn notes into inquiry"],
+  },
+];
+
+/** 2–3 auto-generated use-case bullets (no LLM). */
+export function shareUseCases(bundle) {
+  const name = getBundleDisplayName(bundle);
+  const lower = name.toLowerCase();
+
+  for (const kw of KEYWORD_USE_CASES) {
+    if (kw.re.test(lower)) return kw.cases(name).slice(0, 3);
+  }
+
+  const desc = bundle.operators?.[0]?.description || bundle.lens?.description || "";
+  if (desc) {
+    const parts = desc
+      .split(/[.!?\n]/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 8);
+    if (parts.length >= 2) return parts.slice(0, 3).map(cap);
+  }
+
+  switch (bundle.kind) {
+    case "operator":
+      return [
+        `Apply “${name}” to any note on your board`,
+        "Drop it on text to transform in one gesture",
+        "Combine with other moves in a lens",
+      ];
+    case "lens": {
+      const n = bundle.lens?.opTrees?.length || 0;
+      return [
+        `Run ${n} move${n === 1 ? "" : "s"} in sequence`,
+        "Switch perspectives without retyping prompts",
+        "Save hours on repetitive thinking patterns",
+      ];
+    }
+    case "journey":
+      return [
+        "Replay how this idea was built",
+        "Learn the move sequence behind the result",
+        "Branch off and make it yours",
+      ];
+    case "symbol":
+      return [
+        "Reuse this template on new material",
+        "Keep structure, swap the content",
+        "Build a library of thinking frameworks",
+      ];
+    case "path":
+      return [
+        "Walk the full thought path on your canvas",
+        "See every note in context",
+        "Continue from where they left off",
+      ];
+    default:
+      return ["Explore it on your board", "Make it part of your workflow"];
+  }
+}
+
+/** Preview chips for the pipeline / move chain step. */
+export function sharePreviewItems(bundle) {
+  switch (bundle.kind) {
+    case "operator": {
+      const op = bundle.operators?.[0];
+      const steps = op?.steps || [];
+      if (steps.length) return steps.map((s) => s.name || "step");
+      return [op?.name || "function"];
+    }
+    case "lens":
+      return (bundle.lens?.opTrees || []).map((t) => t.name || "move");
+    case "journey": {
+      const trees = bundle.journey?.opTrees || [];
+      if (trees.length) return trees.map((t) => t.name || "move");
+      return (bundle.journey?.steps || []).map((s, i) => s.caption || s.via?.name || `step ${i + 1}`);
+    }
+    case "symbol": {
+      const sym = bundle.symbols?.[0];
+      const n = sym?.items?.length || 0;
+      return [sym?.kind || "template", `${n} item${n === 1 ? "" : "s"}`];
+    }
+    case "path": {
+      const n = bundle.path?.items?.length || 0;
+      return [`${n} note${n === 1 ? "" : "s"}`, "full canvas path"];
+    }
+    default:
+      return [];
+  }
+}
+
+/** Where the item lands: functions rail, structures tab, or canvas. */
+export function shareDestinationKind(bundle) {
+  switch (bundle?.kind) {
+    case "symbol":
+      return "structures";
+    case "path":
+      return "canvas";
+    default:
+      return "functions";
+  }
+}
+
+/** Human label for the destination (laboratory, etc.). */
+export function shareDestinationLabel(bundle) {
+  switch (shareDestinationKind(bundle)) {
+    case "structures":
+      return "structures";
+    case "canvas":
+      return "canvas";
+    default:
+      return "laboratory";
+  }
+}
+
+/** Kind badge shown in the overlay header. */
+export function shareKindLabel(bundle) {
+  switch (bundle?.kind) {
+    case "operator":
+      return "function";
+    case "lens":
+      return "lens";
+    case "journey":
+      return "journey";
+    case "symbol":
+      return "structure";
+    case "path":
+      return "path";
+    default:
+      return "share";
+  }
+}

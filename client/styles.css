@@ -2968,3 +2968,306 @@ body {
   color: var(--ink);
   background: color-mix(in srgb, var(--ink) 4%, transparent);
 }
+
+/* ---- share welcome overlay ---- */
+.share-welcome-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 85;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--paper-deep) 92%, transparent);
+  backdrop-filter: blur(4px);
+  animation: shareScrimIn 0.35s ease both;
+}
+.share-welcome-scrim.flying {
+  pointer-events: none;
+  background: color-mix(in srgb, var(--paper-deep) 70%, transparent);
+}
+.share-welcome-dust {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.35;
+  background-image:
+    radial-gradient(circle at 15% 20%, rgba(240, 240, 240, 0.06) 0%, transparent 40%),
+    radial-gradient(circle at 85% 75%, rgba(240, 240, 240, 0.04) 0%, transparent 35%),
+    radial-gradient(circle at 50% 50%, rgba(245, 230, 163, 0.03) 0%, transparent 50%);
+  animation: shareDustDrift 8s ease-in-out infinite alternate;
+}
+.share-welcome {
+  position: relative;
+  z-index: 2;
+  width: 480px;
+  max-width: 90vw;
+  text-align: center;
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+.share-welcome.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.share-welcome-step {
+  animation: shareStepIn 0.28s ease both;
+}
+.share-welcome-kind {
+  display: inline-block;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--chalk-yellow-muted);
+  border: 1px dashed var(--line-2);
+  border-radius: 99px;
+  padding: 4px 12px;
+  margin-bottom: 16px;
+}
+.share-welcome-name {
+  font-family: var(--sans);
+  font-weight: 500;
+  font-size: clamp(28px, 6vw, 38px);
+  margin: 0 0 10px;
+  line-height: 1.15;
+  animation: shareRevealName 0.5s ease both;
+}
+.share-welcome-tagline {
+  color: var(--ink-2);
+  font-size: 16px;
+  line-height: 1.5;
+  margin: 0;
+  max-width: 400px;
+  margin-inline: auto;
+}
+.share-welcome-lead {
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 0 0 18px;
+}
+.share-welcome-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  text-align: left;
+  max-width: 380px;
+  margin-inline: auto;
+}
+.share-welcome-list li {
+  font-size: 16px;
+  line-height: 1.45;
+  color: var(--ink);
+  padding: 10px 0 10px 22px;
+  position: relative;
+  opacity: 0;
+  animation: shareBulletIn 0.4s ease forwards;
+}
+.share-welcome-list li::before {
+  content: "◦";
+  position: absolute;
+  left: 0;
+  color: var(--chalk-yellow);
+}
+.share-welcome-pipeline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  align-items: center;
+  max-width: 420px;
+  margin-inline: auto;
+}
+.share-welcome-chip {
+  display: inline-block;
+  font-size: 14px;
+  padding: 8px 14px;
+  border: 1px dashed var(--line-2);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--ink);
+  opacity: 0;
+  animation: shareChipIn 0.35s ease forwards;
+}
+.share-welcome-arrow {
+  color: var(--faint);
+  font-size: 14px;
+}
+.share-welcome-cta-q {
+  font-family: var(--sans);
+  font-weight: 500;
+  font-size: 26px;
+  margin: 0 0 8px;
+}
+.share-welcome-cta-hint {
+  color: var(--ink-2);
+  font-size: 14px;
+  margin: 0 0 24px;
+}
+.share-welcome-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.share-welcome-add {
+  border: 1px solid var(--chalk-yellow);
+  background: color-mix(in srgb, var(--chalk-yellow) 18%, var(--card));
+  color: var(--chalk-yellow);
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 500;
+  padding: 12px 28px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.12s ease;
+}
+.share-welcome-add:hover {
+  background: color-mix(in srgb, var(--chalk-yellow) 28%, var(--card));
+  transform: scale(1.02);
+}
+.share-welcome-skip {
+  border: 1px solid var(--line-2);
+  background: transparent;
+  color: var(--faint);
+  font-family: var(--sans);
+  font-size: 14px;
+  padding: 12px 20px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.share-welcome-skip:hover {
+  color: var(--ink-2);
+  border-color: var(--ink-2);
+}
+.share-welcome-progress {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 32px;
+}
+.share-welcome-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--line);
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+.share-welcome-dot.on {
+  background: var(--line-2);
+}
+.share-welcome-dot.current {
+  background: var(--chalk-yellow);
+  transform: scale(1.25);
+}
+.share-welcome-card {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  width: 220px;
+  padding: 18px 20px;
+  background: var(--card);
+  border: 1px dashed var(--line-2);
+  border-radius: 14px;
+  box-shadow: 0 16px 48px var(--shadow-soft);
+  text-align: left;
+  pointer-events: none;
+  transition: transform 0.65s cubic-bezier(0.4, 0, 0.15, 1), opacity 0.55s ease, top 0.2s ease, bottom 0.2s ease;
+}
+.share-welcome-scrim:not(.flying) .share-welcome-card {
+  opacity: 0;
+  visibility: hidden;
+}
+.share-welcome-scrim.flying .share-welcome-card,
+.share-welcome-card.show {
+  opacity: 1;
+  visibility: visible;
+}
+.share-welcome-card.show:not(.fly) {
+  bottom: 22%;
+  top: auto;
+  transform: translateX(-50%);
+}
+.share-welcome-card.fly {
+  transform: none;
+  opacity: 0.65;
+}
+.share-welcome-card-kind {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 6px;
+}
+.share-welcome-card-name {
+  display: block;
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--ink);
+  line-height: 1.25;
+}
+.share-welcome-card-meta {
+  display: block;
+  font-size: 12px;
+  color: var(--faint);
+  margin-top: 6px;
+}
+.board-rail.rail-pulse {
+  animation: railLandPulse 1.2s ease;
+}
+@keyframes shareScrimIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes shareDustDrift {
+  from { transform: translate(0, 0); }
+  to { transform: translate(6px, -4px); }
+}
+@keyframes shareStepIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes shareRevealName {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes shareBulletIn {
+  from { opacity: 0; transform: translateX(-10px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes shareChipIn {
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes railLandPulse {
+  0%, 100% { box-shadow: inset -4px 0 12px rgba(0, 0, 0, 0.18); }
+  40% {
+    box-shadow:
+      inset -4px 0 12px rgba(0, 0, 0, 0.18),
+      inset 0 0 0 2px rgba(245, 230, 163, 0.55),
+      0 0 24px rgba(245, 230, 163, 0.15);
+  }
+}
+@media (max-width: 520px) {
+  .share-welcome-name {
+    font-size: 26px;
+  }
+  .share-welcome-list li {
+    font-size: 15px;
+  }
+  .share-welcome-cta-q {
+    font-size: 22px;
+  }
+  .share-welcome-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .share-welcome-add,
+  .share-welcome-skip {
+    width: 100%;
+  }
+}

@@ -27,7 +27,9 @@ import {
   decodeShareToken,
   parseShareFromLocation,
   clearShareFromLocation,
+  shareDestinationLabel,
 } from "../shared/share-bundle.js";
+import ShareWelcomeOverlay from "./ShareWelcomeOverlay.jsx";
 
 const ITEMS_KEY = "lens.board.items.v1";
 const CAMERA_KEY = "lens.board.camera.v1";
@@ -1653,8 +1655,11 @@ export default function App() {
   const captureSelRef = useRef(null);
   const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
   const [freshConfirm, setFreshConfirm] = useState(false);
+  const [pendingShareBundle, setPendingShareBundle] = useState(null);
+  const [railPulse, setRailPulse] = useState(false);
 
   const viewportRef = useRef(null);
+  const railRef = useRef(null);
   const inputLayerRef = useRef(null);
   const gesture = useRef(null);
   const camRef = useRef(camera);
@@ -1697,7 +1702,7 @@ export default function App() {
     }
     const clean = clearShareFromLocation(window.location);
     window.history.replaceState({}, "", clean);
-    setTimeout(() => importShareBundle(decoded.bundle), 120);
+    setTimeout(() => setPendingShareBundle(decoded.bundle), 80);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => localStorage.setItem(ACTIVE_LENS_KEY, JSON.stringify(activeLensId)), [activeLensId]);
@@ -3204,7 +3209,7 @@ export default function App() {
     shareLensLink(id);
   }
 
-  function importLensData(data) {
+  function importLensData(data, opts = {}) {
     const name = data.name || data.lens?.name || "uploaded lens";
     const opTrees = data.opTrees || data.lens?.opTrees;
     if (!Array.isArray(opTrees) || !opTrees.length) throw new Error("not a lens");
@@ -3231,7 +3236,7 @@ export default function App() {
     setLenses((ls) => [lens, ...ls]);
     setActiveLensId(lens.id);
     setRailTab("functions");
-    showToast(`Uploaded · ${lens.name} — now looking through it`);
+    if (!opts.silent) showToast(`Uploaded · ${lens.name} — now looking through it`);
   }
 
   function importLens(file) {
@@ -3263,7 +3268,7 @@ export default function App() {
     return rootId;
   }
 
-  function importPathItems(data) {
+  function importPathItems(data, opts = {}) {
     const items = data.items || data.path?.items;
     const nodeId = data.nodeId || data.path?.nodeId;
     if (!Array.isArray(items) || !items.length) throw new Error("not a path");
@@ -3289,11 +3294,11 @@ export default function App() {
     pushHistoryRef.current();
     setItems((arr) => [...arr, ...newItems]);
     const terminal = idMap[nodeId];
-    showToast("path received — walking it");
+    if (!opts.silent) showToast("path received — walking it");
     setTimeout(() => terminal && walkNode(terminal), 80);
   }
 
-  function importJourneyBundle(journey) {
+  function importJourneyBundle(journey, opts = {}) {
     if (!journey?.steps?.length) throw new Error("empty journey");
     const newOps = [];
     for (const tree of journey.opTrees || []) {
@@ -3317,17 +3322,21 @@ export default function App() {
     setSelection([]);
     setWalking({ nodeId: null, title: journey.title || "shared journey", steps, stepIndex: 0, imported: true });
     setRailTab("functions");
-    showToast("journey imported — walking it");
+    if (!opts.silent) showToast("journey imported — walking it");
   }
 
-  function importShareBundle(bundle) {
+  function importShareBundle(bundle, opts = {}) {
+    const fromWelcome = !!opts.fromWelcome;
     try {
       switch (bundle.kind) {
         case "operator":
-          importOperatorTree(bundle.operators[0]);
+          importOperatorTree(bundle.operators[0], {
+            toast: fromWelcome ? "Added to laboratory" : undefined,
+          });
           break;
         case "lens":
-          importLensData({ name: bundle.lens.name, opTrees: bundle.lens.opTrees });
+          importLensData({ name: bundle.lens.name, opTrees: bundle.lens.opTrees }, { silent: fromWelcome });
+          if (fromWelcome) showToast("Added to laboratory");
           break;
         case "symbol": {
           const raw = bundle.symbols[0];
@@ -3342,14 +3351,16 @@ export default function App() {
           };
           setStructures((arr) => [struct, ...arr]);
           setRailTab("structures");
-          showToast(`structure received · ${struct.title}`);
+          showToast(fromWelcome ? "Added to structures" : `structure received · ${struct.title}`);
           break;
         }
         case "journey":
-          importJourneyBundle(bundle.journey);
+          importJourneyBundle(bundle.journey, { silent: fromWelcome });
+          if (fromWelcome) showToast("Added to laboratory");
           break;
         case "path":
-          importPathItems(bundle.path);
+          importPathItems(bundle.path, { silent: fromWelcome });
+          if (fromWelcome) showToast(`Added to ${shareDestinationLabel(bundle)}`);
           break;
         default:
           showToast("unknown share type");
@@ -3357,6 +3368,18 @@ export default function App() {
     } catch {
       showToast("could not import share link");
     }
+  }
+
+  function acceptPendingShare() {
+    const bundle = pendingShareBundle;
+    setPendingShareBundle(null);
+    setRailPulse(true);
+    setTimeout(() => setRailPulse(false), 1400);
+    if (bundle) importShareBundle(bundle, { fromWelcome: true });
+  }
+
+  function dismissPendingShare() {
+    setPendingShareBundle(null);
   }
 
   async function copyShareLink(bundle) {
@@ -3926,7 +3949,8 @@ export default function App() {
     <div className="board-app">
       {/* left rail: draggable transformations */}
       <aside
-        className={"board-rail" + (railDropOver ? " drop-over" : "")}
+        ref={railRef}
+        className={"board-rail" + (railDropOver ? " drop-over" : "") + (railPulse ? " rail-pulse" : "")}
         onDragOver={(e) => {
           if (
             e.dataTransfer.types.includes(OP_MIME) ||
@@ -4606,6 +4630,16 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {pendingShareBundle && (
+        <ShareWelcomeOverlay
+          bundle={pendingShareBundle}
+          railRef={railRef}
+          canvasRef={viewportRef}
+          onAccept={acceptPendingShare}
+          onDismiss={dismissPendingShare}
+        />
       )}
 
       {onboard && (
