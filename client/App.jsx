@@ -660,7 +660,7 @@ async function runMoveSequenceStep(stepOp, map, material, image, onProgress, ope
   });
 }
 
-async function runMoveSequence(op, map, material, image, onProgress, operators) {
+async function runMoveSequence(op, map, material, image, onProgress, operators, onStepOutput) {
   let current = material;
   for (let i = 0; i < op.steps.length; i++) {
     const sid = op.steps[i];
@@ -670,6 +670,9 @@ async function runMoveSequence(op, map, material, image, onProgress, operators) 
     const out = await runMoveSequenceStep(stepOp, map, current, i === 0 ? image : null, onProgress, operators);
     if (!out?.trim()) throw new Error(`empty output at ${stepOp.name}`);
     current = out.trim();
+    if (onStepOutput) {
+      await onStepOutput({ out: current, stepOp, stepIndex: i, totalSteps: op.steps.length });
+    }
   }
   return current;
 }
@@ -924,13 +927,29 @@ function itemWidth(it) {
   return 0;
 }
 
+const TEXT_PAD_X = 30;
+const TEXT_PAD_Y = 18;
+const TEXT_LINE_HEIGHT = 24;
+const SPAWN_GAP = 40;
+const SPAWN_PAD = 12;
+
+/** Estimate rendered height for wrapped board text (matches .board-text CSS). */
+function measureTextHeight(w, text) {
+  const boxW = w || 360;
+  const contentW = Math.max(64, boxW - TEXT_PAD_X);
+  const charW = 8.6;
+  const lines = (text || "").split("\n");
+  let rowCount = 0;
+  for (const line of lines) {
+    if (!line.length) rowCount += 1;
+    else rowCount += Math.max(1, Math.ceil((line.length * charW) / contentW));
+  }
+  return Math.max(28, rowCount * TEXT_LINE_HEIGHT + TEXT_PAD_Y);
+}
+
 function itemHeight(it) {
   if (it.type === "image") return it.h || Math.round((it.w || 200) * 0.75);
-  if (it.type === "text") {
-    const lines = Math.max(1, (it.text || "").split("\n").length);
-    const chars = (it.text || "").length;
-    return Math.max(28, lines * 26 + Math.floor(chars / 42) * 26);
-  }
+  if (it.type === "text") return measureTextHeight(it.w, it.text);
   return 0;
 }
 
@@ -1122,9 +1141,6 @@ function bboxesOverlap(a, b) {
   return a.minx <= b.maxx && a.maxx >= b.minx && a.miny <= b.maxy && a.maxy >= b.miny;
 }
 
-const SPAWN_GAP = 48;
-const SPAWN_PAD = 12;
-
 function unionBBoxes(boxes) {
   if (!boxes?.length) return null;
   return {
@@ -1136,18 +1152,18 @@ function unionBBoxes(boxes) {
 }
 
 function textSpawnBBox(x, y, w, text) {
-  const h = itemHeight({ type: "text", text, w });
+  const boxW = w || 360;
+  const h = measureTextHeight(boxW, text);
   return {
     minx: x - SPAWN_PAD,
     miny: y - SPAWN_PAD,
-    maxx: x + w + SPAWN_PAD,
+    maxx: x + boxW + SPAWN_PAD,
     maxy: y + h + SPAWN_PAD,
   };
 }
 
-function bboxOverlapsItems(bb, items, excludeIds) {
+function bboxOverlapsItems(bb, items) {
   for (const it of items) {
-    if (excludeIds?.has(it.id)) continue;
     if (it.type === "link") continue;
     const ob = itemWorldBBox(it);
     if (!ob) continue;
@@ -1162,28 +1178,68 @@ function bboxOverlapsItems(bb, items, excludeIds) {
   return false;
 }
 
-/** Preferred right, then below; spiral outward until bbox is clear. */
-function findClearSpawnPosition(anchorBox, w, text, items, excludeIds, placedSoFar = []) {
+function fallbackSpawnBox(fallbackWorld, viewportCenter) {
+  if (fallbackWorld) {
+    return {
+      minx: fallbackWorld.x,
+      miny: fallbackWorld.y,
+      maxx: fallbackWorld.x + 280,
+      maxy: fallbackWorld.y + 80,
+    };
+  }
+  const c = viewportCenter();
+  return { minx: c.x - 140, miny: c.y - 40, maxx: c.x + 140, maxy: c.y + 40 };
+}
+
+/** Union of parent nodes plus any existing outputs born from them. */
+function spawnAnchorBox(parentIds, items, fallbackWorld, viewportCenter) {
+  const idSet = new Set(parentIds || []);
+  const boxes = [];
+  for (const it of items) {
+    if (it.type === "link") continue;
+    if (idSet.has(it.id)) {
+      const bb = itemWorldBBox(it);
+      if (bb) boxes.push(bb);
+    } else if (it.type === "text" && (it.bornFrom || []).some((pid) => idSet.has(pid))) {
+      const bb = itemWorldBBox(it);
+      if (bb) boxes.push(bb);
+    }
+  }
+  if (boxes.length) return unionBBoxes(boxes);
+  return fallbackSpawnBox(fallbackWorld, viewportCenter);
+}
+
+function estimateSpawnWidth(text) {
+  const clean = (text || "").trim();
+  return Math.min(560, Math.max(260, Math.round(clean.length * 0.5 + 200)));
+}
+
+/** Preferred right, then below; row-scan outward until bbox is clear. */
+function findClearSpawnPosition(anchorBox, w, text, items, placedSoFar = []) {
   const occupancy = [...items, ...placedSoFar];
-  const h = itemHeight({ type: "text", text, w });
-  const bases = [
+  const h = measureTextHeight(w, text);
+  const seeds = [
     { x: anchorBox.maxx + SPAWN_GAP, y: anchorBox.miny, fromDir: "se" },
     { x: anchorBox.minx, y: anchorBox.maxy + SPAWN_GAP, fromDir: "s" },
     { x: anchorBox.maxx + SPAWN_GAP, y: anchorBox.maxy + SPAWN_GAP, fromDir: "se" },
     { x: anchorBox.minx - w - SPAWN_GAP, y: anchorBox.miny, fromDir: "sw" },
     { x: anchorBox.minx, y: anchorBox.miny - h - SPAWN_GAP, fromDir: "n" },
   ];
-  for (let ring = 0; ring < 24; ring++) {
-    for (const base of bases) {
-      const x = base.x + (ring % 4) * (SPAWN_GAP * 0.75);
-      const y = base.y + Math.floor(ring / 4) * (SPAWN_GAP * 0.75);
+  for (let ring = 0; ring < 32; ring++) {
+    for (const seed of seeds) {
+      const x = seed.x + (ring % 6) * SPAWN_GAP;
+      const y = seed.y + Math.floor(ring / 6) * SPAWN_GAP;
       const bb = textSpawnBBox(x, y, w, text);
-      if (!bboxOverlapsItems(bb, occupancy, excludeIds)) {
-        return { x, y, fromDir: base.fromDir };
+      if (!bboxOverlapsItems(bb, occupancy)) {
+        return { x, y, fromDir: seed.fromDir };
       }
     }
   }
-  return { x: anchorBox.maxx + SPAWN_GAP * 3, y: anchorBox.miny, fromDir: "se" };
+  return {
+    x: anchorBox.maxx + SPAWN_GAP * 4,
+    y: anchorBox.miny + SPAWN_GAP * 4,
+    fromDir: "se",
+  };
 }
 
 function sampleStrokePoints(points) {
@@ -2181,100 +2237,92 @@ export default function App() {
   // ---- composed operators (functions made of functions) ----
   const opMap = useMemo(() => Object.fromEntries(operators.map((o) => [o.id, o])), [operators]);
 
-  function spawnPortalObjects(portals, sourceIds, atWorld) {
-    const idSet = new Set(sourceIds || []);
-    const sel = itemsRef.current.filter((it) => idSet.has(it.id));
-    const boxes = sel.map(itemWorldBBox).filter(Boolean);
-    const anchor = unionBBoxes(boxes) || (atWorld
-      ? { minx: atWorld.x, miny: atWorld.y, maxx: atWorld.x + 280, maxy: atWorld.y + 80 }
-      : null);
-    const fallback = anchor || (() => {
-      const c = viewportCenterWorld();
-      return { minx: c.x - 140, miny: c.y - 40, maxx: c.x + 140, maxy: c.y + 40 };
-    })();
-    const n = portals.length;
-    const newIds = [];
-    const newItems = [];
-    const newLinks = [];
-    const placedSoFar = [];
-    for (let i = 0; i < n; i++) {
-      const portal = portals[i];
-      const text = portalDisplayText(portal);
-      const clean = stripMd(text).trim();
-      if (!clean) continue;
-      const w = Math.min(480, Math.max(240, Math.round(clean.length * 0.45 + 180)));
-      const { x, y, fromDir } = findClearSpawnPosition(fallback, w, clean, itemsRef.current, idSet, placedSoFar);
-      const id = uid();
-      newIds.push(id);
-      const item = normalizeItem({
-        id,
-        type: "text",
-        x,
-        y,
-        text: clean,
-        w,
-        bornFrom: sourceIds || [],
-        portal: !!portal.domain,
-      });
-      newItems.push(item);
-      placedSoFar.push(item);
-      for (const sid of sourceIds || []) {
-        newLinks.push(makeBoardLink(sid, id, fromDir));
-      }
-    }
-    if (newItems.length) {
-      setItems((arr) => [...arr, ...newLinks, ...newItems]);
-      setSelection(newIds);
-    }
-    return newIds;
-  }
-
   function makeBoardLink(fromId, toId, fromDir = null) {
     return normalizeItem({ id: uid(), type: "link", fromId, toId, fromDir });
   }
 
-  function sourceAnchorBox(sourceIds, fallbackWorld) {
-    const idSet = new Set(sourceIds || []);
-    const boxes = itemsRef.current.filter((it) => idSet.has(it.id)).map(itemWorldBBox).filter(Boolean);
-    if (boxes.length) return unionBBoxes(boxes);
-    if (fallbackWorld) {
-      return {
-        minx: fallbackWorld.x,
-        miny: fallbackWorld.y,
-        maxx: fallbackWorld.x + 280,
-        maxy: fallbackWorld.y + 80,
-      };
+  /** Single entry point for all transform spawns — collision-safe, cascades within a batch. */
+  function spawnTransformOutputs(texts, parentIds, atWorld, via = null, opts = {}) {
+    const rawList = Array.isArray(texts) ? texts : [texts];
+    const cleaned = rawList.map((t) => stripMd(t || "").trim()).filter(Boolean);
+    if (!cleaned.length) return { ids: [], lastAnchorBox: null, lastParentIds: parentIds || [] };
+
+    const fallbackWorld = parentIds?.length ? null : atWorld;
+    const newIds = [];
+    let lastAnchorBox = null;
+    let lastParentIds = parentIds || [];
+
+    setItems((arr) => {
+      const placedSoFar = [];
+      let anchor = opts.anchorBox || spawnAnchorBox(parentIds, arr, fallbackWorld, viewportCenterWorld);
+      let linkFrom = parentIds || [];
+      const newItems = [];
+      const newLinks = [];
+
+      for (const clean of cleaned) {
+        const w = opts.widthFor?.(clean) || estimateSpawnWidth(clean);
+        const { x, y, fromDir } = findClearSpawnPosition(anchor, w, clean, arr, placedSoFar);
+        const id = uid();
+        newIds.push(id);
+        const item = normalizeItem({
+          id,
+          type: "text",
+          x,
+          y,
+          text: clean,
+          w,
+          bornFrom: linkFrom,
+          via,
+          ...(opts.portal != null ? { portal: opts.portal } : {}),
+        });
+        newItems.push(item);
+        placedSoFar.push(item);
+        for (const sid of linkFrom) {
+          newLinks.push(makeBoardLink(sid, id, fromDir));
+        }
+        const bb = itemWorldBBox(item);
+        if (bb) {
+          anchor = bb;
+          lastAnchorBox = bb;
+        }
+        linkFrom = [id];
+        lastParentIds = [id];
+      }
+
+      return [...arr, ...newLinks, ...newItems];
+    });
+
+    if (newIds.length) setSelection(newIds);
+    return { ids: newIds, lastAnchorBox, lastParentIds };
+  }
+
+  function spawnPortalObjects(portals, sourceIds, atWorld) {
+    if (!portals?.length) return [];
+    pushHistory();
+    const newIds = [];
+    let chainParentIds = sourceIds || [];
+    let chainAnchor = null;
+    for (const portal of portals) {
+      const text = portalDisplayText(portal);
+      const clean = stripMd(text).trim();
+      if (!clean) continue;
+      const result = spawnTransformOutputs([clean], chainParentIds, atWorld, null, {
+        anchorBox: chainAnchor || undefined,
+        widthFor: () => Math.min(480, Math.max(240, Math.round(clean.length * 0.45 + 180))),
+        portal: !!portal.domain,
+      });
+      newIds.push(...result.ids);
+      chainParentIds = result.lastParentIds;
+      chainAnchor = result.lastAnchorBox;
     }
-    const c = viewportCenterWorld();
-    return { minx: c.x - 140, miny: c.y - 40, maxx: c.x + 140, maxy: c.y + 40 };
+    return newIds;
   }
 
   function spawnMultipleObjects(texts, sourceIds, atWorld, via = null) {
-    const idSet = new Set(sourceIds || []);
-    const anchor = sourceAnchorBox(sourceIds, sourceIds?.length ? null : atWorld);
-    const newIds = [];
-    const newItems = [];
-    const newLinks = [];
-    const placedSoFar = [];
-    for (const t of texts) {
-      const clean = stripMd(t).trim();
-      if (!clean) continue;
-      const id = uid();
-      newIds.push(id);
-      const w = Math.min(520, Math.max(260, Math.round(clean.length * 0.5 + 180)));
-      const { x, y, fromDir } = findClearSpawnPosition(anchor, w, clean, itemsRef.current, idSet, placedSoFar);
-      const item = normalizeItem({ id, type: "text", x, y, text: clean, w, bornFrom: sourceIds || [], via });
-      newItems.push(item);
-      placedSoFar.push(item);
-      for (const sid of sourceIds || []) {
-        newLinks.push(makeBoardLink(sid, id, fromDir));
-      }
-    }
-    if (newItems.length) {
-      setItems((arr) => [...arr, ...newLinks, ...newItems]);
-      setSelection(newIds);
-    }
-    return newIds;
+    pushHistory();
+    return spawnTransformOutputs(texts, sourceIds, atWorld, via, {
+      widthFor: (clean) => Math.min(520, Math.max(260, Math.round(clean.length * 0.5 + 180))),
+    }).ids;
   }
 
   async function executeOperatorJob(jobId, op, targetIds, atClient, opts = {}, mapOverride = null) {
@@ -2306,7 +2354,19 @@ export default function App() {
         startedAt: Date.now(),
         estimatedMs: stepMs,
       });
-      out = await runMoveSequence(execOp, map, text, image, onProgress, operators);
+      const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
+      let chainParentIds = targetIds;
+      let chainAnchor = null;
+      await runMoveSequence(execOp, map, text, image, onProgress, operators, async ({ out: stepOut, stepOp }) => {
+        patchJob(jobId, { step: "spawning object…", progress: 0.92 });
+        pushHistory();
+        const result = spawnTransformOutputs([stepOut], chainParentIds, atWorld, viaFromOp(stepOp, chainParentIds), {
+          anchorBox: chainAnchor || undefined,
+        });
+        chainParentIds = result.lastParentIds;
+        chainAnchor = result.lastAnchorBox;
+      });
+      return;
     } else {
     const plan = compileExecutionPlan(execOp, map, text);
     const estimatedMs = estimatePlanMs(plan);
@@ -2347,14 +2407,12 @@ export default function App() {
         const lines = out.split(/\n+/).map((l) => l.trim()).filter((l) => l.length > 3);
         if (lines.length >= 2) {
           const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
-          pushHistory();
           spawnMultipleObjects(lines, targetIds, atWorld, viaFromOp(execOp, targetIds));
           return;
         }
         throw new Error(`${execOp.name} produced only one part`);
       }
       const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
-      pushHistory();
       spawnMultipleObjects(parts, targetIds, atWorld, viaFromOp(execOp, targetIds));
       return;
     }
@@ -3677,22 +3735,11 @@ export default function App() {
 
   // ---- export / object helpers ----
   function spawnNewObject(text, sourceIds, atWorld, via = null) {
-    const clean = stripMd(text || "").trim();
-    if (!clean) return null;
-    const idSet = new Set(sourceIds || []);
-    const w = Math.min(560, Math.max(280, Math.round(clean.length * 0.5 + 200)));
-    const anchor = sourceAnchorBox(sourceIds, sourceIds?.length ? null : atWorld);
-    const { x, y, fromDir } = findClearSpawnPosition(anchor, w, clean, itemsRef.current, idSet);
-    const id = uid();
-    const item = normalizeItem({ id, type: "text", x, y, text: clean, w, bornFrom: sourceIds || [], via });
-    const links = (sourceIds || []).map((sid) => makeBoardLink(sid, id, fromDir));
-    setItems((arr) => [...arr, ...links, item]);
-    setSelection([id]);
-    return id;
+    pushHistory();
+    return spawnTransformOutputs([text], sourceIds, atWorld, via).ids[0] || null;
   }
 
   function applyTransformResult(out, sourceIds, atWorld, via = null) {
-    pushHistory();
     spawnNewObject(out, sourceIds, atWorld, via);
   }
 
