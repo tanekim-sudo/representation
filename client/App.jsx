@@ -1443,6 +1443,8 @@ export default function App() {
   const [canRedo, setCanRedo] = useState(false);
   const [railTab, setRailTab] = useState("functions"); // functions | structures
   const [railDropOver, setRailDropOver] = useState(false);
+  const [captureNameOverride, setCaptureNameOverride] = useState(null);
+  const captureSelRef = useRef(null);
   const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
 
   const viewportRef = useRef(null);
@@ -1477,6 +1479,14 @@ export default function App() {
   useEffect(() => {
     if (!["select", "highlight"].includes(tool)) setHighlight(null);
   }, [tool]);
+
+  useEffect(() => {
+    const id = selection.length === 1 ? selection[0] : null;
+    if (id !== captureSelRef.current) {
+      captureSelRef.current = id;
+      setCaptureNameOverride(null);
+    }
+  }, [selection]);
 
   function showToast(msg) {
     setToast(msg);
@@ -2374,6 +2384,41 @@ export default function App() {
     return [...set];
   }
 
+  /** Whether a node's lineage includes operator moves worth distilling into a function. */
+  function getNodeThreadCapture(nodeId, allItems = itemsRef.current) {
+    const journey = buildNodeJourney(nodeId, allItems);
+    if (!journey) return { canCapture: false, reason: "not a thought on the canvas" };
+    const vias = journey.steps
+      .map((s) => allItems.find((it) => it.id === s.focusId)?.via)
+      .filter(Boolean);
+    if (!vias.length) {
+      const roots = journey.steps.filter((s) => {
+        const it = allItems.find((i) => i.id === s.focusId);
+        return it && !it.via;
+      }).length;
+      const reason =
+        roots <= 1
+          ? "root note — drag a function onto it first"
+          : "no transformations on this thread yet";
+      return { canCapture: false, reason, journey, moveCount: 0 };
+    }
+    const moveNames = vias.map((v) => v.name);
+    const shortChain = moveNames.slice(0, 4).join(" → ") + (moveNames.length > 4 ? " → …" : "");
+    const title = journey.title;
+    const defaultName =
+      title && title !== "a thought"
+        ? `${title}: ${shortChain}`.slice(0, 72)
+        : `thread: ${shortChain}`.slice(0, 72);
+    return {
+      canCapture: true,
+      journey,
+      vias,
+      moveNames,
+      moveCount: vias.length,
+      defaultName,
+    };
+  }
+
   /** Reconstruct a node's journey from history alone: ancestors in birth order, ending at the node. */
   function buildNodeJourney(nodeId, allItems = itemsRef.current) {
     const map = new Map(allItems.map((it) => [it.id, it]));
@@ -2444,16 +2489,13 @@ export default function App() {
    * operator: the sequence of moves that produced it becomes a pipeline that
    * replays automatically on any new material.
    */
-  function captureThreadAsOperator(nodeId) {
-    const journey = buildNodeJourney(nodeId);
-    if (!journey) return;
-    const vias = journey.steps
-      .map((s) => itemsRef.current.find((it) => it.id === s.focusId)?.via)
-      .filter(Boolean);
-    if (!vias.length) {
-      showToast("no transformations on this thread yet — apply some operators first");
-      return;
+  function captureThreadAsOperator(nodeId, opts = {}) {
+    const info = getNodeThreadCapture(nodeId);
+    if (!info.canCapture) {
+      showToast(info.reason || "no transformations on this thread yet — apply some operators first");
+      return null;
     }
+    const { journey, vias, moveNames, moveCount } = info;
     const stepNodes = vias.map((via) => {
       const src = (via.opId && opMap[via.opId]) || operators.find((o) => o.name === via.name);
       if (src) return opToJsonTree(src, opMap);
@@ -2463,17 +2505,26 @@ export default function App() {
         prompt: `Apply the cognitive move "${via.name}" to the input material. Perform the transformation fully and return ONLY the transformed text.`,
       };
     });
-    const moveNames = vias.map((v) => v.name);
-    const shortChain = moveNames.slice(0, 4).join(" → ") + (moveNames.length > 4 ? " → …" : "");
+    const name = (opts.name || info.defaultName || `thread: ${moveNames.join(" → ")}`).trim().slice(0, 72);
     const tree = {
-      name: `thread: ${shortChain}`.slice(0, 72),
+      name,
       description: `Replays a captured thread of seeing — ${moveNames.join(", then ")} — on any material, ending where "${journey.title}" ended.`,
       steps: stepNodes,
     };
-    const { ops } = treeToOperators(tree, { top: true });
+    const { ops, rootId } = treeToOperators(tree, { top: true });
     setOperators((prev) => [...prev, ...ops]);
     setRailTab("functions");
-    showToast(`distilled · ${vias.length} move${vias.length === 1 ? "" : "s"} → one operator`);
+    showToast(`saved function · ${moveCount} move${moveCount === 1 ? "" : "s"}`);
+    return rootId;
+  }
+
+  function saveSelectionAsFunction() {
+    const id = selRef.current[0];
+    if (!id) return;
+    const info = getNodeThreadCapture(id);
+    const name = (captureNameOverride ?? info.defaultName ?? "").trim();
+    captureThreadAsOperator(id, name ? { name } : {});
+    setCaptureNameOverride(null);
   }
 
   // leave the walk holding the current thought — tendrils are ready, continuing is branching
@@ -3273,6 +3324,11 @@ export default function App() {
   const selBBox = selection.length ? selectionWorldBBox() : null;
   const selItem = selection.length === 1 ? items.find((it) => it.id === selection[0]) : null;
   const canTransform = selItem && (selItem.type === "text" || selItem.type === "image");
+  const selCaptureInfo =
+    selItem && (selItem.type === "text" || selItem.type === "image")
+      ? getNodeThreadCapture(selItem.id, items)
+      : null;
+  const captureName = (captureNameOverride ?? selCaptureInfo?.defaultName ?? "").slice(0, 72);
   const boardLinks = items.filter((it) => it.type === "link");
   const walkStep = walking?.steps?.[walking.stepIndex] || null;
   const walkFocusRects = walkStep
@@ -3393,6 +3449,36 @@ export default function App() {
                 +
               </button>
             </div>
+            {selection.length === 1 && selItem && (selItem.type === "text" || selItem.type === "image") && (
+              <div className="sel-capture-panel">
+                <div className="sel-capture-head">
+                  <span className="sel-capture-label">from selection</span>
+                  {selCaptureInfo?.canCapture && (
+                    <span className="sel-capture-meta">
+                      {selCaptureInfo.moveCount} move{selCaptureInfo.moveCount === 1 ? "" : "s"}
+                    </span>
+                  )}
+                </div>
+                {selCaptureInfo?.canCapture ? (
+                  <>
+                    <input
+                      className="sel-capture-name"
+                      value={captureName}
+                      onChange={(e) => setCaptureNameOverride(e.target.value.slice(0, 72))}
+                      placeholder="function name"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") saveSelectionAsFunction();
+                      }}
+                    />
+                    <button type="button" className="sel-capture-save" onClick={saveSelectionAsFunction}>
+                      ◈ save creation process
+                    </button>
+                  </>
+                ) : (
+                  <p className="sel-capture-empty">{selCaptureInfo?.reason || "select a thought"}</p>
+                )}
+              </div>
+            )}
             <div className="rail-lens-actions">
               <button
                 className="rail-create ghost"
@@ -3815,6 +3901,13 @@ export default function App() {
         />
       )}
 
+      {selCaptureInfo?.canCapture && !editing && !walking && selItem && (
+        <SelectionCaptureChip
+          bbox={itemScreenBBox(selItem)}
+          onSave={saveSelectionAsFunction}
+        />
+      )}
+
       {/* brand moved to rail — canvas stays clean */}
 
       {/* empty hint */}
@@ -4084,6 +4177,25 @@ function BoardText({ item, selected, dropTarget, editing, editClickRef, onCommit
     >
       {item.text}
     </div>
+  );
+}
+
+function SelectionCaptureChip({ bbox, onSave }) {
+  const cx = (bbox.left + bbox.right) / 2;
+  return (
+    <button
+      type="button"
+      className="sel-capture-chip"
+      style={{ left: cx, top: bbox.top - 34, transform: "translateX(-50%)" }}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation();
+        onSave();
+      }}
+      title="Save this node's creation process as a reusable function"
+    >
+      ◈ save process
+    </button>
   );
 }
 

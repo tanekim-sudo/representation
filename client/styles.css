@@ -200,6 +200,88 @@ body {
   opacity: 0.35;
   cursor: default;
 }
+.sel-capture-panel {
+  margin: 0 10px 10px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, #c9a227 35%, var(--line-2));
+  border-radius: 10px;
+  background: color-mix(in srgb, #c9a227 6%, var(--paper));
+}
+.sel-capture-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.sel-capture-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: lowercase;
+  color: #7a6520;
+}
+.sel-capture-meta {
+  font-size: 11px;
+  color: var(--faint);
+}
+.sel-capture-name {
+  width: 100%;
+  border: 1px solid var(--line-2);
+  background: var(--card);
+  border-radius: 8px;
+  font-size: 12px;
+  font-family: var(--serif);
+  padding: 7px 9px;
+  outline: none;
+  margin-bottom: 8px;
+}
+.sel-capture-name:focus {
+  border-color: color-mix(in srgb, #c9a227 55%, var(--ink));
+}
+.sel-capture-save {
+  display: block;
+  width: 100%;
+  border: 1px solid color-mix(in srgb, #c9a227 45%, var(--line-2));
+  background: color-mix(in srgb, #c9a227 12%, var(--card));
+  color: #5c4a12;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: center;
+}
+.sel-capture-save:hover {
+  background: color-mix(in srgb, #c9a227 20%, var(--card));
+  border-color: #c9a227;
+}
+.sel-capture-empty {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--faint);
+}
+.sel-capture-chip {
+  position: fixed;
+  z-index: 26;
+  border: 1px solid color-mix(in srgb, #c9a227 45%, var(--line-2));
+  background: var(--card);
+  color: #5c4a12;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 5px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 3px 14px rgba(32, 32, 29, 0.12);
+  pointer-events: auto;
+  white-space: nowrap;
+}
+.sel-capture-chip:hover {
+  background: color-mix(in srgb, #c9a227 14%, var(--card));
+  border-color: #c9a227;
+}
 .rail-scroll {
   flex: 1;
   overflow-y: auto;
