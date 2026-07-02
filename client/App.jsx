@@ -28,10 +28,10 @@ const LENSES_KEY = "lens.lenses.v1";
 const ACTIVE_LENS_KEY = "lens.activeLens.v1";
 const COMBINE_THRESHOLD = 14; // px moved before drop-on-item triggers combine
 
-const INK = "#20201d";
+const INK = "#f5f0e8";
 const PEN_W = 2.4; // world units
 const MARKER_W = 16;
-const HIGHLIGHT_INK = "#F2D04E";
+const HIGHLIGHT_INK = "#e8d878";
 const HIGHLIGHT_W = 14;
 
 /** Highlight ink stays the same thickness on screen at any zoom. */
@@ -754,7 +754,7 @@ async function compositeItemsToImage(items) {
   canvas.height = Math.min(h * 2, 2048);
   const scale = canvas.width / w;
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#f4f1e8";
+  ctx.fillStyle = "#2d4a3e";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.scale(scale, scale);
   ctx.translate(-minx, -miny);
@@ -3346,7 +3346,7 @@ export default function App() {
         return `<p><em>${p.content}</em></p>`;
       })
       .join("<hr/>");
-    return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head><body style="max-width:720px;margin:40px auto;padding:0 24px;color:#20201d">${body}</body></html>`;
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head><body style="max-width:720px;margin:40px auto;padding:0 24px;background:#2d4a3e;color:#f5f0e8">${body}</body></html>`;
   }
 
   function openPrintExport(parts, title) {
@@ -3773,7 +3773,7 @@ export default function App() {
                         (draft.loop ? " hl-loop" : "")
                       }
                       points={draft.points.map((p) => `${p.x},${p.y}`).join(" ")}
-                      fill={draft.loop ? "rgba(32, 32, 29, 0.05)" : "none"}
+                      fill={draft.loop ? "rgba(245, 240, 232, 0.05)" : "none"}
                       stroke={draft.loop ? "var(--ink)" : draft.highlight ? HIGHLIGHT_INK : INK}
                       strokeWidth={
                         draft.highlight
@@ -4081,7 +4081,7 @@ function WalkOverlay({ walk, stepIndex, step, rects, onPrev, onNext, onBranch, o
             ))}
           </mask>
         </defs>
-        <rect x="0" y="0" width="100%" height="100%" fill="rgba(28, 26, 22, 0.5)" mask="url(#walk-holes)" />
+        <rect x="0" y="0" width="100%" height="100%" fill="rgba(26, 46, 26, 0.62)" mask="url(#walk-holes)" />
         {rects.map((r, i) => (
           <rect
             key={"o" + i}
@@ -4091,7 +4091,7 @@ function WalkOverlay({ walk, stepIndex, step, rects, onPrev, onNext, onBranch, o
             height={r.bottom - r.top + pad * 2}
             rx="12"
             fill="none"
-            stroke="rgba(242, 208, 78, 0.85)"
+            stroke="rgba(232, 216, 120, 0.85)"
             strokeWidth="2"
             className="walk-hole-ring"
           />
