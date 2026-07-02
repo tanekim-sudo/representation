@@ -1467,6 +1467,23 @@ export default function App() {
   useEffect(() => localStorage.setItem(OPERATORS_KEY, JSON.stringify(operators)), [operators]);
   useEffect(() => localStorage.setItem(STRUCTURES_KEY, JSON.stringify(structures)), [structures]);
   useEffect(() => localStorage.setItem(LENSES_KEY, JSON.stringify(lenses)), [lenses]);
+
+  const shareImportedRef = useRef(false);
+  useEffect(() => {
+    if (shareImportedRef.current) return;
+    const parsed = parseShareFromLocation(window.location);
+    if (!parsed) return;
+    shareImportedRef.current = true;
+    const decoded = decodeShareToken(parsed.token);
+    if (!decoded.ok) {
+      showToast("could not read share link");
+      return;
+    }
+    const clean = clearShareFromLocation(window.location);
+    window.history.replaceState({}, "", clean);
+    setTimeout(() => importShareBundle(decoded.bundle), 120);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => localStorage.setItem(ACTIVE_LENS_KEY, JSON.stringify(activeLensId)), [activeLensId]);
 
   useEffect(() => {
@@ -2614,27 +2631,8 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [!!walking]);
 
-  /** Send a node: its whole lineage travels with it, no preparation needed. */
   function sendNodePath(nodeId) {
-    const journey = buildNodeJourney(nodeId);
-    if (!journey) return;
-    const seen = new Set(journey.steps.map((s) => s.focusId));
-    const lineageItems = itemsRef.current.filter(
-      (it) =>
-        seen.has(it.id) ||
-        (it.type === "link" && seen.has(it.fromId) && seen.has(it.toId))
-    );
-    const blob = JSON.stringify(
-      { kind: "lens-path", version: 2, nodeId, items: lineageItems },
-      null,
-      2
-    );
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([blob], { type: "application/json" }));
-    a.download = `path-${journey.title.replace(/\s+/g, "-").slice(0, 32)}.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    showToast("sent — the whole journey travels with it");
+    shareJourneyLink(nodeId, { fullPath: true });
   }
 
   function importPath(file) {
@@ -2645,32 +2643,7 @@ export default function App() {
         if (data?.kind !== "lens-path" || !Array.isArray(data.items) || !data.items.length) {
           throw new Error("not a path");
         }
-        const idMap = {};
-        for (const it of data.items) idMap[it.id] = uid();
-        // land the lineage centered in the current view, provenance intact
-        const notes = data.items.filter((it) => it.type !== "link" && it.type !== "stroke");
-        const cx = notes.length ? notes.reduce((s, it) => s + (it.x || 0), 0) / notes.length : 0;
-        const cy = notes.length ? notes.reduce((s, it) => s + (it.y || 0), 0) / notes.length : 0;
-        const center = viewportCenterWorld();
-        const dx = center.x - cx;
-        const dy = center.y - cy;
-        const newItems = data.items.map((it) => {
-          const base = { ...it, id: idMap[it.id] };
-          if (it.type === "link") {
-            return normalizeItem({ ...base, fromId: idMap[it.fromId] || it.fromId, toId: idMap[it.toId] || it.toId });
-          }
-          if (it.bornFrom) base.bornFrom = it.bornFrom.map((pid) => idMap[pid] || pid);
-          if (it.type === "stroke") {
-            return normalizeItem({ ...base, points: (it.points || []).map((p) => ({ x: p.x + dx, y: p.y + dy })) });
-          }
-          return normalizeItem({ ...base, x: (it.x || 0) + dx, y: (it.y || 0) + dy });
-        });
-        pushHistoryRef.current();
-        setItems((arr) => [...arr, ...newItems]);
-        const terminal = idMap[data.nodeId];
-        showToast("path received — walking it");
-        // walk right away: inheriting someone's seeing should be zero-hassle
-        setTimeout(() => terminal && walkNode(terminal), 80);
+        importPathItems(data);
       } catch {
         showToast("could not read that path file");
       }
@@ -2883,21 +2856,39 @@ export default function App() {
     setLensCompare(null);
   }
 
-  /** Send a lens: its moves travel as full operator trees so anyone can inherit it. */
+  /** Share a lens: copy a link so anyone can inherit it. */
   function exportLens(id) {
-    const l = lenses.find((x) => x.id === id);
-    if (!l) return;
-    const opTrees = (l.moveIds || [])
-      .map((oid) => opMap[oid])
-      .filter(Boolean)
-      .map((op) => opToJsonTree(op, opMap));
-    const blob = JSON.stringify({ kind: "lens-lens", version: 1, name: l.name, opTrees }, null, 2);
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([blob], { type: "application/json" }));
-    a.download = `lens-${l.name.replace(/\s+/g, "-").slice(0, 32)}.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    showToast("lens sent — someone can now inherit your way of seeing");
+    shareLensLink(id);
+  }
+
+  function importLensData(data) {
+    const name = data.name || data.lens?.name || "inherited lens";
+    const opTrees = data.opTrees || data.lens?.opTrees;
+    if (!Array.isArray(opTrees) || !opTrees.length) throw new Error("not a lens");
+    const moveIds = [];
+    const newOps = [];
+    for (const tree of opTrees) {
+      const existing = operators.find((o) => o.name === tree.name && !o.top);
+      if (existing && !tree.steps) {
+        moveIds.push(existing.id);
+        continue;
+      }
+      const { ops, rootId } = treeToOperators(tree, { top: !!tree.steps });
+      newOps.push(...ops);
+      moveIds.push(rootId);
+    }
+    if (newOps.length) setOperators((prev) => [...prev, ...newOps]);
+    const lens = {
+      id: uid(),
+      name,
+      moveIds,
+      inherited: true,
+      createdAt: Date.now(),
+    };
+    setLenses((ls) => [lens, ...ls]);
+    setActiveLensId(lens.id);
+    setRailTab("functions");
+    showToast(`inherited · ${lens.name} — now looking through it`);
   }
 
   function importLens(file) {
@@ -2905,39 +2896,222 @@ export default function App() {
     reader.onload = () => {
       try {
         const data = JSON.parse(reader.result);
-        if (data?.kind !== "lens-lens" || !Array.isArray(data.opTrees) || !data.opTrees.length) {
-          throw new Error("not a lens");
-        }
-        const moveIds = [];
-        const newOps = [];
-        for (const tree of data.opTrees) {
-          // reuse an identical existing op (canonical primitives keep their id)
-          const existing = operators.find((o) => o.name === tree.name && !o.top);
-          if (existing && !tree.steps) {
-            moveIds.push(existing.id);
-            continue;
-          }
-          const { ops, rootId } = treeToOperators(tree, { top: !!tree.steps });
-          newOps.push(...ops);
-          moveIds.push(rootId);
-        }
-        if (newOps.length) setOperators((prev) => [...prev, ...newOps]);
-        const lens = {
-          id: uid(),
-          name: data.name || "inherited lens",
-          moveIds,
-          inherited: true,
-          createdAt: Date.now(),
-        };
-        setLenses((ls) => [lens, ...ls]);
-        setActiveLensId(lens.id);
-        setRailTab("functions");
-        showToast(`inherited · ${lens.name} — now looking through it`);
+        if (data?.kind !== "lens-lens" && data?.kind !== "lens") throw new Error("not a lens");
+        importLensData(data);
       } catch {
         showToast("could not read that lens file");
       }
     };
     reader.readAsText(file);
+  }
+
+  function importOperatorTree(tree, opts = {}) {
+    if (!tree) throw new Error("missing operator");
+    const existing = operators.find((o) => o.name === tree.name && !o.top && !tree.steps);
+    if (existing && !opts.forceNew) {
+      setRailTab("functions");
+      showToast(`already have · ${existing.name}`);
+      return existing.id;
+    }
+    const { ops, rootId } = treeToOperators(tree, { top: true, ...opts });
+    setOperators((prev) => [...prev, ...ops]);
+    setRailTab("functions");
+    showToast(opts.toast || `added · ${tree.name}`);
+    return rootId;
+  }
+
+  function importPathItems(data) {
+    const items = data.items || data.path?.items;
+    const nodeId = data.nodeId || data.path?.nodeId;
+    if (!Array.isArray(items) || !items.length) throw new Error("not a path");
+    const idMap = {};
+    for (const it of items) idMap[it.id] = uid();
+    const notes = items.filter((it) => it.type !== "link" && it.type !== "stroke");
+    const cx = notes.length ? notes.reduce((s, it) => s + (it.x || 0), 0) / notes.length : 0;
+    const cy = notes.length ? notes.reduce((s, it) => s + (it.y || 0), 0) / notes.length : 0;
+    const center = viewportCenterWorld();
+    const dx = center.x - cx;
+    const dy = center.y - cy;
+    const newItems = items.map((it) => {
+      const base = { ...it, id: idMap[it.id] };
+      if (it.type === "link") {
+        return normalizeItem({ ...base, fromId: idMap[it.fromId] || it.fromId, toId: idMap[it.toId] || it.toId });
+      }
+      if (it.bornFrom) base.bornFrom = it.bornFrom.map((pid) => idMap[pid] || pid);
+      if (it.type === "stroke") {
+        return normalizeItem({ ...base, points: (it.points || []).map((p) => ({ x: p.x + dx, y: p.y + dy })) });
+      }
+      return normalizeItem({ ...base, x: (it.x || 0) + dx, y: (it.y || 0) + dy });
+    });
+    pushHistoryRef.current();
+    setItems((arr) => [...arr, ...newItems]);
+    const terminal = idMap[nodeId];
+    showToast("path received — walking it");
+    setTimeout(() => terminal && walkNode(terminal), 80);
+  }
+
+  function importJourneyBundle(journey) {
+    if (!journey?.steps?.length) throw new Error("empty journey");
+    const newOps = [];
+    for (const tree of journey.opTrees || []) {
+      try {
+        const { ops } = treeToOperators(tree, { top: true, captured: true });
+        newOps.push(...ops);
+      } catch {
+        /* skip bad trees */
+      }
+    }
+    if (newOps.length) setOperators((prev) => [...prev, ...newOps]);
+    const steps = journey.steps.map((s, i) => ({
+      id: uid(),
+      itemIds: [],
+      focusId: null,
+      caption: s.caption || s.via?.name ? `through “${s.via.name}”` : `step ${i + 1}`,
+      arrived: !!s.arrived || i === journey.steps.length - 1,
+      preview: s.focusPreview || null,
+    }));
+    finishEditing();
+    setSelection([]);
+    setWalking({ nodeId: null, title: journey.title || "shared journey", steps, stepIndex: 0, imported: true });
+    setRailTab("functions");
+    showToast("journey imported — walking it");
+  }
+
+  function importShareBundle(bundle) {
+    try {
+      switch (bundle.kind) {
+        case "operator":
+          importOperatorTree(bundle.operators[0]);
+          break;
+        case "lens":
+          importLensData({ name: bundle.lens.name, opTrees: bundle.lens.opTrees });
+          break;
+        case "symbol": {
+          const raw = bundle.symbols[0];
+          const struct = {
+            id: uid(),
+            title: raw.title || bundle.meta?.name || "shared structure",
+            kind: raw.kind || "idea",
+            structNum: raw.structNum || null,
+            items: raw.items,
+            savedAt: Date.now(),
+            shared: true,
+          };
+          setStructures((arr) => [struct, ...arr]);
+          setRailTab("structures");
+          showToast(`structure received · ${struct.title}`);
+          break;
+        }
+        case "journey":
+          importJourneyBundle(bundle.journey);
+          break;
+        case "path":
+          importPathItems(bundle.path);
+          break;
+        default:
+          showToast("unknown share type");
+      }
+    } catch {
+      showToast("could not import share link");
+    }
+  }
+
+  async function copyShareLink(bundle) {
+    let url = buildShareUrl(bundle, window.location.origin, window.location.pathname).url;
+    try {
+      if (url.includes("#share=")) {
+        const res = await fetch("/api/share", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ bundle }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.url) url = data.url;
+        }
+      }
+    } catch {
+      /* offline — hash URL still works */
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = url;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: bundle.meta?.name || "lens", url });
+        showToast("shared");
+        return;
+      } catch {
+        /* cancelled */
+      }
+    }
+    showToast("Link copied");
+  }
+
+  function shareOperator(opId) {
+    const op = opMap[opId];
+    if (!op) return;
+    const tree = opToJsonTree(op, opMap);
+    copyShareLink(createOperatorBundle(tree, { name: op.name }));
+  }
+
+  function shareLensLink(id) {
+    const l = lenses.find((x) => x.id === id);
+    if (!l) return;
+    const opTrees = (l.moveIds || [])
+      .map((oid) => opMap[oid])
+      .filter(Boolean)
+      .map((op) => opToJsonTree(op, opMap));
+    copyShareLink(createLensShareBundle(l.name, opTrees, { name: l.name }));
+  }
+
+  function shareSymbolStruct(struct) {
+    if (!struct) return;
+    copyShareLink(createSymbolBundle(struct, { name: struct.title }));
+  }
+
+  function shareJourneyLink(nodeId, { fullPath = false } = {}) {
+    const journey = buildNodeJourney(nodeId);
+    if (!journey) return;
+    if (fullPath) {
+      const seen = new Set(journey.steps.map((s) => s.focusId));
+      const lineageItems = itemsRef.current.filter(
+        (it) =>
+          seen.has(it.id) ||
+          (it.type === "link" && seen.has(it.fromId) && seen.has(it.toId))
+      );
+      copyShareLink(
+        createPathBundle(nodeId, lineageItems, { name: journey.title })
+      );
+      return;
+    }
+    const info = getNodeThreadCapture(nodeId);
+    const steps = journey.steps.map((s) => {
+      const it = itemsRef.current.find((i) => i.id === s.focusId);
+      return {
+        caption: s.caption,
+        via: it?.via || null,
+        focusPreview: (it?.text || "").trim().split("\n")[0].slice(0, 80) || null,
+        arrived: s.arrived,
+      };
+    });
+    const opTrees = (info.vias || []).map((via) => abstractStepFromVia(via, opMap, operators));
+    copyShareLink(
+      createJourneyBundle({
+        title: journey.title,
+        steps,
+        opTrees,
+        captureMeta: info.captureMeta,
+        meta: { name: journey.title },
+      })
+    );
   }
 
   function plantStarterThought() {
@@ -3526,6 +3700,22 @@ export default function App() {
                     <button type="button" className="sel-capture-save" onClick={saveSelectionAsFunction}>
                       ◈ save creation process
                     </button>
+                    <button
+                      type="button"
+                      className="sel-capture-share"
+                      onClick={() => shareJourneyLink(selRef.current[0])}
+                      title="copy link to this transformation journey"
+                    >
+                      ↗ share journey
+                    </button>
+                    <button
+                      type="button"
+                      className="sel-capture-share ghost"
+                      onClick={() => shareJourneyLink(selRef.current[0], { fullPath: true })}
+                      title="share full canvas path with all notes"
+                    >
+                      ↗ full path
+                    </button>
                   </>
                 ) : (
                   <p className="sel-capture-empty">{selCaptureInfo?.reason || "select a thought"}</p>
@@ -3593,6 +3783,7 @@ export default function App() {
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
                       onCompose={composeOperators}
+                      onShare={() => shareOperator(op.id)}
                       flat
                     />
                   ))}
@@ -3610,6 +3801,7 @@ export default function App() {
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
                       onCompose={composeOperators}
+                      onShare={() => shareOperator(op.id)}
                     />
                   ))}
                 </>
@@ -3626,6 +3818,7 @@ export default function App() {
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
                       onCompose={composeOperators}
+                      onShare={() => shareOperator(op.id)}
                       flat
                     />
                   ))}
@@ -3643,6 +3836,7 @@ export default function App() {
                       onToggle={(id) => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
                       onEdit={openEditFunction}
                       onCompose={composeOperators}
+                      onShare={() => shareOperator(op.id)}
                       flat
                     />
                   ))}
@@ -3671,6 +3865,7 @@ export default function App() {
                     key={struct.id}
                     struct={struct}
                     onDelete={() => deleteStructure(struct.id)}
+                    onShare={() => shareSymbolStruct(struct)}
                   />
                 ))
               )}
@@ -3958,6 +4153,7 @@ export default function App() {
         <SelectionCaptureChip
           bbox={itemScreenBBox(selItem)}
           onSave={saveSelectionAsFunction}
+          onShareJourney={() => shareJourneyLink(selItem.id)}
         />
       )}
 
@@ -3998,11 +4194,20 @@ export default function App() {
             walking.stepIndex >= walking.steps.length - 1 ? endWalk() : walkTo(walking.stepIndex + 1)
           }
           onBranch={continueFromWalk}
-          onDistill={() => {
-            const nodeId = walking.nodeId;
-            endWalk();
-            captureThreadAsOperator(nodeId);
-          }}
+          onDistill={
+            walking.nodeId
+              ? () => {
+                  const nodeId = walking.nodeId;
+                  endWalk();
+                  captureThreadAsOperator(nodeId);
+                }
+              : null
+          }
+          onShare={
+            walking.nodeId
+              ? () => shareJourneyLink(walking.nodeId)
+              : null
+          }
           onLeave={endWalk}
         />
       )}
@@ -4069,7 +4274,7 @@ export default function App() {
   );
 }
 
-function WalkOverlay({ walk, stepIndex, step, rects, onPrev, onNext, onBranch, onDistill, onLeave }) {
+function WalkOverlay({ walk, stepIndex, step, rects, onPrev, onNext, onBranch, onDistill, onShare, onLeave }) {
   const last = stepIndex >= walk.steps.length - 1;
   const pad = 16;
   const missing = rects.length === 0;
@@ -4115,7 +4320,13 @@ function WalkOverlay({ walk, stepIndex, step, rects, onPrev, onNext, onBranch, o
         </div>
         <div className="walk-caption">
           {step.arrived ? "the thought as it stands now" : step.caption}
-          {missing && <span className="walk-missing"> (what was here has changed — that, too, is part of the path)</span>}
+          {step.preview && missing && <span className="walk-preview"> · “{step.preview}”</span>}
+          {missing && !step.preview && walk.imported && (
+            <span className="walk-missing"> (shared journey — moves imported to your functions rail)</span>
+          )}
+          {missing && !step.preview && !walk.imported && (
+            <span className="walk-missing"> (what was here has changed — that, too, is part of the path)</span>
+          )}
         </div>
         <div className="walk-progress">
           {walk.steps.map((s, i) => (
@@ -4143,6 +4354,11 @@ function WalkOverlay({ walk, stepIndex, step, rects, onPrev, onNext, onBranch, o
               title="save this whole thread of transformations as one reusable operator"
             >
               ◈ distill
+            </button>
+          )}
+          {onShare && (
+            <button className="walk-btn branch" onClick={onShare} title="copy link to this journey">
+              ↗ share
             </button>
           )}
           <button className="walk-btn" onClick={onLeave} title="leave the walk (esc)">
@@ -4233,22 +4449,39 @@ function BoardText({ item, selected, dropTarget, editing, editClickRef, onCommit
   );
 }
 
-function SelectionCaptureChip({ bbox, onSave }) {
+function SelectionCaptureChip({ bbox, onSave, onShareJourney }) {
   const cx = (bbox.left + bbox.right) / 2;
   return (
-    <button
-      type="button"
-      className="sel-capture-chip"
+    <div
+      className="sel-capture-chip-row"
       style={{ left: cx, top: bbox.top - 34, transform: "translateX(-50%)" }}
       onPointerDown={(e) => e.stopPropagation()}
-      onClick={(e) => {
-        e.stopPropagation();
-        onSave();
-      }}
-      title="Save this node's creation process as a reusable function"
     >
-      ◈ save process
-    </button>
+      <button
+        type="button"
+        className="sel-capture-chip"
+        onClick={(e) => {
+          e.stopPropagation();
+          onSave();
+        }}
+        title="Save this node's creation process as a reusable function"
+      >
+        ◈ save process
+      </button>
+      {onShareJourney && (
+        <button
+          type="button"
+          className="sel-capture-chip share"
+          onClick={(e) => {
+            e.stopPropagation();
+            onShareJourney();
+          }}
+          title="Copy link to this transformation journey"
+        >
+          ↗ share
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -4485,7 +4718,7 @@ function JobPanel({ jobs, onDismiss }) {
   );
 }
 
-function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onCompose, flat }) {
+function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onCompose, onShare, flat }) {
   const [composeOver, setComposeOver] = useState(false);
   if (!op) return null;
   const steps = op.kind === "pipeline" && op.steps ? op.steps.map((id) => opMap[id]).filter(Boolean) : [];
@@ -4535,6 +4768,11 @@ function DraggableOpCard({ op, opMap, expanded, onToggle, onEdit, onCompose, fla
           <button className="op-card-edit" onClick={() => onEdit(op)} title="edit">
             ⚙
           </button>
+          {onShare && (
+            <button className="op-card-share" onClick={() => onShare(op)} title="copy share link">
+              ↗
+            </button>
+          )}
         </div>
       </div>
       {open && steps.length > 0 && (
@@ -4635,7 +4873,7 @@ function LensCard({ lens, active, opMap, lenses, comparing, onUse, onEvolve, onS
         <button className={"lens-btn" + (comparing ? " on" : "")} onClick={onCompare} title="compare with another lens">
           ≍
         </button>
-        <button className="lens-btn" onClick={onSend} title="send — someone else can inherit it">
+        <button className="lens-btn" onClick={onSend} title="copy share link — someone else can inherit it">
           ↗
         </button>
         <button className="lens-btn danger" onClick={onDelete} title="delete lens">
@@ -4751,7 +4989,7 @@ function LensComparePanel({ a, b, opMap, onClose }) {
   );
 }
 
-function StructureCard({ struct, onDelete }) {
+function StructureCard({ struct, onDelete, onShare }) {
   const preview = structurePreview(struct);
   const label = struct.structNum ? `#${struct.structNum}` : struct.kind || "idea";
   return (
@@ -4771,6 +5009,18 @@ function StructureCard({ struct, onDelete }) {
             <span className="struct-title">{struct.title || preview}</span>
             <span className="struct-preview">{preview}</span>
           </div>
+          {onShare && (
+            <button
+              className="struct-card-share"
+              onClick={(e) => {
+                e.stopPropagation();
+                onShare(struct);
+              }}
+              title="copy share link"
+            >
+              ↗
+            </button>
+          )}
           <button className="struct-card-del" onClick={onDelete} title="delete">
             ×
           </button>

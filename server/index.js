@@ -8,6 +8,13 @@ import { runPrompt, hasKey, MODEL } from "./claude.js";
 import { runPipeline } from "./pipeline.js";
 import { compileExecutionPlan } from "./plan.js";
 import { runPhase } from "./executor.js";
+import {
+  encodeShareBundle,
+  decodeShareToken,
+  validateShareBundle,
+  buildShareUrl,
+  SHARE_BUNDLE_VERSION,
+} from "../shared/share-bundle.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 8787;
@@ -82,6 +89,29 @@ app.post("/api/pipeline", async (req, res) => {
       error: err?.error?.error?.message || err?.message || "Pipeline failed.",
     });
   }
+});
+
+app.post("/api/share", (req, res) => {
+  try {
+    const body = req.body ?? {};
+    let bundle = body.bundle;
+    if (!bundle && body.kind) bundle = body;
+    const validated = validateShareBundle(bundle);
+    if (!validated.ok) return res.status(400).json({ error: validated.error });
+    const token = encodeShareBundle(validated.bundle);
+    const origin = `${req.protocol}://${req.get("host")}`;
+    const { url, placement } = buildShareUrl(validated.bundle, origin, "/");
+    res.json({ id: token, token, url, placement, v: SHARE_BUNDLE_VERSION });
+  } catch (err) {
+    console.error("[lens] /api/share POST failed:", err?.message || err);
+    res.status(500).json({ error: err?.message || "Failed to create share link." });
+  }
+});
+
+app.get("/api/share/:id", (req, res) => {
+  const decoded = decodeShareToken(String(req.params.id || ""));
+  if (!decoded.ok) return res.status(404).json({ error: decoded.error });
+  res.json({ bundle: decoded.bundle });
 });
 
 // Serve the built client in production, if it exists.

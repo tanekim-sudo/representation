@@ -273,6 +273,27 @@ body {
   background: color-mix(in srgb, var(--chalk-yellow-deep) 20%, var(--card));
   border-color: var(--chalk-yellow-deep);
 }
+.sel-capture-share {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  border: 1px dashed var(--line-2);
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 12px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: center;
+}
+.sel-capture-share:hover {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+.sel-capture-share.ghost {
+  font-size: 11px;
+  opacity: 0.85;
+}
 .sel-capture-empty {
   margin: 0;
   font-size: 12px;
@@ -280,7 +301,7 @@ body {
   color: var(--faint);
 }
 .sel-capture-chip {
-  position: fixed;
+  position: relative;
   z-index: 30;
   border: 1px solid color-mix(in srgb, var(--chalk-yellow-deep) 45%, var(--line-2));
   background: var(--card);
@@ -294,6 +315,17 @@ body {
   box-shadow: 0 3px 14px rgba(0, 0, 0, 0.12);
   pointer-events: auto;
   white-space: nowrap;
+}
+.sel-capture-chip-row {
+  position: fixed;
+  z-index: 30;
+  display: flex;
+  gap: 6px;
+  pointer-events: auto;
+}
+.sel-capture-chip.share {
+  color: var(--ink-2);
+  border-style: dashed;
 }
 .sel-capture-chip:hover {
   background: color-mix(in srgb, var(--chalk-yellow-deep) 14%, var(--card));
@@ -495,6 +527,7 @@ body {
 }
 .op-card-toggle,
 .op-card-edit,
+.op-card-share,
 .op-card-expand {
   border: none;
   background: transparent;
@@ -504,6 +537,10 @@ body {
   font-size: 12px;
   border-left: 1px solid var(--line);
   flex: none;
+}
+.op-card-share:hover,
+.op-card-edit:hover {
+  color: var(--ink);
 }
 .op-card-expand:hover {
   color: var(--ink);
@@ -611,6 +648,18 @@ body {
   padding: 0 10px;
   font-size: 16px;
   border-left: 1px solid var(--line);
+}
+.struct-card-share {
+  border: none;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  padding: 0 10px;
+  font-size: 13px;
+  border-left: 1px solid var(--line);
+}
+.struct-card-share:hover {
+  color: var(--ink);
 }
 .struct-card-del:hover {
   color: var(--chalk-danger);
@@ -1104,6 +1153,11 @@ body {
 .walk-missing {
   font-size: 13px;
   color: var(--faint);
+  font-style: italic;
+}
+.walk-preview {
+  font-size: 13px;
+  color: var(--ink-2);
   font-style: italic;
 }
 .walk-progress {
