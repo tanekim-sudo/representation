@@ -53,6 +53,12 @@ as serverless functions in `api/` (`/api/run`, `/api/health`).
    (Optionally also set `CLAUDE_MODEL`.)
 3. Deploy. Vercel uses `vercel.json`: build command `npm run build`, output `dist`.
 
+**Production URL:** [https://representation-eta.vercel.app](https://representation-eta.vercel.app)
+
+> **Note:** `representation.vercel.app` is a different, unrelated Vercel project
+> (an old Create React App). This repo deploys to the `representation` project
+> under `tane-kims-projects`, aliased to `representation-eta.vercel.app`.
+
 > Never put your API key in the code or commit it. Set it only in Vercel's
 > Environment Variables (or your local `.env`, which is gitignored).
 
