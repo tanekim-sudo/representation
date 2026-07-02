@@ -52,7 +52,14 @@ describe("transform primitives", () => {
     assert.equal(plan.phases[0].id, "resolve");
     assert.equal(plan.phases[1].id, "research");
     assert.equal(plan.phases[2].id, "synthesize");
-    assert.match(plan.phases[2].prompt, /EXPAND/i);
+    assert.match(plan.phases[2].prompt, /What else/i);
+  });
+
+  it("keeps primitive prompts short perceptual nudges", () => {
+    for (const p of TRANSFORM_PRIMITIVES) {
+      const words = p.prompt.trim().split(/\s+/).length;
+      assert.ok(words <= 6, `${p.name} prompt too long: ${p.prompt}`);
+    }
   });
 
   it("routes compress on rich text as direct transform only", () => {
@@ -79,7 +86,7 @@ describe("transform primitives", () => {
       name: "see as monastery",
       kind: "prompt",
       move: true,
-      prompt: "SEE AS MONASTERY — apply this perceptual move. Return ONLY the transformed text.",
+      prompt: "See as monastery.",
       resolveWhen: "never",
       researchWhen: "never",
     };

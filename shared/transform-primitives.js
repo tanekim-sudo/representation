@@ -6,13 +6,7 @@ import { scaleEta } from "./eta.js";
 const PRIMITIVE_RESOLVE_ETA_MS = 18000;
 const PRIMITIVE_RESEARCH_ETA_MS = 42000;
 
-export const PRIMITIVE_SYSTEM = `You are a transform engine on a thinking whiteboard. One step. Readable in ~10–20 seconds.
-
-Rules:
-- Return ONLY the transformed text — no preamble, labels, section headers, or process narration.
-- Stay locked to the input subject.
-- When VERIFIED WEB RESEARCH is provided, ground specifics in those facts.
-- Be concise unless the transform naturally needs a little more room (expand, differentiate).`;
+export const PRIMITIVE_SYSTEM = `One perceptual step on a thinking canvas. Return ONLY the transformed text. Stay on the input subject.`;
 
 export const TRANSFORM_PRIMITIVES = [
   {
@@ -25,8 +19,7 @@ export const TRANSFORM_PRIMITIVES = [
     resolveWhen: "never",
     researchWhen: "never",
     description: "Smallest invariant core",
-    prompt:
-      "COMPRESS to the smallest invariant core — the irreducible essence. One tight paragraph max. Return ONLY the core.",
+    prompt: "Shorter.",
     maxTokens: 600,
     estimatedMs: 12000,
   },
@@ -40,8 +33,7 @@ export const TRANSFORM_PRIMITIVES = [
     resolveWhen: "sparse",
     researchWhen: "sparse",
     description: "Unfold implications and detail",
-    prompt:
-      "EXPAND — unfold implications, specifics, and context. Use research facts when available. 2–3 short paragraphs max. Return ONLY the expansion.",
+    prompt: "What else?",
     maxTokens: 1400,
     estimatedMs: 18000,
   },
@@ -55,8 +47,7 @@ export const TRANSFORM_PRIMITIVES = [
     resolveWhen: "sparse",
     researchWhen: "sparse",
     description: "Lift instance into a class",
-    prompt:
-      "GENERALIZE — lift this instance into its broader class or pattern. Use research to understand the instance when needed. One paragraph. Return ONLY the generalization.",
+    prompt: "Broader pattern.",
     maxTokens: 800,
     estimatedMs: 15000,
   },
@@ -69,8 +60,7 @@ export const TRANSFORM_PRIMITIVES = [
     resolveWhen: "never",
     researchWhen: "never",
     description: "Narrow to a sub-category",
-    prompt:
-      "SPECIALIZE — narrow to a specific sub-category (still abstract, not yet concrete). One paragraph. Return ONLY the specialized form.",
+    prompt: "Narrower slice.",
     maxTokens: 700,
     estimatedMs: 12000,
   },
@@ -84,8 +74,7 @@ export const TRANSFORM_PRIMITIVES = [
     resolveWhen: "sparse",
     researchWhen: "sparse",
     description: "Concrete lived instance",
-    prompt:
-      "GROUND — drop into a concrete, lived instance someone can see and feel. Use research facts for real entities. One vivid paragraph. Return ONLY the grounded instance.",
+    prompt: "One concrete example.",
     maxTokens: 1000,
     estimatedMs: 16000,
   },
@@ -100,8 +89,7 @@ export const TRANSFORM_PRIMITIVES = [
     researchWhen: "never",
     multi: true,
     description: "Split into distinguished parts",
-    prompt:
-      "DIFFERENTIATE — split into 2–5 clearly distinguished parts. Separate each part with a blank line. No numbering or labels. Return ONLY the parts.",
+    prompt: "Split into parts.",
     maxTokens: 1200,
     estimatedMs: 16000,
   },
@@ -116,8 +104,7 @@ export const TRANSFORM_PRIMITIVES = [
     resolveWhen: "never",
     researchWhen: "never",
     description: "Fuse into one",
-    prompt:
-      "MERGE — fuse all material into one unified object. Preserve the essence of each part. Return ONLY the merged result.",
+    prompt: "Fuse into one.",
     maxTokens: 1000,
     estimatedMs: 14000,
   },
@@ -131,8 +118,7 @@ export const TRANSFORM_PRIMITIVES = [
     resolveWhen: "never",
     researchWhen: "never",
     description: "Turn intensity or scale up",
-    prompt:
-      "AMPLIFY — turn up intensity, stakes, or scale. Same idea, bigger. One paragraph. Return ONLY the amplified version.",
+    prompt: "Turn it up.",
     maxTokens: 700,
     estimatedMs: 12000,
   },
@@ -146,8 +132,7 @@ export const TRANSFORM_PRIMITIVES = [
     resolveWhen: "never",
     researchWhen: "never",
     description: "Turn intensity or scale down",
-    prompt:
-      "REDUCE — turn down intensity, stakes, or scale. Same idea, quieter or smaller. One paragraph. Return ONLY the reduced version.",
+    prompt: "Turn it down.",
     maxTokens: 700,
     estimatedMs: 12000,
   },
@@ -159,8 +144,7 @@ export const TRANSFORM_PRIMITIVES = [
     resolveWhen: "never",
     researchWhen: "never",
     description: "Flip polarity or assumption",
-    prompt:
-      "INVERT — flip the load-bearing polarity, direction, or assumption. If relational, reciprocate (one-way → mutual). One paragraph. Return ONLY the inversion.",
+    prompt: "Opposite view.",
     maxTokens: 700,
     estimatedMs: 12000,
   },
@@ -172,8 +156,7 @@ export const TRANSFORM_PRIMITIVES = [
     resolveWhen: "never",
     researchWhen: "never",
     description: "Move the vantage point",
-    prompt:
-      "REFRAME — hold the content fixed, change the vantage point it's seen from. One paragraph. Return ONLY the reframing.",
+    prompt: "Different angle.",
     maxTokens: 800,
     estimatedMs: 12000,
   },
@@ -185,8 +168,7 @@ export const TRANSFORM_PRIMITIVES = [
     resolveWhen: "sparse",
     researchWhen: "sparse",
     description: "Recast into another domain",
-    prompt:
-      "TRANSLATE — recast into ONE other domain's vocabulary (pick the domain where the pattern genuinely lives). One paragraph. Return ONLY the translation.",
+    prompt: "Another domain.",
     maxTokens: 900,
     estimatedMs: 16000,
   },
@@ -198,8 +180,7 @@ export const TRANSFORM_PRIMITIVES = [
     resolveWhen: "never",
     researchWhen: "never",
     description: "Resonance without fusion",
-    prompt:
-      "HARMONIZE — bring distinct elements into resonance without fusing them. One paragraph. Return ONLY the harmonized view.",
+    prompt: "Find resonance.",
     maxTokens: 800,
     estimatedMs: 13000,
   },
@@ -211,8 +192,7 @@ export const TRANSFORM_PRIMITIVES = [
     resolveWhen: "never",
     researchWhen: "never",
     description: "Drop one element",
-    prompt:
-      "RELEASE — drop one load-bearing element or constraint; keep the rest intact. One paragraph. Return ONLY what's left.",
+    prompt: "Drop one piece.",
     maxTokens: 800,
     estimatedMs: 13000,
   },
@@ -224,8 +204,7 @@ export const TRANSFORM_PRIMITIVES = [
     resolveWhen: "never",
     researchWhen: "never",
     description: "Ascend past a tension",
-    prompt:
-      "TRANSCEND — resolve the central tension by ascending to a frame where the opposition dissolves. One paragraph. Return ONLY the transcendent view.",
+    prompt: "Past the tension.",
     maxTokens: 900,
     estimatedMs: 14000,
   },
@@ -299,6 +278,7 @@ export function migrateOperatorStore(saved) {
       (o.move && !o.primitive) ||
       (o.top && !o.move) ||
       o.role ||
+      o.captured ||
       (!o.primitive && !o.move && !LEGACY_DEFAULT_NAMES.has(o.name) && !PRIMITIVE_NAMES.has(o.name))
   );
 

@@ -6,6 +6,13 @@ import {
   isTransformPrimitive,
   estimatePrimitiveMs,
 } from "../shared/transform-primitives.js";
+import {
+  viaFromOp,
+  abstractStepFromVia,
+  buildCaptureMetadata,
+  hydrateOperatorMap,
+  opToAbstractTree,
+} from "../shared/operator-capture.js";
 import { scaleEta, ETA } from "../shared/eta.js";
 import { phaseClientAbortMs, PHASE_TIMEOUT } from "../shared/phase-timeouts.js";
 import { compileExecutionPlan } from "../server/plan.js";
@@ -493,17 +500,36 @@ CONSTRAINTS: Return ONLY the step output. No preamble. No meta-commentary. Never
 }
 
 // flatten a decomposition tree into flat operators; returns the root id
-function materializeTree(node, role, top, out) {
+function materializeTree(node, role, top, out, opts = {}) {
+  const { captured = false, captureMeta = null } = opts;
   const id = uid();
   const name = (node.name || "function").trim();
   const description = (node.description || "").trim();
   if (Array.isArray(node.steps) && node.steps.length) {
-    const steps = node.steps.map((s) => materializeTree(s, role, false, out));
-    out.push({ id, name, description, kind: "pipeline", steps, role, top });
+    const steps = node.steps.map((s) => materializeTree(s, role, false, out, opts));
+    const pipeline = { id, name, description, kind: "pipeline", steps, role, top };
+    if (captured) pipeline.captured = true;
+    if (captureMeta && top) pipeline.captureMeta = captureMeta;
+    out.push(pipeline);
+  } else if (node.moveRef && !(node.prompt || "").trim()) {
+    out.push({
+      id,
+      name,
+      description,
+      kind: "prompt",
+      moveRef: node.moveRef,
+      role,
+      top,
+      captured,
+      research: !!node.research,
+    });
   } else {
     const prompt = (node.prompt || "").trim() || buildDefaultLeafPrompt(name, description);
     const research = !!node.research;
-    out.push({ id, name, description, kind: "prompt", prompt, role, top, research });
+    const leaf = { id, name, description, kind: "prompt", prompt, role, top, research };
+    if (node.moveRef) leaf.moveRef = node.moveRef;
+    if (captured) leaf.captured = true;
+    out.push(leaf);
   }
   return id;
 }
@@ -577,6 +603,56 @@ function collectSubtreeIds(rootId, opMap) {
   }
   walk(rootId);
   return ids;
+}
+
+/** Flat pipeline of perceptual moves — run one LLM step per move, not one bundled synth. */
+function isFlatMoveSequence(op, opMap) {
+  if (!op || op.kind !== "pipeline" || !op.steps?.length) return false;
+  for (const sid of op.steps) {
+    const s = opMap[sid];
+    if (!s || s.kind === "pipeline" || s.research) return false;
+  }
+  return op.captured || op.steps.every((sid) => {
+    const s = opMap[sid];
+    return s.moveRef || s.primitive || s.move;
+  });
+}
+
+async function runMoveSequenceStep(stepOp, map, material, image, onProgress, operators) {
+  const plan = compileExecutionPlan(stepOp, map, material);
+  if (plan.phases.length === 1 && plan.phases[0].id === "synthesize") {
+    const phase = plan.phases[0];
+    onProgress?.(phase.label);
+    return runClaude(phase.prompt, material.trim(), {
+      system: phase.system,
+      maxTokens: phase.maxTokens,
+      timeoutMs: phase.timeoutMs,
+      image,
+    });
+  }
+  return runExecutionOnServer({
+    op: stepOp,
+    opMap: map,
+    operators,
+    material,
+    image,
+    onProgress,
+    plan,
+  });
+}
+
+async function runMoveSequence(op, map, material, image, onProgress, operators) {
+  let current = material;
+  for (let i = 0; i < op.steps.length; i++) {
+    const sid = op.steps[i];
+    const stepOp = map[sid];
+    if (!stepOp) continue;
+    onProgress?.(`${stepOp.name} (${i + 1}/${op.steps.length})`);
+    const out = await runMoveSequenceStep(stepOp, map, current, i === 0 ? image : null, onProgress, operators);
+    if (!out?.trim()) throw new Error(`empty output at ${stepOp.name}`);
+    current = out.trim();
+  }
+  return current;
 }
 
 // create a full function from the user's plain-English description
@@ -658,9 +734,9 @@ Escape quotes and newlines inside strings. No markdown fences.`;
 
 // turn a Claude JSON node into flat operators; returns root id
 function treeToOperators(node, opts = {}) {
-  const { role = null, top = false } = opts;
+  const { role = null, top = false, captured = false, captureMeta = null } = opts;
   const out = [];
-  const rootId = materializeTree(node, role, top, out);
+  const rootId = materializeTree(node, role, top, out, { captured, captureMeta });
   return { rootId, ops: out };
 }
 
@@ -2088,7 +2164,9 @@ export default function App() {
   }
 
   async function executeOperatorJob(jobId, op, targetIds, atClient, opts = {}, mapOverride = null) {
-    const map = mapOverride || opMap;
+    const rawMap = { ...opMap, ...(mapOverride || {}) };
+    const map = hydrateOperatorMap(rawMap, operators, op.id);
+    const execOp = map[op.id] || op;
     const idSet = new Set(targetIds);
     const itemList = itemsRef.current.filter((it) => idSet.has(it.id));
     patchJob(jobId, { step: "reading material…" });
@@ -2102,14 +2180,27 @@ export default function App() {
     }
 
     let out;
-    const plan = compileExecutionPlan(op, map, text);
+    const onProgress = (step) => patchJob(jobId, { step });
+
+    if (isFlatMoveSequence(execOp, map)) {
+      const stepMs = execOp.steps.reduce((ms, sid) => {
+        const s = map[sid];
+        return ms + (isTransformPrimitive(s) ? estimatePrimitiveMs(s, text) : ETA.default);
+      }, 0);
+      patchJob(jobId, {
+        step: execOp.steps.map((sid) => map[sid]?.name).filter(Boolean).join(" → "),
+        startedAt: Date.now(),
+        estimatedMs: stepMs,
+      });
+      out = await runMoveSequence(execOp, map, text, image, onProgress, operators);
+    } else {
+    const plan = compileExecutionPlan(execOp, map, text);
     const estimatedMs = estimatePlanMs(plan);
     patchJob(jobId, {
-      step: plan.phases?.[0]?.label || op.name,
+      step: plan.phases?.[0]?.label || execOp.name,
       startedAt: Date.now(),
       estimatedMs,
     });
-    const onProgress = (step) => patchJob(jobId, { step });
 
     if (plan.phases.length === 1 && plan.phases[0].id === "synthesize") {
       const phase = plan.phases[0];
@@ -2122,7 +2213,7 @@ export default function App() {
       });
     } else {
       out = await runExecutionOnServer({
-        op,
+        op: execOp,
         opMap: map,
         operators,
         material: text,
@@ -2131,8 +2222,9 @@ export default function App() {
         plan,
       });
     }
+    }
 
-    if (op.multi || op.name === "differentiate") {
+    if (execOp.multi || execOp.name === "differentiate") {
       const parts = out
         .split(/\n{2,}/)
         .map((p) => p.replace(/^\s*(?:\[[^\]]+\]|[-*•]|\d+[.)])\s*/m, "").trim())
@@ -2142,21 +2234,21 @@ export default function App() {
         if (lines.length >= 2) {
           const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
           pushHistory();
-          spawnMultipleObjects(lines, targetIds, atWorld, { opId: op.id, name: op.name });
+          spawnMultipleObjects(lines, targetIds, atWorld, viaFromOp(execOp, targetIds));
           return;
         }
-        throw new Error(`${op.name} produced only one part`);
+        throw new Error(`${execOp.name} produced only one part`);
       }
       const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
       pushHistory();
-      spawnMultipleObjects(parts, targetIds, atWorld, { opId: op.id, name: op.name });
+      spawnMultipleObjects(parts, targetIds, atWorld, viaFromOp(execOp, targetIds));
       return;
     }
 
     if (!out?.trim()) throw new Error("empty output");
     patchJob(jobId, { step: "spawning object…", progress: 0.98 });
     const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
-    applyTransformResult(out, targetIds, atWorld, { opId: op.id, name: op.name });
+    applyTransformResult(out, targetIds, atWorld, viaFromOp(execOp, targetIds));
   }
 
   function runOperator(op, targetIds, opts = {}) {
@@ -2307,7 +2399,7 @@ export default function App() {
       kind: "prompt",
       move: true,
       description: `Your way of seeing: ${name}`,
-      prompt: `${name.toUpperCase()} — apply this perceptual move to the input. Re-see the whole through this lens. One vivid paragraph. Return ONLY the transformed text.`,
+      prompt: `${name}.`,
       maxTokens: 800,
       estimatedMs: 13000,
       resolveWhen: "never",
@@ -2464,6 +2556,7 @@ export default function App() {
       title && title !== "a thought"
         ? `${title}: ${shortChain}`.slice(0, 72)
         : `thread: ${shortChain}`.slice(0, 72);
+    const captureMeta = buildCaptureMetadata(journey, vias, allItems);
     return {
       canCapture: true,
       journey,
@@ -2471,6 +2564,7 @@ export default function App() {
       moveNames,
       moveCount: vias.length,
       defaultName,
+      captureMeta,
     };
   }
 
@@ -2550,23 +2644,16 @@ export default function App() {
       showToast(info.reason || "no transformations on this thread yet — apply some operators first");
       return null;
     }
-    const { journey, vias, moveNames, moveCount } = info;
-    const stepNodes = vias.map((via) => {
-      const src = (via.opId && opMap[via.opId]) || operators.find((o) => o.name === via.name);
-      if (src) return opToJsonTree(src, opMap);
-      return {
-        name: via.name,
-        description: `Reapply the move "${via.name}"`,
-        prompt: `Apply the cognitive move "${via.name}" to the input material. Perform the transformation fully and return ONLY the transformed text.`,
-      };
-    });
-    const name = (opts.name || info.defaultName || `thread: ${moveNames.join(" → ")}`).trim().slice(0, 72);
+    const { vias, moveNames, moveCount, captureMeta } = info;
+    const stepNodes = vias.map((via) => abstractStepFromVia(via, opMap, operators));
+    const chainLabel = moveNames.join(" → ");
+    const name = (opts.name || info.defaultName || `thread: ${chainLabel}`).trim().slice(0, 72);
     const tree = {
       name,
-      description: `Replays a captured thread of seeing — ${moveNames.join(", then ")} — on any material, ending where "${journey.title}" ended.`,
+      description: `Captured move sequence (${moveCount} steps): ${chainLabel}. Applies to any similar input.`,
       steps: stepNodes,
     };
-    const { ops, rootId } = treeToOperators(tree, { top: true });
+    const { ops, rootId } = treeToOperators(tree, { top: true, captured: true, captureMeta });
     setOperators((prev) => [...prev, ...ops]);
     setRailTab("functions");
     showToast(`saved function · ${moveCount} move${moveCount === 1 ? "" : "s"}`);
@@ -2717,8 +2804,8 @@ export default function App() {
     if (!a || !b) return;
     const tree = {
       name: `${a.name} → ${b.name}`.slice(0, 72),
-      description: `Compound move: apply "${a.name}", then "${b.name}" to its result. Forged from two moves; now a first-class object you can extend or fold into larger procedures.`,
-      steps: [opToJsonTree(a, opMap), opToJsonTree(b, opMap)],
+      description: `Compound move: ${a.name}, then ${b.name}.`,
+      steps: [opToAbstractTree(a, opMap, operators), opToAbstractTree(b, opMap, operators)],
     };
     const { ops, rootId } = treeToOperators(tree, { top: true });
     setOperators((prev) => [
