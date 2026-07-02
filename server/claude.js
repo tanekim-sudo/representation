@@ -65,7 +65,8 @@ export async function runPrompt({
   maxTokens = null,
   research = false,
   maxSearchUses = 5,
-  timeoutMs = 180000,
+  timeoutMs = 90000,
+  temperature = null,
 }) {
   const anthropic = getClient();
   if (!anthropic) {
@@ -94,7 +95,7 @@ export async function runPrompt({
       max_tokens,
       system: sys,
       messages: [{ role: "user", content: blocks }],
-      temperature: research ? 0.25 : 0.5,
+      temperature: temperature ?? (research ? 0.25 : 0.5),
     };
     if (research) params.tools = [WEB_SEARCH_TOOL(maxSearchUses)];
 

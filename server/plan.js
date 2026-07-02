@@ -12,8 +12,20 @@ import {
   primitiveNeedsResearch,
   primitiveNeedsResolve,
 } from "../shared/transform-primitives.js";
-import { PHASE_TIMEOUT } from "../shared/phase-timeouts.js";
+import { PHASE_TIMEOUT, synthesizeTimeoutMs } from "../shared/phase-timeouts.js";
 import { isResolveLeaf } from "../shared/function-standards.js";
+
+/** One prompt leaf (moves, simple functions) — skip resolve/research orchestration. */
+export function isSingleStepPrompt(op, opMap) {
+  if (!op || op.research) return false;
+  if (op.kind === "pipeline") {
+    if (!op.steps?.length || op.steps.length !== 1) return false;
+    return isSingleStepPrompt(opMap[op.steps[0]], opMap);
+  }
+  if (op.kind && op.kind !== "prompt") return false;
+  if (isResolveLeaf({ name: op.name, prompt: op.prompt })) return false;
+  return Boolean((op.prompt || "").trim());
+}
 
 /** Flatten any-depth operator tree to ordered leaves (depth-first). */
 export function collectLeaves(op, opMap, out = []) {
@@ -73,14 +85,14 @@ function compileWorkflowSteps(leaves) {
  * Primitives: resolve and/or research when appropriate, then one transform step.
  * Output stays a single coherent result — never multi-portal fan-out.
  */
-function compilePrimitivePlan(op, material) {
+function compileSimplePlan(op, material) {
   const prompt = (op.prompt || "").trim() || `Apply ${op.name} to the input.`;
   const phases = [];
   const plan = {
     functionName: op.name,
     functionDescription: op.description || "",
     phases,
-    primitive: true,
+    fastPath: true,
   };
 
   if (primitiveNeedsResolve(op, material)) {
@@ -110,7 +122,7 @@ function compilePrimitivePlan(op, material) {
   phases.push({
     id: "synthesize",
     label: op.name,
-    timeoutMs: op.estimatedMs ? Math.max(op.estimatedMs * 4, PHASE_TIMEOUT.synthesizePrimitive) : PHASE_TIMEOUT.synthesizePrimitive,
+    timeoutMs: synthesizeTimeoutMs(op.estimatedMs, false),
     maxTokens: op.maxTokens || 1400,
     prompt,
     system: PRIMITIVE_SYSTEM,
@@ -127,8 +139,8 @@ function compilePrimitivePlan(op, material) {
  * - synthesize: all quality work in one compiled prompt (uses research context)
  */
 export function compileExecutionPlan(op, opMap, material) {
-  if (isTransformPrimitive(op)) {
-    return compilePrimitivePlan(op, material);
+  if (isTransformPrimitive(op) || isSingleStepPrompt(op, opMap)) {
+    return compileSimplePlan(op, material);
   }
 
   const leaves = collectLeaves(op, opMap);
@@ -199,6 +211,11 @@ export function compileExecutionPlan(op, opMap, material) {
 
   plan.parseResolve = parseResolveOutput;
   return plan;
+}
+
+/** Trim input for fast single-step transforms — no verbose wrappers. */
+export function buildSimpleMaterial(material) {
+  return (material || "").trim();
 }
 
 export function buildPhaseMaterial(phaseId, context) {

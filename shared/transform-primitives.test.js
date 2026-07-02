@@ -10,7 +10,7 @@ import {
   estimatePrimitiveMs,
 } from "./transform-primitives.js";
 import { scaleEta, ETA } from "./eta.js";
-import { compileExecutionPlan } from "../server/plan.js";
+import { compileExecutionPlan, isSingleStepPrompt } from "../server/plan.js";
 
 describe("transform primitives", () => {
   it("defines the canonical grammar", () => {
@@ -70,5 +70,23 @@ describe("transform primitives", () => {
     const invert = TRANSFORM_PRIMITIVES.find((p) => p.name === "invert");
     const plan = compileExecutionPlan(invert, { [invert.id]: invert }, "bobyard ai startup");
     assert.equal(plan.phases.length, 1);
+    assert.ok(plan.fastPath);
+  });
+
+  it("routes perceptual moves as single-step fast path", () => {
+    const move = {
+      id: "m1",
+      name: "see as monastery",
+      kind: "prompt",
+      move: true,
+      prompt: "SEE AS MONASTERY — apply this perceptual move. Return ONLY the transformed text.",
+      resolveWhen: "never",
+      researchWhen: "never",
+    };
+    assert.ok(isSingleStepPrompt(move, { m1: move }));
+    const plan = compileExecutionPlan(move, { m1: move }, "Cursor AI");
+    assert.equal(plan.phases.length, 1);
+    assert.equal(plan.phases[0].id, "synthesize");
+    assert.ok(plan.phases[0].timeoutMs <= 45000);
   });
 });
