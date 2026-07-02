@@ -16,6 +16,11 @@ import {
 import { scaleEta, ETA } from "../shared/eta.js";
 import { phaseClientAbortMs, PHASE_TIMEOUT } from "../shared/phase-timeouts.js";
 import { compileExecutionPlan } from "../server/plan.js";
+import { matchRoleTemplate, isResolveOnlyFunction } from "../shared/role-templates.js";
+import {
+  isInternalMetadataOutput,
+  deliverableRewritePrompt,
+} from "../shared/deliverable-quality.js";
 import { FAST_FUNCTION_ARCHITECT_STANDARDS } from "../shared/function-standards.js";
 import {
   createOperatorBundle,
@@ -60,8 +65,10 @@ function highlightWorldWidth(scale) {
   return HIGHLIGHT_W / Math.max(scale, 0.12);
 }
 
-/** Six hex directions for branching — angles from +x axis, counter-clockwise from east; we use standard math angles. */
+/** Branch / link directions — include east for clean left→right transform arrows. */
 const EXPAND_DIRS = [
+  { id: "e", label: "→", angle: 0 },
+  { id: "w", label: "←", angle: Math.PI },
   { id: "n", label: "↑", angle: -Math.PI / 2 },
   { id: "ne", label: "↗", angle: -Math.PI / 6 },
   { id: "se", label: "↘", angle: Math.PI / 6 },
@@ -138,7 +145,11 @@ function linkCurvePath(from, to) {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const dist = Math.hypot(dx, dy) || 1;
-  const bend = Math.min(52, dist * 0.24);
+  if (Math.abs(dx) > Math.abs(dy) * 1.2) {
+    const mx = (from.x + to.x) / 2;
+    return `M ${from.x} ${from.y} C ${mx} ${from.y}, ${mx} ${to.y}, ${to.x} ${to.y}`;
+  }
+  const bend = Math.min(28, dist * 0.15);
   const cx = (from.x + to.x) / 2 + (-dy / dist) * bend;
   const cy = (from.y + to.y) / 2 + (dx / dist) * bend;
   return `M ${from.x} ${from.y} Q ${cx} ${cy} ${to.x} ${to.y}`;
@@ -206,7 +217,8 @@ const RESEARCH_STEP_PROMPT =
 
 function migrateOperators(ops) {
   if (!Array.isArray(ops)) return ops;
-  return ops.map((o) => {
+  const map = Object.fromEntries(ops.map((o) => [o.id, o]));
+  const mapped = ops.map((o) => {
     if (o.name === "research" && (o.kind === "prompt" || !o.kind || o.kind === "pipeline")) {
       const prompt = o.prompt?.toLowerCase().includes("web_search") || o.prompt?.toLowerCase().includes("web search")
         ? o.prompt
@@ -215,6 +227,7 @@ function migrateOperators(ops) {
     }
     return o;
   });
+  return mapped.filter((o) => !isResolveOnlyFunction(o, Object.fromEntries(mapped.map((x) => [x.id, x]))));
 }
 
 const ONBOARDED_KEY = "lens.onboarded.v1";
@@ -428,12 +441,26 @@ function boardSystem(operators, opMap) {
   return sys;
 }
 
+async function polishDeliverable(out, op, material) {
+  const text = (out || "").trim();
+  if (!text || !isInternalMetadataOutput(text)) return text;
+  const prompt = deliverableRewritePrompt(op?.name || "function", op?.description || "");
+  const fixed = await runClaude(prompt, `Subject:\n${(material || "").trim()}\n\nDraft:\n${text}`, {
+    maxTokens: 4096,
+    timeoutMs: PHASE_TIMEOUT.synthesizeComposite,
+  });
+  const cleaned = (fixed || "").trim();
+  return cleaned && !isInternalMetadataOutput(cleaned) ? cleaned : text;
+}
+
 // role/profession -> the most valuable cognitive functions to automate
 async function generateFunctionList(role, operators, opMap) {
   const hasLib = operators?.length > 0;
   const prompt = `The user is a: ${role}.
 
-Design the 10 most valuable FUNCTIONS for their lens whiteboard. Each function must work on SPARSE input (a company name, one-line note) and produce a FULL professional deliverable using web research.
+Design the 8 most valuable FUNCTIONS for their lens whiteboard. Each produces a FULL professional deliverable — never internal metadata (ENTITY/SEARCH_TERMS).
+
+NEVER suggest: "identify subject", "extract entity", "comp universe criteria" as standalone functions.
 
 ${hasLib ? "Complement existing library — no duplicate names or purposes.\n" : ""}
 For each function:
@@ -445,22 +472,24 @@ Investor examples:
 - "Write IC Investment Memo" → executive summary, highlights, business overview, risks, recommendation
 - "Map Comparable Companies" → table of comps with positioning and metrics
 
-Return ONLY JSON: {"functions":[{"name":"...","description":"..."}]} — exactly 10, ordered by frequency. No markdown, no commentary outside the JSON object.`;
+Return ONLY JSON: {"functions":[{"name":"...","description":"..."}]} — exactly 8, ordered by frequency. No markdown, no commentary outside the JSON object.`;
   const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 2000 });
   const j = parseJSON(out);
-  if (Array.isArray(j.functions) && j.functions.length) return j.functions.slice(0, 10);
-  if (Array.isArray(j) && j.length) return j.slice(0, 10);
+  if (Array.isArray(j.functions) && j.functions.length) return j.functions.slice(0, 8);
+  if (Array.isArray(j) && j.length) return j.slice(0, 8);
   return [];
 }
 
 // decompose one function into a deep tree of sub-functions ending in primitives
 async function decomposeFunction(role, fn, operators, opMap) {
-  const prompt = `Role: ${role}. Decompose this function into 3–5 steps for lens (identify subject → ONE research leaf → analyze → deliver).
+  const prompt = `Role: ${role}. Decompose into 2–4 steps: optional research leaf (research:true) → deliverable leaf with markdown sections.
+
+NEVER create "identify subject", "extract entity", or SEARCH_TERMS-only steps — those are internal, not user-facing deliverables.
 
 FUNCTION: ${fn.name}
 ${fn.description ? `Description: ${fn.description}` : ""}
 
-Leaves: short one-line prompts. ONE leaf with "research":true. Thesis-style functions: final leaf outputs Thesis, Market, Product, Traction, Team, Risks, Recommendation sections.
+Final leaf must output polished markdown sections for the user, not ENTITY/SEARCH metadata.
 
 JSON only:
 {"name":"...","description":"...","steps":[{"name":"...","description":"...","prompt":"..."},...]}`;
@@ -1164,10 +1193,11 @@ function findClearSpawnPosition(anchorBox, w, text, items, placedSoFar = []) {
   const occupancy = [...items, ...placedSoFar];
   const h = measureTextHeight(w, text);
   const seeds = [
-    { x: anchorBox.maxx + SPAWN_GAP, y: anchorBox.miny, fromDir: "se" },
+    { x: anchorBox.maxx + SPAWN_GAP, y: anchorBox.miny + (anchorBox.maxy - anchorBox.miny) / 2 - h / 2, fromDir: "e" },
+    { x: anchorBox.maxx + SPAWN_GAP, y: anchorBox.miny, fromDir: "e" },
     { x: anchorBox.minx, y: anchorBox.maxy + SPAWN_GAP, fromDir: "s" },
     { x: anchorBox.maxx + SPAWN_GAP, y: anchorBox.maxy + SPAWN_GAP, fromDir: "se" },
-    { x: anchorBox.minx - w - SPAWN_GAP, y: anchorBox.miny, fromDir: "sw" },
+    { x: anchorBox.minx - w - SPAWN_GAP, y: anchorBox.miny, fromDir: "w" },
     { x: anchorBox.minx, y: anchorBox.miny - h - SPAWN_GAP, fromDir: "n" },
   ];
   for (let ring = 0; ring < 32; ring++) {
@@ -2332,7 +2362,8 @@ export default function App() {
       await runMoveSequence(execOp, map, text, image, onProgress, operators, async ({ out: stepOut, stepOp }) => {
         patchJob(jobId, { step: "spawning object…", progress: 0.92 });
         pushHistory();
-        const result = spawnTransformOutputs([stepOut], chainParentIds, atWorld, viaFromOp(stepOp, chainParentIds), {
+        const polished = await polishDeliverable(stepOut, stepOp, text);
+        const result = spawnTransformOutputs([polished], chainParentIds, atWorld, viaFromOp(stepOp, chainParentIds), {
           anchorBox: chainAnchor || undefined,
         });
         chainParentIds = result.lastParentIds;
@@ -2391,6 +2422,11 @@ export default function App() {
     }
 
     if (!out?.trim()) throw new Error("empty output");
+    patchJob(jobId, { step: "polishing deliverable…", progress: 0.95 });
+    out = await polishDeliverable(out, execOp, text);
+    if (isInternalMetadataOutput(out)) {
+      throw new Error("output looks like internal metadata — try a full function, not a resolve step");
+    }
     patchJob(jobId, { step: "spawning object…", progress: 0.98 });
     const atWorld = atClient ? clientToWorld(atClient.x, atClient.y) : null;
     applyTransformResult(out, targetIds, atWorld, viaFromOp(execOp, targetIds));
@@ -2485,27 +2521,34 @@ export default function App() {
       estimatedMs: ETA.onboarding,
     });
     try {
-      const list = await generateFunctionList(role, operators, opMap);
-      if (!list.length) throw new Error("Could not imagine functions. Try again.");
-      patchJob(jobId, { step: `designing 0 / ${list.length} functions…` });
-      let done = 0;
-      const trees = await Promise.all(
-        list.map(async (fn) => {
-          let tree;
-          try {
-            tree = await decomposeFunction(role, fn, operators, opMap);
-          } catch {
-            tree = {
-              name: fn.name,
-              description: fn.description,
-              prompt: buildDefaultLeafPrompt(fn.name, fn.description),
-            };
-          }
-          done += 1;
-          patchJob(jobId, { step: `designing ${done} / ${list.length} functions…` });
-          return tree;
-        })
-      );
+      const template = matchRoleTemplate(role);
+      let trees;
+      if (template?.trees?.length) {
+        patchJob(jobId, { step: `loading ${template.trees.length} curated functions…` });
+        trees = template.trees.map((t) => ({ ...t, description: t.description || "" }));
+      } else {
+        const list = await generateFunctionList(role, operators, opMap);
+        if (!list.length) throw new Error("Could not imagine functions. Try again.");
+        patchJob(jobId, { step: `designing 0 / ${list.length} functions…` });
+        let done = 0;
+        trees = await Promise.all(
+          list.map(async (fn) => {
+            let tree;
+            try {
+              tree = await decomposeFunction(role, fn, operators, opMap);
+            } catch {
+              tree = {
+                name: fn.name,
+                description: fn.description,
+                prompt: buildDefaultLeafPrompt(fn.name, fn.description),
+              };
+            }
+            done += 1;
+            patchJob(jobId, { step: `designing ${done} / ${list.length} functions…` });
+            return tree;
+          })
+        );
+      }
       const newOps = [];
       trees.forEach((t) => materializeTree(t, role, true, newOps));
       setOperators((prev) => [...prev, ...newOps]);
@@ -4307,9 +4350,11 @@ export default function App() {
               const from = items.find((i) => i.id === link.fromId);
               const to = items.find((i) => i.id === link.toId);
               if (!from || !to) return null;
-              const dirId = link.fromDir || inferLinkDir(from, to);
-              const a = branchAnchor(from, dirId);
-              const b = linkEndpoint(to, a);
+              const fromC = noteCenter(from);
+              const toC = noteCenter(to);
+              if (!fromC || !toC) return null;
+              const a = linkEndpoint(from, toC);
+              const b = linkEndpoint(to, fromC);
               return (
                 <path
                   key={link.id}
@@ -4317,8 +4362,8 @@ export default function App() {
                   className="board-link"
                   fill="none"
                   stroke={INK}
-                  strokeWidth={1.6}
-                  strokeOpacity={0.42}
+                  strokeWidth={2}
+                  strokeOpacity={0.5}
                   strokeLinecap="round"
                   markerEnd="url(#board-link-arrow)"
                 />

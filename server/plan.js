@@ -15,6 +15,7 @@ import {
 } from "../shared/transform-primitives.js";
 import { PHASE_TIMEOUT, synthesizeTimeoutMs } from "../shared/phase-timeouts.js";
 import { isResolveLeaf } from "../shared/function-standards.js";
+import { defaultDeliverLeaf } from "../shared/deliverable-quality.js";
 
 /** One prompt leaf (moves, simple functions) — skip resolve/research orchestration. */
 export function isSingleStepPrompt(op, opMap) {
@@ -122,8 +123,10 @@ export function compileExecutionPlan(op, opMap, material) {
   const synthesizeLeaves = leaves.filter((l) => !l.research && !isResolveLeaf(l));
 
   let workflowForSynth =
-    synthesizeLeaves.length > 0 ? synthesizeLeaves : leaves.filter((l) => !l.research);
-  if (!workflowForSynth.length) workflowForSynth = [...leaves];
+    synthesizeLeaves.length > 0 ? synthesizeLeaves : leaves.filter((l) => !l.research && !isResolveLeaf(l));
+  if (!workflowForSynth.length) {
+    workflowForSynth = [defaultDeliverLeaf(op?.name || "function", op?.description || "")];
+  }
 
   const phases = [];
   const plan = {
