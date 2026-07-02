@@ -25,7 +25,6 @@ const SEL_MIME = "application/lens-selection";
 const LENS_MIME = "application/lens-lens";
 const LENSES_KEY = "lens.lenses.v1";
 const ACTIVE_LENS_KEY = "lens.activeLens.v1";
-const RAIL_W = 280;
 const COMBINE_THRESHOLD = 14; // px moved before drop-on-item triggers combine
 
 const INK = "#20201d";
@@ -48,7 +47,6 @@ const EXPAND_DIRS = [
   { id: "sw", label: "↙", angle: 5 * Math.PI / 6 },
   { id: "nw", label: "↖", angle: -5 * Math.PI / 6 },
 ];
-const BRANCH_DIST = 240;
 
 /**
  * Every node carries its path implicitly: bornFrom lineage plus drawn
@@ -146,7 +144,7 @@ const CANVAS_TOOLS = {
     group: "canvas",
     label: "Select",
     icon: "↖",
-    hint: "Double-tap a note to branch · drag a nub to draw an arrow · drag notes to move",
+    hint: "Click to select · double-click to edit · drag to move",
   },
   hand: {
     id: "hand",
@@ -154,13 +152,6 @@ const CANVAS_TOOLS = {
     label: "Pan",
     icon: "✋",
     hint: "Drag to move the canvas.",
-  },
-  text: {
-    id: "text",
-    group: "input",
-    label: "Text",
-    icon: "T",
-    hint: "Click to place text. Double-click empty space to write quickly.",
   },
   image: {
     id: "image",
@@ -1453,9 +1444,6 @@ export default function App() {
   const [railTab, setRailTab] = useState("functions"); // functions | structures
   const [railDropOver, setRailDropOver] = useState(false);
   const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
-  const [expandPulse, setExpandPulse] = useState(null); // item id — compass enlarged after double-tap
-  const [linkDraft, setLinkDraft] = useState(null); // { fromX, fromY, toX, toY }
-  const [hoverId, setHoverId] = useState(null); // note under cursor — its tendrils wake up
 
   const viewportRef = useRef(null);
   const inputLayerRef = useRef(null);
@@ -1472,10 +1460,6 @@ export default function App() {
   const eraseAtPointerRef = useRef(() => false);
   const historyRef = useRef({ past: [], future: [] });
   const pushHistoryRef = useRef(() => {});
-  const spawnBranchRef = useRef(() => {});
-  const hoverIdRef = useRef(null);
-  const hoverRafRef = useRef(null);
-  hoverIdRef.current = hoverId;
   camRef.current = camera;
   itemsRef.current = items;
   toolRef.current = tool;
@@ -1713,11 +1697,6 @@ export default function App() {
         const dw = (cx - g.cx) / camRef.current.scale;
         const factor = Math.max(0.25, g.startScale + dw / 200);
         updateItem(g.id, { scale: factor });
-      } else if (g.mode === "connect") {
-        g.lastCx = cx;
-        g.lastCy = cy;
-        const w = clientToWorld(cx, cy);
-        setLinkDraft({ fromX: g.fromX, fromY: g.fromY, toX: w.x, toY: w.y });
       }
     }
 
@@ -1756,7 +1735,10 @@ export default function App() {
                 showToastRef.current(`selected ${inside.length} item${inside.length > 1 ? "s" : ""}`);
                 requestAnimationFrame(() => {
                   const extracted = extractTextFromLoopSelection(inside, itemsRef.current);
-                  if (extracted) setHighlight({ ...extracted, strokeId });
+                  if (extracted) {
+                    setSelection([extracted.itemId]);
+                    showToastRef.current("highlighted · drag a function from the rail");
+                  }
                 });
               } else {
                 showToastRef.current("nothing inside the circle");
@@ -1784,7 +1766,8 @@ export default function App() {
                     worldToClient
                   );
                   if (extracted) {
-                    setHighlight({ ...extracted, strokeId });
+                    setSelection([extracted.itemId]);
+                    showToastRef.current("highlighted · drag a function from the rail");
                   } else {
                     setItems((arr) => arr.filter((it) => it.id !== strokeId));
                     if (!g.deletedIds?.size) {
@@ -1834,61 +1817,6 @@ export default function App() {
           const target = itemAtPoint(g.lastCx ?? g.cx, g.lastCy ?? g.cy, exclude);
           if (target) combineRef.current?.(g.ids, [target.id]);
         }
-      } else if (g.mode === "connect") {
-        setLinkDraft(null);
-        const endCx = g.lastCx ?? g.cx;
-        const endCy = g.lastCy ?? g.cy;
-        const w = clientToWorld(endCx, endCy);
-        const moved = Math.hypot(endCx - g.cx, endCy - g.cy);
-        const exclude = new Set([g.fromId]);
-        const hit = itemAtPoint(endCx, endCy, exclude);
-        if (hit && isNoteItem(hit)) {
-          pushHistoryRef.current();
-          const dup = itemsRef.current.some(
-            (it) => it.type === "link" && it.fromId === g.fromId && it.toId === hit.id
-          );
-          if (!dup) {
-            setItems((arr) => [
-              ...arr,
-              normalizeItem({
-                id: uid(),
-                type: "link",
-                fromId: g.fromId,
-                toId: hit.id,
-                fromDir: g.fromDir,
-              }),
-            ]);
-          }
-          setSelection([hit.id]);
-        } else if (moved > 8 || Math.hypot(w.x - g.fromX, w.y - g.fromY) > 28) {
-          pushHistoryRef.current();
-          const id = uid();
-          const noteW = 320;
-          setItems((arr) => [
-            ...arr,
-            normalizeItem({
-              id,
-              type: "text",
-              x: w.x - noteW / 2,
-              y: w.y - 48,
-              text: "",
-              w: noteW,
-              bornFrom: [g.fromId],
-            }),
-            normalizeItem({
-              id: uid(),
-              type: "link",
-              fromId: g.fromId,
-              toId: id,
-              fromDir: g.fromDir,
-            }),
-          ]);
-          setSelection([id]);
-          setEditing(id);
-        } else {
-          spawnBranchRef.current(g.fromId, g.fromDir);
-        }
-        setExpandPulse(null);
       }
     }
 
@@ -1934,8 +1862,6 @@ export default function App() {
         finishEditing();
         setSelection([]);
         setLasso(null);
-        setExpandPulse(null);
-        setLinkDraft(null);
         gesture.current = null;
         setHighlight((hl) => {
           if (hl?.strokeId) {
@@ -2030,55 +1956,6 @@ export default function App() {
       })
     );
     setSelection([]);
-    setExpandPulse(null);
-    setLinkDraft(null);
-  }
-
-  function spawnBranchInDir(fromId, dirId) {
-    const from = itemsRef.current.find((i) => i.id === fromId);
-    if (!from || !isNoteItem(from)) return;
-    pushHistory();
-    const dir = EXPAND_DIRS.find((d) => d.id === dirId) || EXPAND_DIRS[0];
-    const c = noteCenter(from);
-    const noteW = 320;
-    const x = c.x + Math.cos(dir.angle) * BRANCH_DIST - noteW / 2;
-    const y = c.y + Math.sin(dir.angle) * BRANCH_DIST - 48;
-    const id = uid();
-    setItems((arr) => [
-      ...arr,
-      normalizeItem({ id, type: "text", x, y, text: "", w: noteW, bornFrom: [fromId] }),
-      normalizeItem({ id: uid(), type: "link", fromId, toId: id, fromDir: dirId }),
-    ]);
-    setSelection([id]);
-    setEditing(id);
-    setExpandPulse(null);
-  }
-  spawnBranchRef.current = spawnBranchInDir;
-
-  function startBranchDrag(e, fromId, dirId) {
-    e.stopPropagation();
-    e.preventDefault();
-    const from = itemsRef.current.find((i) => i.id === fromId);
-    if (!from) return;
-    const ap = branchAnchor(from, dirId);
-    gesture.current = {
-      mode: "connect",
-      fromId,
-      fromDir: dirId,
-      fromX: ap.x,
-      fromY: ap.y,
-      cx: e.clientX,
-      cy: e.clientY,
-      lastCx: e.clientX,
-      lastCy: e.clientY,
-    };
-    setLinkDraft({ fromX: ap.x, fromY: ap.y, toX: ap.x, toY: ap.y });
-    setGesturing(true);
-    try {
-      inputLayerRef.current?.setPointerCapture(e.pointerId);
-    } catch {
-      /* ignore */
-    }
   }
 
   // ---- composed operators (functions made of functions) ----
@@ -2150,7 +2027,8 @@ export default function App() {
     return newIds;
   }
 
-  async function executeOperatorJob(jobId, op, targetIds, atClient, opts = {}) {
+  async function executeOperatorJob(jobId, op, targetIds, atClient, opts = {}, mapOverride = null) {
+    const map = mapOverride || opMap;
     const idSet = new Set(targetIds);
     const itemList = itemsRef.current.filter((it) => idSet.has(it.id));
     patchJob(jobId, { step: "reading material…" });
@@ -2164,7 +2042,7 @@ export default function App() {
     }
 
     let out;
-    const { plan } = await fetchExecutionPlan(op, opMap, text);
+    const { plan } = await fetchExecutionPlan(op, map, text);
     const estimatedMs = estimatePlanMs(plan);
     patchJob(jobId, {
       step: plan.phases?.[0]?.label || op.name,
@@ -2174,7 +2052,7 @@ export default function App() {
     const onProgress = (step) => patchJob(jobId, { step });
     out = await runExecutionOnServer({
       op,
-      opMap,
+      opMap: map,
       operators,
       material: text,
       image,
@@ -2211,6 +2089,7 @@ export default function App() {
 
   function runOperator(op, targetIds, opts = {}) {
     const atClient = opts.atClient;
+    const map = opts.opMap || opMap;
     let ids = targetIds?.length ? targetIds : resolveTargetIds(atClient);
     if (!ids.length) {
       showToast("drop onto an idea");
@@ -2231,7 +2110,7 @@ export default function App() {
       startedAt: Date.now(),
       estimatedMs: isTransformPrimitive(op) ? estimatePrimitiveMs(op, "") : ETA.default,
     });
-    executeOperatorJob(jobId, op, ids, atClient, opts)
+    executeOperatorJob(jobId, op, ids, atClient, opts, map)
       .then(() => finishJob(jobId, "done", `done · ${op.name}`))
       .catch((err) => {
         finishJob(jobId, "error", err.message || "failed");
@@ -2250,6 +2129,37 @@ export default function App() {
     }
     setDropTargetId(null);
     runOperator(op, ids, { atClient });
+  }
+
+  function applyLensDrop(lensId, atClient) {
+    if (!atClient) return;
+    const lens = lenses.find((l) => l.id === lensId);
+    if (!lens) return;
+    const ids = resolveTargetIds(atClient);
+    if (!ids.length) {
+      showToast("drop onto an idea");
+      return;
+    }
+    const moveOps = (lens.moveIds || []).map((id) => opMap[id]).filter(Boolean);
+    if (!moveOps.length) {
+      showToast("lens has no moves");
+      return;
+    }
+    setDropTargetId(null);
+    if (moveOps.length === 1) {
+      runOperator(moveOps[0], ids, { atClient });
+      return;
+    }
+    const tree = {
+      name: lens.name,
+      description: `Lens: ${lens.name}`,
+      steps: moveOps.map((op) => opToJsonTree(op, opMap)),
+    };
+    const { ops, rootId } = treeToOperators(tree, { top: false });
+    const compound = ops.find((o) => o.id === rootId);
+    if (!compound) return;
+    const mergedMap = { ...opMap, ...Object.fromEntries(ops.map((o) => [o.id, o])) };
+    runOperator(compound, ids, { atClient, opMap: mergedMap });
   }
 
   // ---- saved idea structures ----
@@ -2832,14 +2742,6 @@ export default function App() {
   const primitives = useMemo(() => canonicalPrimitives, [canonicalPrimitives]);
   const basics = operators.filter((o) => !o.role && !o.top && !o.primitive);
   const activeLens = lenses.find((l) => l.id === activeLensId) || null;
-  // your active lens IS your quick palette — style as recurring transformations
-  const selectionQuickOps = useMemo(() => {
-    if (activeLens) {
-      const ops = (activeLens.moveIds || []).map((id) => opMap[id]).filter(Boolean);
-      if (ops.length) return ops;
-    }
-    return [...moves, ...primitives];
-  }, [activeLens, opMap, moves, primitives]);
 
   // ---- lenses: create, evolve, merge, compare, inherit — git for perception ----
   function saveLens(draft) {
@@ -2933,7 +2835,7 @@ export default function App() {
         };
         setLenses((ls) => [lens, ...ls]);
         setActiveLensId(lens.id);
-        setRailTab("lenses");
+        setRailTab("functions");
         showToast(`inherited · ${lens.name} — now looking through it`);
       } catch {
         showToast("could not read that lens file");
@@ -3068,8 +2970,6 @@ export default function App() {
   // ---- pointer gestures on the board ----
   function onPointerDown(e) {
     if (e.button !== 0) return;
-    if (e.target.closest?.(".branch-nub")) return;
-    setExpandPulse(null);
     setGesturing(true);
     const cx = e.clientX;
     const cy = e.clientY;
@@ -3097,7 +2997,7 @@ export default function App() {
       return;
     }
 
-    if (t === "pen" || t === "marker" || t === "highlight" || t === "eraser" || t === "text") {
+    if (t === "pen" || t === "marker" || t === "highlight" || t === "eraser") {
       pushHistory();
     }
 
@@ -3127,15 +3027,6 @@ export default function App() {
       const hit = itemAtPoint(cx, cy);
       if (hit) setItems((arr) => arr.filter((it) => it.id !== hit.id));
       try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
-      return;
-    }
-
-    if (t === "text") {
-      const id = uid();
-      setItems((arr) => [...arr, normalizeItem({ id, type: "text", x: w.x, y: w.y, text: "", w: 360 })]);
-      setSelection([id]);
-      setEditing(id);
-      setTool("select");
       return;
     }
 
@@ -3223,47 +3114,23 @@ export default function App() {
     setTool("select");
   }
 
-  // hover: wake a note's tendrils so you can grab a thought anywhere and continue it
-  function onHoverMove(e) {
-    if (toolRef.current !== "select" || gesture.current || editingRef.current || walkingRef.current) {
-      if (hoverIdRef.current) setHoverId(null);
-      return;
-    }
-    const cx = e.clientX;
-    const cy = e.clientY;
-    if (hoverRafRef.current) return;
-    hoverRafRef.current = requestAnimationFrame(() => {
-      hoverRafRef.current = null;
-      const hit = itemAtPoint(cx, cy);
-      const id = hit && isNoteItem(hit) ? hit.id : null;
-      if (id !== hoverIdRef.current) setHoverId(id);
-    });
-  }
-
-  // double-click: branch compass on notes, edit empty notes, write on blank paper
+  // double-click: edit notes inline, or create text on blank canvas
   function onDoubleClick(e) {
-    const t = toolRef.current;
-    if (t !== "select" && t !== "text") return;
+    if (toolRef.current !== "select") return;
     finishEditing();
     const hit = itemAtPoint(e.clientX, e.clientY);
     if (hit?.type === "text") {
-      const it = itemsRef.current.find((i) => i.id === hit.id);
-      if (!it?.text?.trim()) {
-        setSelection([hit.id]);
-        setEditing(hit.id);
-        return;
-      }
       setSelection([hit.id]);
-      setExpandPulse(hit.id);
+      setEditing(hit.id);
       return;
     }
     if (hit?.type === "image") {
       setSelection([hit.id]);
-      setExpandPulse(hit.id);
       return;
     }
     const w = clientToWorld(e.clientX, e.clientY);
     const id = uid();
+    pushHistory();
     setItems((arr) => [...arr, normalizeItem({ id, type: "text", x: w.x, y: w.y, text: "", w: 320 })]);
     setSelection([id]);
     setEditing(id);
@@ -3300,29 +3167,6 @@ export default function App() {
   function applyTransformResult(out, sourceIds, atWorld, via = null) {
     pushHistory();
     spawnNewObject(out, sourceIds, atWorld, via);
-  }
-
-  function runHighlightPrimitive(op, hl) {
-    if (op.needsSelection >= 2) {
-      const others = selRef.current.filter((id) => id !== hl.itemId);
-      if (!others.length) {
-        showToast("select another idea first, then highlight for merge");
-        return;
-      }
-    }
-    window.getSelection()?.removeAllRanges();
-    removeHighlightStroke(hl.strokeId);
-    setHighlight(null);
-    const ids =
-      op.needsSelection >= 2
-        ? [hl.itemId, ...selRef.current.filter((id) => id !== hl.itemId)]
-        : [hl.itemId];
-    const atClient = { x: hl.rect.left + hl.rect.width / 2, y: hl.rect.bottom + 12 };
-    runOperator(op, ids, {
-      atClient,
-      highlightQuote: hl.quote,
-      highlightContext: hl.context,
-    });
   }
 
   async function combineItemsByDrag(draggedIds, targetIds) {
@@ -3410,11 +3254,6 @@ export default function App() {
   const selBBox = selection.length ? selectionWorldBBox() : null;
   const selItem = selection.length === 1 ? items.find((it) => it.id === selection[0]) : null;
   const canTransform = selItem && (selItem.type === "text" || selItem.type === "image");
-  const hoverItem = hoverId ? items.find((it) => it.id === hoverId) : null;
-  const branchTarget =
-    tool === "select" && !editing && !highlight && !walking
-      ? (selItem && isNoteItem(selItem) ? selItem : hoverItem && isNoteItem(hoverItem) ? hoverItem : null)
-      : null;
   const boardLinks = items.filter((it) => it.type === "link");
   const walkStep = walking?.steps?.[walking.stepIndex] || null;
   const walkFocusRects = walkStep
@@ -3423,32 +3262,11 @@ export default function App() {
         .filter(Boolean)
         .map((it) => itemScreenBBox(it))
     : [];
-  const selScreenBBox = selBBox && selection.length ? (() => {
-    const ids = new Set(selection);
-    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
-    for (const it of items.filter((i) => ids.has(i.id))) {
-      const bb = itemScreenBBox(it);
-      left = Math.min(left, bb.left);
-      top = Math.min(top, bb.top);
-      right = Math.max(right, bb.right);
-      bottom = Math.max(bottom, bb.bottom);
-    }
-    return { left, top, right, bottom, cx: (left + right) / 2 };
-  })() : null;
-  const aiMenuPos = selScreenBBox && !editing && !gesturing
-    ? {
-        x: clamp(selScreenBBox.cx, RAIL_W + 120, window.innerWidth - 120),
-        y: selScreenBBox.top < 100 ? selScreenBBox.bottom + 14 : selScreenBBox.top - 14,
-        below: selScreenBBox.top < 100,
-      }
-    : null;
   const cursorClass =
     tool === "hand"
       ? "cur-grab"
       : tool === "highlight"
       ? "cur-highlight"
-      : tool === "text"
-      ? "cur-text"
       : tool === "pen" || tool === "marker"
       ? "cur-draw"
       : tool === "eraser"
@@ -3530,65 +3348,8 @@ export default function App() {
           <button className={"rail-tab" + (railTab === "structures" ? " on" : "")} onClick={() => setRailTab("structures")}>
             structures {structures.length ? `(${structures.length})` : ""}
           </button>
-          <button className={"rail-tab" + (railTab === "lenses" ? " on" : "")} onClick={() => setRailTab("lenses")}>
-            lenses {lenses.length ? `(${lenses.length})` : ""}
-          </button>
         </div>
-        {railTab === "lenses" ? (
-          <>
-            <button
-              className="rail-create"
-              onClick={() => setLensEditor({ id: null, name: "", moveIds: activeLens?.moveIds || [] })}
-            >
-              + lens
-            </button>
-            <button
-              className="rail-create ghost"
-              onClick={() => {
-                const input = document.createElement("input");
-                input.type = "file";
-                input.accept = "application/json";
-                input.onchange = () => input.files?.[0] && importLens(input.files[0]);
-                input.click();
-              }}
-            >
-              ↓ inherit a lens
-            </button>
-            <div className="rail-scroll">
-              {lenses.length === 0 ? (
-                <p className="rail-empty">
-                  A lens is your set of recurring moves — the transformations you keep reaching for.
-                  Create moves in the functions tab (one line), then gather them here. Style is
-                  recurring transformation.
-                </p>
-              ) : (
-                lenses.map((lens) => (
-                  <LensCard
-                    key={lens.id}
-                    lens={lens}
-                    active={lens.id === activeLensId}
-                    opMap={opMap}
-                    lenses={lenses}
-                    comparing={lensCompare?.aId === lens.id && !lensCompare?.bId}
-                    onUse={() => setActiveLensId(lens.id === activeLensId ? null : lens.id)}
-                    onEvolve={() => setLensEditor({ id: lens.id, name: lens.name, moveIds: lens.moveIds || [] })}
-                    onSend={() => exportLens(lens.id)}
-                    onCompare={() => {
-                      if (lensCompare?.aId && lensCompare.aId !== lens.id) {
-                        setLensCompare({ aId: lensCompare.aId, bId: lens.id });
-                      } else {
-                        setLensCompare({ aId: lens.id });
-                        showToast("now pick the lens to compare against");
-                      }
-                    }}
-                    onMergeDrop={(draggedId) => mergeLenses(draggedId, lens.id)}
-                    onDelete={() => deleteLens(lens.id)}
-                  />
-                ))
-              )}
-            </div>
-          </>
-        ) : railTab === "functions" ? (
+        {railTab === "functions" ? (
           <>
             <button className="rail-create" onClick={openCreateFunction}>
               + function
@@ -3613,7 +3374,55 @@ export default function App() {
                 +
               </button>
             </div>
+            <div className="rail-lens-actions">
+              <button
+                className="rail-create ghost"
+                onClick={() => setLensEditor({ id: null, name: "", moveIds: activeLens?.moveIds || [] })}
+              >
+                + lens
+              </button>
+              <button
+                className="rail-create ghost"
+                onClick={() => {
+                  const input = document.createElement("input");
+                  input.type = "file";
+                  input.accept = "application/json";
+                  input.onchange = () => input.files?.[0] && importLens(input.files[0]);
+                  input.click();
+                }}
+              >
+                ↓ inherit
+              </button>
+            </div>
             <div className="rail-scroll">
+              {lenses.length > 0 && (
+                <>
+                  <div className="rail-section">lenses</div>
+                  {lenses.map((lens) => (
+                    <LensCard
+                      key={lens.id}
+                      lens={lens}
+                      active={lens.id === activeLensId}
+                      opMap={opMap}
+                      lenses={lenses}
+                      comparing={lensCompare?.aId === lens.id && !lensCompare?.bId}
+                      onUse={() => setActiveLensId(lens.id === activeLensId ? null : lens.id)}
+                      onEvolve={() => setLensEditor({ id: lens.id, name: lens.name, moveIds: lens.moveIds || [] })}
+                      onSend={() => exportLens(lens.id)}
+                      onCompare={() => {
+                        if (lensCompare?.aId && lensCompare.aId !== lens.id) {
+                          setLensCompare({ aId: lensCompare.aId, bId: lens.id });
+                        } else {
+                          setLensCompare({ aId: lens.id });
+                          showToast("now pick the lens to compare against");
+                        }
+                      }}
+                      onMergeDrop={(draggedId) => mergeLenses(draggedId, lens.id)}
+                      onDelete={() => deleteLens(lens.id)}
+                    />
+                  ))}
+                </>
+              )}
               {moves.length > 0 && (
                 <>
                   <div className="rail-section">your moves</div>
@@ -3681,8 +3490,8 @@ export default function App() {
                   ))}
                 </>
               )}
-              {basics.length === 0 && topFunctions.length === 0 && primitives.length === 0 && (
-                <p className="rail-empty">Tap ↻ to generate functions for your role.</p>
+              {basics.length === 0 && topFunctions.length === 0 && primitives.length === 0 && moves.length === 0 && lenses.length === 0 && (
+                <p className="rail-empty">Tap ↻ to generate functions for your role, or type a move above.</p>
               )}
             </div>
           </>
@@ -3712,13 +3521,10 @@ export default function App() {
         )}
         <JobPanel jobs={jobs} onDismiss={(id) => setJobs((j) => j.filter((x) => x.id !== id))} />
         {railTab === "functions" && (
-          <div className="rail-hint">type a move + enter · drag onto canvas · drop op on op to compound</div>
+          <div className="rail-hint">drag anything onto canvas · drop op on op to compound · lenses merge on drop</div>
         )}
         {railTab === "structures" && (
           <div className="rail-hint">drop selection here to save · drag onto canvas to plant</div>
-        )}
-        {railTab === "lenses" && (
-          <div className="rail-hint">use → your quick palette · drag lens onto lens to merge</div>
         )}
       </aside>
 
@@ -3774,22 +3580,6 @@ export default function App() {
                 />
               );
             })}
-            {linkDraft && (
-              <path
-                d={linkCurvePath(
-                  { x: linkDraft.fromX, y: linkDraft.fromY },
-                  { x: linkDraft.toX, y: linkDraft.toY }
-                )}
-                className="board-link draft"
-                fill="none"
-                stroke={INK}
-                strokeWidth={1.8}
-                strokeOpacity={0.65}
-                strokeDasharray="6 5"
-                strokeLinecap="round"
-                markerEnd="url(#board-link-arrow)"
-              />
-            )}
           </svg>
 
           {/* committed strokes */}
@@ -3938,18 +3728,17 @@ export default function App() {
         ref={inputLayerRef}
         className={"canvas-input-layer " + cursorClass}
         onPointerDown={onPointerDown}
-        onPointerMove={onHoverMove}
-        onPointerLeave={() => hoverIdRef.current && setHoverId(null)}
         onDoubleClick={onDoubleClick}
         onDragOver={(e) => {
           if (
             e.dataTransfer.types.includes(OP_MIME) ||
+            e.dataTransfer.types.includes(LENS_MIME) ||
             e.dataTransfer.types.includes(STRUCT_MIME) ||
             e.dataTransfer.types.includes("Files")
           ) {
             e.preventDefault();
             setDropReady(true);
-            if (e.dataTransfer.types.includes(OP_MIME)) {
+            if (e.dataTransfer.types.includes(OP_MIME) || e.dataTransfer.types.includes(LENS_MIME)) {
               e.dataTransfer.dropEffect = "copy";
               const hit = itemAtPoint(e.clientX, e.clientY);
               setDropTargetId(hit?.id || null);
@@ -3967,6 +3756,11 @@ export default function App() {
           const opId = e.dataTransfer.getData(OP_MIME);
           if (opId) {
             applyOpDrop(opId, { x: e.clientX, y: e.clientY });
+            return;
+          }
+          const lensId = e.dataTransfer.getData(LENS_MIME);
+          if (lensId) {
+            applyLensDrop(lensId, { x: e.clientX, y: e.clientY });
             return;
           }
           const structId = e.dataTransfer.getData(STRUCT_MIME);
@@ -4018,7 +3812,7 @@ export default function App() {
       {/* empty hint */}
       {items.length === 0 && (
         <div className="empty-hint">
-          <p>pick a tool below · or start with a thought</p>
+          <p>double-click to write · drag functions from the rail</p>
           <button type="button" className="starter-btn" onClick={plantStarterThought}>
             ✦ try the highlighter
           </button>
@@ -4039,30 +3833,6 @@ export default function App() {
         <CanvasHud tool={tool} selectionCount={selection.length} imageArmed={imageArmed} />
       )}
 
-      {highlight && !editing && (
-        <HighlightToolbar
-          highlight={highlight}
-          primitives={selectionQuickOps}
-          mergeReady={selection.filter((id) => id !== highlight.itemId).length > 0}
-          onOp={(op) => runHighlightPrimitive(op, highlight)}
-          onDismiss={() => {
-            window.getSelection()?.removeAllRanges();
-            removeHighlightStroke(highlight.strokeId);
-            setHighlight(null);
-          }}
-        />
-      )}
-
-      {branchTarget && !gesturing && (
-        <BranchCompass
-          item={branchTarget}
-          worldToClient={worldToClient}
-          expanded={expandPulse === branchTarget.id}
-          subtle={!selection.includes(branchTarget.id)}
-          onStartDrag={startBranchDrag}
-        />
-      )}
-
       {walking && walkStep && (
         <WalkOverlay
           walk={walking}
@@ -4080,31 +3850,6 @@ export default function App() {
             captureThreadAsOperator(nodeId);
           }}
           onLeave={endWalk}
-        />
-      )}
-
-      {aiMenuPos && !highlight && (
-        <SelectionMenu
-          pos={aiMenuPos}
-          selectionCount={selection.length}
-          quickOps={selectionQuickOps}
-          onRunOp={(op) => runOperator(op, selection, { atClient: { x: aiMenuPos.x, y: aiMenuPos.y } })}
-          onExport={exportSelection}
-          onDelete={deleteSelection}
-          onEdit={
-            selection.length === 1 && items.find((i) => i.id === selection[0])?.type === "text"
-              ? () => setEditing(selection[0])
-              : null
-          }
-          onSaveStructure={() => captureSelectionAsStructure()}
-          onDiscoverSameness={selection.length >= 2 ? runSamenessDiscovery : null}
-          onWalkPath={selection.length === 1 && selItem && isNoteItem(selItem) ? () => walkNode(selItem.id) : null}
-          onSendPath={selection.length === 1 && selItem && isNoteItem(selItem) ? () => sendNodePath(selItem.id) : null}
-          onDistill={
-            selection.length === 1 && selItem && (selItem.via || selItem.bornFrom?.length)
-              ? () => captureThreadAsOperator(selItem.id)
-              : null
-          }
         />
       )}
 
@@ -4166,38 +3911,6 @@ export default function App() {
           onClose={() => setLensCompare(null)}
         />
       )}
-    </div>
-  );
-}
-
-function BranchCompass({ item, worldToClient, expanded, subtle, onStartDrag }) {
-  const c = noteCenter(item);
-  if (!c) return null;
-  const sc = worldToClient(c.x, c.y);
-  const r = expanded ? 68 : 46;
-  return (
-    <div
-      className={"branch-compass" + (expanded ? " expanded" : "") + (subtle ? " subtle" : "")}
-      style={{ left: sc.x, top: sc.y }}
-      onPointerDown={(e) => e.stopPropagation()}
-    >
-      {expanded && <span className="branch-compass-hint">branch</span>}
-      {EXPAND_DIRS.map((dir) => {
-        const px = Math.cos(dir.angle) * r;
-        const py = Math.sin(dir.angle) * r;
-        return (
-          <button
-            key={dir.id}
-            type="button"
-            className="branch-nub"
-            style={{ transform: `translate(calc(-50% + ${px}px), calc(-50% + ${py}px))` }}
-            title={`Branch ${dir.label}`}
-            onPointerDown={(e) => onStartDrag(e, item.id, dir.id)}
-          >
-            <span className="branch-nub-dot" />
-          </button>
-        );
-      })}
     </div>
   );
 }
@@ -4417,13 +4130,13 @@ function CanvasHud({ tool, selectionCount, imageArmed }) {
   if (imageArmed && tool === "image") {
     hint = "Click on the canvas to place your image";
   } else if (tool === "highlight" && selectionCount > 1) {
-    hint = `${selectionCount} ideas selected · highlight text · merge fuses with the other selection`;
+    hint = `${selectionCount} ideas selected · circle to select inside · drag functions from the rail`;
   } else if (selectionCount >= 2 && tool === "select") {
-    hint = `${selectionCount} selected · selection menu → sameness or merge · drag to move`;
+    hint = `${selectionCount} selected · drag to move · drag functions from the rail`;
   } else if (selectionCount > 0 && tool === "select") {
-    hint = `${selectionCount} selected · double-tap to branch · drag nub for arrow · Enter to write`;
+    hint = `${selectionCount} selected · double-click to edit · drag to move`;
   } else if (tool === "highlight") {
-    hint = "Text → primitives · scribble erases · closed circle selects inside · space → clear highlights, back to mouse";
+    hint = "Scribble to erase · closed circle selects inside · space → clear highlights, back to mouse";
   } else if (tool === "select" && selectionCount === 0) {
     hint = meta.hint + " · space → highlighter";
   }
@@ -4501,50 +4214,6 @@ function InputDeck({ tool, imageArmed, canUndo, canRedo, onSelectTool, onPickIma
                 })}
               </div>
             </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function HighlightToolbar({ highlight, primitives, mergeReady, onOp, onDismiss }) {
-  const cx = highlight.rect.left + highlight.rect.width / 2;
-  const above = highlight.rect.top > 100;
-  const style = {
-    left: cx,
-    top: above ? highlight.rect.top - 10 : highlight.rect.bottom + 10,
-    transform: above ? "translate(-50%, -100%)" : "translate(-50%, 0)",
-  };
-  const quote =
-    highlight.quote.length > 48 ? `${highlight.quote.slice(0, 48)}…` : highlight.quote;
-
-  return (
-    <div className="highlight-toolbar" style={style} onPointerDown={(e) => e.stopPropagation()}>
-      <div className="highlight-toolbar-head">
-        <span className="highlight-mark">✦</span>
-        <span className="highlight-quote">"{quote}"</span>
-        <button className="highlight-close" onClick={onDismiss} title="dismiss">
-          ×
-        </button>
-      </div>
-      <div className="highlight-actions">
-        {primitives.map((op) => {
-          const disabled = op.needsSelection >= 2 && !mergeReady;
-          return (
-            <button
-              key={op.id}
-              className="highlight-btn"
-              disabled={disabled}
-              title={
-                disabled
-                  ? "Select another idea first, then highlight for merge"
-                  : op.description || op.name
-              }
-              onClick={() => !disabled && onOp(op)}
-            >
-              {op.name}
-            </button>
           );
         })}
       </div>
@@ -4753,9 +4422,10 @@ function LensCard({ lens, active, opMap, lenses, comparing, onUse, onEvolve, onS
           onMergeDrop(draggedId);
         }
       }}
-      title="drag onto another lens to merge them"
+      title="drag onto canvas to apply · drop onto another lens to merge"
     >
       <div className="lens-card-top">
+        <span className="op-drag-grip" title="drag onto canvas">⠿</span>
         <span className="lens-card-name">{lens.name}</span>
         {active && <span className="lens-card-live">looking through</span>}
       </div>
@@ -4932,106 +4602,6 @@ function escapeHtml(s) {
     .replace(/\n/g, "<br>");
 }
 
-function SelectionMenu({
-  pos,
-  selectionCount,
-  quickOps,
-  onRunOp,
-  onExport,
-  onDelete,
-  onEdit,
-  onSaveStructure,
-  onDiscoverSameness,
-  onWalkPath,
-  onSendPath,
-  onDistill,
-}) {
-  const [open, setOpen] = useState(false);
-  const transform = pos.below ? "translate(-50%, 0)" : "translate(-50%, -100%)";
-  const style = { left: pos.x, top: pos.y, transform };
-
-  if (open) {
-    return (
-      <div className="palette col export-palette" style={style}>
-        <div className="palette-row head">
-          <button className="p-btn ghost" onClick={() => setOpen(false)}>
-            ←
-          </button>
-          <span className="palette-title">export</span>
-        </div>
-        {["txt", "md", "doc", "pdf"].map((fmt) => (
-          <button key={fmt} className="p-btn wide" onClick={() => { onExport(fmt); setOpen(false); }}>
-            {fmt === "doc" ? "Word (.doc)" : fmt === "pdf" ? "PDF (print)" : `.${fmt}`}
-          </button>
-        ))}
-      </div>
-    );
-  }
-
-  return (
-    <div className="palette selection-menu" style={style}>
-      {quickOps.length > 0 && (
-        <div className="selection-ops">
-          {quickOps.map((op) => (
-            <button
-              key={op.id}
-              className="p-btn op-chip"
-              title={op.description || op.name}
-              onClick={() => onRunOp(op)}
-            >
-              {op.name}
-            </button>
-          ))}
-        </div>
-      )}
-      <div className="selection-actions">
-        {onDiscoverSameness && (
-          <>
-            <button className="p-btn sameness" onClick={onDiscoverSameness} title="find shared structure">
-              sameness
-            </button>
-            <span className="p-sep" />
-          </>
-        )}
-        {onWalkPath && (
-          <button className="p-btn walk" onClick={onWalkPath} title="replay how this thought came to be">
-            ⟲ walk
-          </button>
-        )}
-        {onSendPath && (
-          <button className="p-btn" onClick={onSendPath} title="send this thought with its whole journey">
-            ↗ send
-          </button>
-        )}
-        {onDistill && (
-          <button
-            className="p-btn distill"
-            onClick={onDistill}
-            title="capture the thread of transformations behind this node as one reusable operator"
-          >
-            ◈ distill
-          </button>
-        )}
-        <button className="p-btn" onClick={() => setOpen(true)}>
-          export
-        </button>
-        {onEdit && (
-          <button className="p-btn" onClick={onEdit} title="edit note">
-            write
-          </button>
-        )}
-        <button className="p-btn" onClick={onSaveStructure} disabled={!selectionCount} title="save to structures">
-          save
-        </button>
-        <span className="p-sep" />
-        <button className="p-btn danger" onClick={onDelete} title="delete selection">
-          ⌫
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function Onboarding({ state, onStart, onSkip, onClose }) {
   const [custom, setCustom] = useState("");
 
@@ -5138,9 +4708,23 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
   const [prose, setProse] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [treeExpanded, setTreeExpanded] = useState(() => new Set(sourceRoot?.id ? [sourceRoot.id] : []));
 
   const draftMap = useMemo(() => Object.fromEntries(draftOps.map((o) => [o.id, o])), [draftOps]);
   const rootDraft = rootId ? draftMap[rootId] : null;
+
+  useEffect(() => {
+    if (rootId) setTreeExpanded((prev) => new Set([...prev, rootId]));
+  }, [rootId]);
+
+  function toggleTreeNode(id) {
+    setTreeExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   function patchOp(id, patch) {
     setDraftOps((ops) => ops.map((o) => (o.id === id ? { ...o, ...patch } : o)));
@@ -5211,7 +4795,7 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
             <h3>{isCreate ? "create function" : "edit function"}</h3>
             {rootDraft && (
               <p className="fn-head-sub">
-                Full structure — every step and prompt visible. Click a step to focus it for AI edits.
+                Expand steps to edit details. Click a step to focus it for AI edits.
               </p>
             )}
           </div>
@@ -5231,6 +4815,8 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
                 onFocus={setFocusId}
                 onPatch={patchOp}
                 pathLabels={[]}
+                treeExpanded={treeExpanded}
+                onToggleExpand={toggleTreeNode}
               />
             ) : (
               <div className="fn-create-panel">
@@ -5317,12 +4903,14 @@ function FunctionEditor({ editor, opMap, operators, onClose, onSaveTree, onSaveM
   );
 }
 
-function FunctionTreeNode({ op, draftMap, depth, focusId, onFocus, onPatch, pathLabels }) {
+function FunctionTreeNode({ op, draftMap, depth, focusId, onFocus, onPatch, pathLabels, treeExpanded, onToggleExpand }) {
   const cardRef = useRef(null);
   const isPipeline = op.kind === "pipeline";
   const steps =
     isPipeline && op.steps ? op.steps.map((id) => draftMap[id]).filter(Boolean) : [];
   const isFocused = focusId === op.id;
+  const isOpen = treeExpanded.has(op.id);
+  const hasBody = isPipeline || !!(op.description || op.prompt);
   const promptRows = Math.min(14, Math.max(5, ((op.prompt || "").split("\n").length || 0) + 2));
 
   useEffect(() => {
@@ -5334,65 +4922,93 @@ function FunctionTreeNode({ op, draftMap, depth, focusId, onFocus, onPatch, path
   return (
     <div
       ref={cardRef}
-      className={"fn-tree-card" + (isFocused ? " focused" : "") + (isPipeline ? " pipeline" : " leaf")}
-      style={{ marginLeft: depth * 20 }}
-      onClick={() => onFocus(op.id)}
+      className={"fn-tree-card" + (isFocused ? " focused" : "") + (isPipeline ? " pipeline" : " leaf") + (isOpen ? " open" : " collapsed")}
+      style={{ marginLeft: depth * 16 }}
     >
       <div className="fn-tree-card-head">
-        <span className={"fn-tree-badge" + (isPipeline ? " pipeline" : " leaf")}>
-          {isPipeline ? `pipeline · ${steps.length} step${steps.length === 1 ? "" : "s"}` : "leaf"}
-        </span>
-        {pathLabels.length > 0 && (
-          <span className="fn-tree-path">{pathLabels.join(" → ")}</span>
-        )}
+        <button
+          type="button"
+          className={"fn-tree-toggle" + (hasBody || steps.length ? "" : " hidden")}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleExpand(op.id);
+          }}
+          aria-expanded={isOpen}
+          title={isOpen ? "collapse" : "expand"}
+        >
+          {isOpen ? "▾" : "▸"}
+        </button>
+        <button
+          type="button"
+          className="fn-tree-summary"
+          onClick={() => onFocus(op.id)}
+        >
+          <span className={"fn-tree-badge" + (isPipeline ? " pipeline" : " leaf")}>
+            {isPipeline ? `${steps.length} step${steps.length === 1 ? "" : "s"}` : "leaf"}
+          </span>
+          <span className="fn-tree-name-preview">{op.name || "unnamed step"}</span>
+          {!isOpen && op.description && (
+            <span className="fn-tree-desc-preview">{op.description}</span>
+          )}
+        </button>
       </div>
 
-      <label className="fn-tree-label">name</label>
-      <input
-        className="fn-tree-input"
-        value={op.name || ""}
-        onChange={(e) => onPatch(op.id, { name: e.target.value })}
-        onClick={(e) => e.stopPropagation()}
-        placeholder="descriptive step name"
-      />
+      {isOpen && (
+        <div className="fn-tree-body" onClick={() => onFocus(op.id)}>
+          {pathLabels.length > 0 && (
+            <span className="fn-tree-path">{pathLabels.join(" → ")}</span>
+          )}
 
-      <label className="fn-tree-label">description</label>
-      <input
-        className="fn-tree-input"
-        value={op.description || ""}
-        onChange={(e) => onPatch(op.id, { description: e.target.value })}
-        onClick={(e) => e.stopPropagation()}
-        placeholder="what goes in, what comes out"
-      />
-
-      {!isPipeline && (
-        <>
-          <label className="fn-tree-label">prompt</label>
-          <textarea
-            className="fn-tree-prompt-input"
-            rows={promptRows}
-            value={op.prompt || ""}
-            onChange={(e) => onPatch(op.id, { prompt: e.target.value })}
+          <label className="fn-tree-label">name</label>
+          <input
+            className="fn-tree-input"
+            value={op.name || ""}
+            onChange={(e) => onPatch(op.id, { name: e.target.value })}
             onClick={(e) => e.stopPropagation()}
-            placeholder="GOAL, INPUT, PROCESS, OUTPUT FORMAT, QUALITY BAR…"
+            placeholder="descriptive step name"
           />
-        </>
-      )}
 
-      {steps.length > 0 && (
-        <div className="fn-tree-children">
-          {steps.map((step, i) => (
-            <FunctionTreeNode
-              key={step.id}
-              op={step}
-              draftMap={draftMap}
-              depth={depth + 1}
-              focusId={focusId}
-              onFocus={onFocus}
-              onPatch={onPatch}
-              pathLabels={[...pathLabels, step.name || `step ${i + 1}`]}
-            />
-          ))}
+          <label className="fn-tree-label">description</label>
+          <input
+            className="fn-tree-input"
+            value={op.description || ""}
+            onChange={(e) => onPatch(op.id, { description: e.target.value })}
+            onClick={(e) => e.stopPropagation()}
+            placeholder="what goes in, what comes out"
+          />
+
+          {!isPipeline && (
+            <>
+              <label className="fn-tree-label">prompt</label>
+              <textarea
+                className="fn-tree-prompt-input"
+                rows={promptRows}
+                value={op.prompt || ""}
+                onChange={(e) => onPatch(op.id, { prompt: e.target.value })}
+                onClick={(e) => e.stopPropagation()}
+                placeholder="GOAL, INPUT, PROCESS, OUTPUT FORMAT, QUALITY BAR…"
+              />
+            </>
+          )}
+
+          {steps.length > 0 && (
+            <div className="fn-tree-children">
+              {steps.map((step, i) => (
+                <FunctionTreeNode
+                  key={step.id}
+                  op={step}
+                  draftMap={draftMap}
+                  depth={depth + 1}
+                  focusId={focusId}
+                  onFocus={onFocus}
+                  onPatch={onPatch}
+                  pathLabels={[...pathLabels, step.name || `step ${i + 1}`]}
+                  treeExpanded={treeExpanded}
+                  onToggleExpand={onToggleExpand}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

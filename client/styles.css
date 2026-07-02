@@ -147,6 +147,15 @@ body {
   font-size: 12px;
   padding: 7px;
 }
+.rail-lens-actions {
+  display: flex;
+  gap: 6px;
+  padding: 0 10px 8px;
+}
+.rail-lens-actions .rail-create {
+  flex: 1;
+  margin: 0;
+}
 .move-quick-add {
   display: flex;
   gap: 6px;
@@ -2264,16 +2273,18 @@ body {
 }
 .fn-tree-card {
   border: 1px solid var(--line-2);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--card);
-  padding: 14px 16px 16px;
-  margin-bottom: 12px;
-  cursor: pointer;
+  padding: 0;
+  margin-bottom: 8px;
   transition: border-color 0.12s, box-shadow 0.12s;
+  overflow: hidden;
+}
+.fn-tree-card.collapsed {
+  background: color-mix(in srgb, var(--card) 96%, var(--paper));
 }
 .fn-tree-card.pipeline {
   border-style: dashed;
-  background: color-mix(in srgb, var(--card) 92%, var(--paper));
 }
 .fn-tree-card.focused {
   border-color: var(--ink);
@@ -2281,10 +2292,63 @@ body {
 }
 .fn-tree-card-head {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: stretch;
+  gap: 0;
+  margin-bottom: 0;
+}
+.fn-tree-toggle {
+  flex-shrink: 0;
+  width: 36px;
+  border: none;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  font-size: 11px;
+}
+.fn-tree-toggle.hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+.fn-tree-toggle:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--paper) 60%, transparent);
+}
+.fn-tree-summary {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex-wrap: wrap;
-  margin-bottom: 10px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.fn-tree-summary:hover {
+  background: color-mix(in srgb, var(--paper) 40%, transparent);
+}
+.fn-tree-name-preview {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.fn-tree-desc-preview {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fn-tree-body {
+  padding: 12px 14px 14px;
+  border-top: 1px solid var(--line);
 }
 .fn-tree-badge {
   font-size: 10px;
