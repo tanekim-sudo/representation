@@ -47,6 +47,7 @@ const LENS_MIME = "application/lens-lens";
 const LENSES_KEY = "lens.lenses.v1";
 const ACTIVE_LENS_KEY = "lens.activeLens.v1";
 const COMBINE_THRESHOLD = 14; // px moved before drop-on-item triggers combine
+const DROP_TARGET_PAD = 72; // px — generous snap when dragging functions onto ideas
 
 const INK = "#f0f0f0";
 const PEN_W = 2.4; // world units
@@ -3468,6 +3469,63 @@ export default function App() {
     return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
   }
 
+  function pointInExpandedRect(cx, cy, bb, pad) {
+    return cx >= bb.left - pad && cx <= bb.right + pad && cy >= bb.top - pad && cy <= bb.bottom + pad;
+  }
+
+  function distToRect(cx, cy, bb) {
+    const dx = Math.max(bb.left - cx, 0, cx - bb.right);
+    const dy = Math.max(bb.top - cy, 0, cy - bb.bottom);
+    return Math.hypot(dx, dy);
+  }
+
+  /** For drag-drop: expanded hit targets + nearest-item snap (easier than precise aim). */
+  function itemAtPointForDrop(cx, cy) {
+    const exact = itemAtPoint(cx, cy);
+    if (exact && exact.type !== "link") return exact;
+
+    const list = itemsRef.current;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const it = list[i];
+      if (it.type !== "text" && it.type !== "image") continue;
+      const bb = itemScreenBBox(it);
+      if (pointInExpandedRect(cx, cy, bb, DROP_TARGET_PAD)) return it;
+    }
+
+    for (let i = list.length - 1; i >= 0; i--) {
+      const it = list[i];
+      if (it.type !== "stroke") continue;
+      const bb = itemScreenBBox(it);
+      if (pointInExpandedRect(cx, cy, bb, DROP_TARGET_PAD * 0.6)) return it;
+      for (let k = 1; k < it.points.length; k++) {
+        const a = worldToClient(it.points[k - 1].x, it.points[k - 1].y);
+        const b = worldToClient(it.points[k].x, it.points[k].y);
+        if (distToSeg(cx, cy, a.x, a.y, b.x, b.y) <= Math.max(16, it.width * camRef.current.scale * 1.2)) return it;
+      }
+    }
+
+    let best = null;
+    let bestDist = DROP_TARGET_PAD * 1.25;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const it = list[i];
+      if (it.type !== "text" && it.type !== "image") continue;
+      const d = distToRect(cx, cy, itemScreenBBox(it));
+      if (d < bestDist) {
+        bestDist = d;
+        best = it;
+      }
+    }
+    return best;
+  }
+
+  function targetIdsFromItem(it) {
+    if (!it) return [];
+    if (it.groupId) {
+      return itemsRef.current.filter((i) => i.groupId === it.groupId).map((i) => i.id);
+    }
+    return [it.id];
+  }
+
   function itemAtPoint(cx, cy, excludeIds = null) {
     const list = itemsRef.current;
     for (let i = list.length - 1; i >= 0; i--) {
@@ -3497,19 +3555,18 @@ export default function App() {
 
   function resolveTargetIds(atClient) {
     const sel = selRef.current;
-    if (sel.length > 1 && atClient) {
-      const hit = itemAtPoint(atClient.x, atClient.y);
-      if (hit && sel.includes(hit.id)) return sel;
-      return sel;
-    }
     if (!atClient) return sel.length ? sel : [];
-    const hit = itemAtPoint(atClient.x, atClient.y);
-    if (!hit) return [];
-    const it = itemsRef.current.find((i) => i.id === hit.id);
-    if (it?.groupId) {
-      return itemsRef.current.filter((i) => i.groupId === it.groupId).map((i) => i.id);
+
+    const hit = itemAtPointForDrop(atClient.x, atClient.y);
+    if (hit) {
+      const ids = targetIdsFromItem(hit);
+      if (sel.length > 1 && ids.some((id) => sel.includes(id))) return sel;
+      return ids;
     }
-    return [hit.id];
+
+    // Near miss: if something is selected, apply to selection without pixel-perfect aim
+    if (sel.length) return sel;
+    return [];
   }
 
   function selectionWorldBBoxForIds(itemIds) {
@@ -4215,7 +4272,7 @@ export default function App() {
         </button>
       </aside>
 
-      <div className={"board-main" + (dropReady ? " drop-ready" : "") + (editing ? " editing-text" : "")}>
+      <div className={"board-main" + (dropReady ? " drop-ready" : "") + (editing ? " editing-text" : "") + (dropTargetId ? " drop-has-target" : "")}>
       <div
         ref={viewportRef}
         className="viewport"
@@ -4353,7 +4410,7 @@ export default function App() {
                 <img
                   key={it.id}
                   data-item={it.id}
-                  className={"board-img" + (selection.includes(it.id) ? " sel" : "") + (dropTargetId === it.id ? " drop-target" : "")}
+                  className={"board-img" + (selection.includes(it.id) ? " sel" : "") + (dropTargetId === it.id ? " drop-target" : "") + (dropReady && dropTargetId === it.id ? " drop-magnetic" : "")}
                   src={it.src}
                   style={{ ...itemStyle(it), width: it.w, height: it.h }}
                   alt=""
@@ -4364,6 +4421,7 @@ export default function App() {
                   item={it}
                   selected={selection.includes(it.id)}
                   dropTarget={dropTargetId === it.id}
+                  dropMagnetic={dropReady && dropTargetId === it.id}
                   editing={editing === it.id}
                   editClickRef={editClickRef}
                   onCommit={(text) => commitEdit(it.id, text)}
@@ -4416,14 +4474,19 @@ export default function App() {
             setDropReady(true);
             if (e.dataTransfer.types.includes(OP_MIME) || e.dataTransfer.types.includes(LENS_MIME)) {
               e.dataTransfer.dropEffect = "copy";
-              const hit = itemAtPoint(e.clientX, e.clientY);
-              setDropTargetId(hit?.id || null);
+              const hit = itemAtPointForDrop(e.clientX, e.clientY);
+              const sel = selRef.current;
+              if (hit) setDropTargetId(hit.id);
+              else if (sel.length === 1) setDropTargetId(sel[0]);
+              else setDropTargetId(null);
             }
           }
         }}
-        onDragLeave={() => {
-          setDropReady(false);
-          setDropTargetId(null);
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget)) {
+            setDropReady(false);
+            setDropTargetId(null);
+          }
         }}
         onDrop={(e) => {
           setDropReady(false);
@@ -4735,7 +4798,7 @@ function WalkOverlay({ walk, stepIndex, step, rects, onPrev, onNext, onBranch, o
   );
 }
 
-function BoardText({ item, selected, dropTarget, editing, editClickRef, onCommit }) {
+function BoardText({ item, selected, dropTarget, dropMagnetic, editing, editClickRef, onCommit }) {
   const ref = useRef(null);
   const seeded = useRef(false);
 
@@ -4803,6 +4866,7 @@ function BoardText({ item, selected, dropTarget, editing, editClickRef, onCommit
         "board-text" +
         (selected ? " sel" : "") +
         (dropTarget ? " drop-target" : "") +
+        (dropMagnetic ? " drop-magnetic" : "") +
         (item.portal ? " portal" : "")
       }
       data-item={item.id}

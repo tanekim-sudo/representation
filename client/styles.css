@@ -111,6 +111,10 @@ body {
 }
 .board-main.drop-ready .canvas-input-layer {
   box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--ink) 18%, transparent);
+  cursor: copy;
+}
+.board-main.drop-has-target .canvas-input-layer {
+  box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--highlight) 45%, transparent);
 }
 
 .rail-head {
@@ -509,6 +513,14 @@ body {
 .board-img.drop-target {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ink) 35%, transparent);
   background: color-mix(in srgb, var(--ink) 4%, var(--card));
+}
+.board-text.drop-magnetic,
+.board-img.drop-magnetic {
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--highlight) 70%, transparent),
+    0 0 24px color-mix(in srgb, var(--highlight) 25%, transparent);
+  outline: 2px dashed color-mix(in srgb, var(--highlight) 55%, transparent);
+  outline-offset: 6px;
 }
 .export-palette .p-btn.wide {
   text-align: left;
