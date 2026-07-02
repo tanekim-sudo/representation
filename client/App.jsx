@@ -1122,6 +1122,70 @@ function bboxesOverlap(a, b) {
   return a.minx <= b.maxx && a.maxx >= b.minx && a.miny <= b.maxy && a.maxy >= b.miny;
 }
 
+const SPAWN_GAP = 48;
+const SPAWN_PAD = 12;
+
+function unionBBoxes(boxes) {
+  if (!boxes?.length) return null;
+  return {
+    minx: Math.min(...boxes.map((b) => b.minx)),
+    miny: Math.min(...boxes.map((b) => b.miny)),
+    maxx: Math.max(...boxes.map((b) => b.maxx)),
+    maxy: Math.max(...boxes.map((b) => b.maxy)),
+  };
+}
+
+function textSpawnBBox(x, y, w, text) {
+  const h = itemHeight({ type: "text", text, w });
+  return {
+    minx: x - SPAWN_PAD,
+    miny: y - SPAWN_PAD,
+    maxx: x + w + SPAWN_PAD,
+    maxy: y + h + SPAWN_PAD,
+  };
+}
+
+function bboxOverlapsItems(bb, items, excludeIds) {
+  for (const it of items) {
+    if (excludeIds?.has(it.id)) continue;
+    if (it.type === "link") continue;
+    const ob = itemWorldBBox(it);
+    if (!ob) continue;
+    const padded = {
+      minx: ob.minx - SPAWN_PAD,
+      miny: ob.miny - SPAWN_PAD,
+      maxx: ob.maxx + SPAWN_PAD,
+      maxy: ob.maxy + SPAWN_PAD,
+    };
+    if (bboxesOverlap(bb, padded)) return true;
+  }
+  return false;
+}
+
+/** Preferred right, then below; spiral outward until bbox is clear. */
+function findClearSpawnPosition(anchorBox, w, text, items, excludeIds, placedSoFar = []) {
+  const occupancy = [...items, ...placedSoFar];
+  const h = itemHeight({ type: "text", text, w });
+  const bases = [
+    { x: anchorBox.maxx + SPAWN_GAP, y: anchorBox.miny, fromDir: "se" },
+    { x: anchorBox.minx, y: anchorBox.maxy + SPAWN_GAP, fromDir: "s" },
+    { x: anchorBox.maxx + SPAWN_GAP, y: anchorBox.maxy + SPAWN_GAP, fromDir: "se" },
+    { x: anchorBox.minx - w - SPAWN_GAP, y: anchorBox.miny, fromDir: "sw" },
+    { x: anchorBox.minx, y: anchorBox.miny - h - SPAWN_GAP, fromDir: "n" },
+  ];
+  for (let ring = 0; ring < 24; ring++) {
+    for (const base of bases) {
+      const x = base.x + (ring % 4) * (SPAWN_GAP * 0.75);
+      const y = base.y + Math.floor(ring / 4) * (SPAWN_GAP * 0.75);
+      const bb = textSpawnBBox(x, y, w, text);
+      if (!bboxOverlapsItems(bb, occupancy, excludeIds)) {
+        return { x, y, fromDir: base.fromDir };
+      }
+    }
+  }
+  return { x: anchorBox.maxx + SPAWN_GAP * 3, y: anchorBox.miny, fromDir: "se" };
+}
+
 function sampleStrokePoints(points) {
   const samples = [];
   for (let i = 0; i < points.length; i++) {
@@ -2121,63 +2185,93 @@ export default function App() {
     const idSet = new Set(sourceIds || []);
     const sel = itemsRef.current.filter((it) => idSet.has(it.id));
     const boxes = sel.map(itemWorldBBox).filter(Boolean);
-    const cx = atWorld?.x ?? (boxes.length ? Math.max(...boxes.map((b) => b.maxx)) + 48 : viewportCenterWorld().x);
-    const cy = atWorld?.y ?? (boxes.length ? Math.min(...boxes.map((b) => b.miny)) : viewportCenterWorld().y);
+    const anchor = unionBBoxes(boxes) || (atWorld
+      ? { minx: atWorld.x, miny: atWorld.y, maxx: atWorld.x + 280, maxy: atWorld.y + 80 }
+      : null);
+    const fallback = anchor || (() => {
+      const c = viewportCenterWorld();
+      return { minx: c.x - 140, miny: c.y - 40, maxx: c.x + 140, maxy: c.y + 40 };
+    })();
     const n = portals.length;
-    const radius = 100 + n * 18;
     const newIds = [];
     const newItems = [];
+    const newLinks = [];
+    const placedSoFar = [];
     for (let i = 0; i < n; i++) {
       const portal = portals[i];
       const text = portalDisplayText(portal);
       const clean = stripMd(text).trim();
       if (!clean) continue;
-      const spread = Math.min(Math.PI * 0.85, Math.max(Math.PI / 3, n * 0.28));
-      const angle = -spread / 2 + (n === 1 ? 0 : (i / (n - 1)) * spread);
-      const x = cx + Math.cos(angle) * radius;
-      const y = cy + Math.sin(angle) * radius + i * 8;
+      const w = Math.min(480, Math.max(240, Math.round(clean.length * 0.45 + 180)));
+      const { x, y, fromDir } = findClearSpawnPosition(fallback, w, clean, itemsRef.current, idSet, placedSoFar);
       const id = uid();
       newIds.push(id);
-      const w = Math.min(480, Math.max(240, Math.round(clean.length * 0.45 + 180)));
-      newItems.push(
-        normalizeItem({
-          id,
-          type: "text",
-          x,
-          y,
-          text: clean,
-          w,
-          bornFrom: sourceIds || [],
-          portal: !!portal.domain,
-        })
-      );
+      const item = normalizeItem({
+        id,
+        type: "text",
+        x,
+        y,
+        text: clean,
+        w,
+        bornFrom: sourceIds || [],
+        portal: !!portal.domain,
+      });
+      newItems.push(item);
+      placedSoFar.push(item);
+      for (const sid of sourceIds || []) {
+        newLinks.push(makeBoardLink(sid, id, fromDir));
+      }
     }
     if (newItems.length) {
-      setItems((arr) => [...arr, ...newItems]);
+      setItems((arr) => [...arr, ...newLinks, ...newItems]);
       setSelection(newIds);
     }
     return newIds;
   }
 
+  function makeBoardLink(fromId, toId, fromDir = null) {
+    return normalizeItem({ id: uid(), type: "link", fromId, toId, fromDir });
+  }
+
+  function sourceAnchorBox(sourceIds, fallbackWorld) {
+    const idSet = new Set(sourceIds || []);
+    const boxes = itemsRef.current.filter((it) => idSet.has(it.id)).map(itemWorldBBox).filter(Boolean);
+    if (boxes.length) return unionBBoxes(boxes);
+    if (fallbackWorld) {
+      return {
+        minx: fallbackWorld.x,
+        miny: fallbackWorld.y,
+        maxx: fallbackWorld.x + 280,
+        maxy: fallbackWorld.y + 80,
+      };
+    }
+    const c = viewportCenterWorld();
+    return { minx: c.x - 140, miny: c.y - 40, maxx: c.x + 140, maxy: c.y + 40 };
+  }
+
   function spawnMultipleObjects(texts, sourceIds, atWorld, via = null) {
     const idSet = new Set(sourceIds || []);
-    const sel = itemsRef.current.filter((it) => idSet.has(it.id));
-    const boxes = sel.map(itemWorldBBox).filter(Boolean);
-    let x = atWorld?.x ?? (boxes.length ? Math.max(...boxes.map((b) => b.maxx)) + 48 : viewportCenterWorld().x);
-    let y = atWorld?.y ?? (boxes.length ? Math.min(...boxes.map((b) => b.miny)) : viewportCenterWorld().y);
+    const anchor = sourceAnchorBox(sourceIds, sourceIds?.length ? null : atWorld);
     const newIds = [];
     const newItems = [];
+    const newLinks = [];
+    const placedSoFar = [];
     for (const t of texts) {
       const clean = stripMd(t).trim();
       if (!clean) continue;
       const id = uid();
       newIds.push(id);
       const w = Math.min(520, Math.max(260, Math.round(clean.length * 0.5 + 180)));
-      newItems.push(normalizeItem({ id, type: "text", x, y, text: clean, w, bornFrom: sourceIds || [], via }));
-      y += Math.max(80, Math.min(200, clean.length * 0.3 + 60));
+      const { x, y, fromDir } = findClearSpawnPosition(anchor, w, clean, itemsRef.current, idSet, placedSoFar);
+      const item = normalizeItem({ id, type: "text", x, y, text: clean, w, bornFrom: sourceIds || [], via });
+      newItems.push(item);
+      placedSoFar.push(item);
+      for (const sid of sourceIds || []) {
+        newLinks.push(makeBoardLink(sid, id, fromDir));
+      }
     }
     if (newItems.length) {
-      setItems((arr) => [...arr, ...newItems]);
+      setItems((arr) => [...arr, ...newLinks, ...newItems]);
       setSelection(newIds);
     }
     return newIds;
@@ -3586,25 +3680,13 @@ export default function App() {
     const clean = stripMd(text || "").trim();
     if (!clean) return null;
     const idSet = new Set(sourceIds || []);
-    const sel = itemsRef.current.filter((it) => idSet.has(it.id));
-    const boxes = sel.map(itemWorldBBox).filter(Boolean);
-    let x;
-    let y;
-    if (atWorld) {
-      x = atWorld.x;
-      y = atWorld.y;
-    } else if (boxes.length) {
-      x = Math.max(...boxes.map((b) => b.maxx)) + 48;
-      y = Math.min(...boxes.map((b) => b.miny));
-    } else {
-      const c = viewportCenterWorld();
-      x = c.x;
-      y = c.y;
-    }
-    const id = uid();
     const w = Math.min(560, Math.max(280, Math.round(clean.length * 0.5 + 200)));
+    const anchor = sourceAnchorBox(sourceIds, sourceIds?.length ? null : atWorld);
+    const { x, y, fromDir } = findClearSpawnPosition(anchor, w, clean, itemsRef.current, idSet);
+    const id = uid();
     const item = normalizeItem({ id, type: "text", x, y, text: clean, w, bornFrom: sourceIds || [], via });
-    setItems((arr) => [...arr, item]);
+    const links = (sourceIds || []).map((sid) => makeBoardLink(sid, id, fromDir));
+    setItems((arr) => [...arr, ...links, item]);
     setSelection([id]);
     return id;
   }
