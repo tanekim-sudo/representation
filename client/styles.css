@@ -1,26 +1,26 @@
 :root {
-  /* chalkboard palette */
-  --paper: #2d4a3e;
-  --paper-deep: #1a2e1a;
-  --card: #243832;
-  --card-edge: #3d3028;
-  --ink: #f5f0e8;
-  --ink-2: #d4cfc4;
-  --faint: #8a9588;
-  --line: rgba(245, 240, 232, 0.10);
-  --line-2: rgba(245, 240, 232, 0.16);
-  --notebook-line: rgba(245, 240, 232, 0.05);
-  --notebook-margin: rgba(232, 196, 140, 0.22);
-  --chalk-yellow: #e8d878;
-  --chalk-yellow-deep: #c9a227;
-  --chalk-yellow-muted: #b8a860;
-  --chalk-yellow-text: #e8d878;
-  --chalk-yellow-dark: #3d3410;
-  --chalk-pink: #d4a0a0;
-  --chalk-danger: #e88878;
-  --chalk-glow: rgba(245, 240, 232, 0.12);
-  --shadow-soft: rgba(0, 0, 0, 0.22);
-  --shadow-chalk: rgba(245, 240, 232, 0.06);
+  /* classic black chalkboard + white chalk */
+  --paper: #111111;
+  --paper-deep: #0d0d0d;
+  --card: #1c1c1c;
+  --card-edge: #141414;
+  --ink: #f0f0f0;
+  --ink-2: #e0e0e0;
+  --faint: #888888;
+  --line: rgba(240, 240, 240, 0.10);
+  --line-2: rgba(240, 240, 240, 0.16);
+  --notebook-line: rgba(240, 240, 240, 0.05);
+  --notebook-margin: rgba(240, 240, 240, 0.08);
+  --chalk-yellow: #f5e6a3;
+  --chalk-yellow-deep: #e8d878;
+  --chalk-yellow-muted: #a8a080;
+  --chalk-yellow-text: #f5e6a3;
+  --chalk-yellow-dark: #4a4530;
+  --chalk-pink: #b8b0b0;
+  --chalk-danger: #c8b0a8;
+  --chalk-glow: rgba(240, 240, 240, 0.12);
+  --shadow-soft: rgba(0, 0, 0, 0.35);
+  --shadow-chalk: rgba(240, 240, 240, 0.06);
   --rail-w: 280px;
   --sans: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --serif: "Source Serif 4", Georgia, "Times New Roman", serif;
@@ -41,8 +41,8 @@ body,
 body {
   background: var(--paper-deep);
   background-image:
-    radial-gradient(ellipse at 20% 15%, rgba(45, 74, 62, 0.85) 0%, transparent 55%),
-    radial-gradient(ellipse at 80% 85%, rgba(26, 46, 26, 0.75) 0%, transparent 50%);
+    radial-gradient(ellipse at 20% 15%, rgba(255, 255, 255, 0.03) 0%, transparent 55%),
+    radial-gradient(ellipse at 80% 85%, rgba(0, 0, 0, 0.45) 0%, transparent 50%);
   color: var(--ink);
   font-family: var(--sans);
   font-size: 14px;
@@ -72,7 +72,7 @@ body {
 }
 .board-rail.drop-over {
   background: color-mix(in srgb, var(--chalk-yellow) 14%, var(--card-edge));
-  box-shadow: inset 0 0 0 2px rgba(232, 216, 120, 0.45);
+  box-shadow: inset 0 0 0 2px rgba(245, 230, 163, 0.45);
 }
 
 .rail-tabs {
@@ -703,7 +703,7 @@ body {
 }
 .xform-outline-screen {
   position: fixed;
-  border: 1.5px dashed rgba(245, 240, 232, 0.42);
+  border: 1.5px dashed rgba(240, 240, 240, 0.42);
   border-radius: 3px;
   box-shadow: 0 0 8px var(--chalk-glow);
   pointer-events: none;
@@ -779,7 +779,7 @@ body {
   cursor: grab;
 }
 .cur-highlight {
-  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Crect x='4' y='14' width='14' height='6' rx='2' fill='%23e8d878' opacity='0.85'/%3E%3Cpath d='M16 8 L20 4 L22 6 L18 10 Z' fill='%23c9a227'/%3E%3C/svg%3E") 4 20, crosshair;
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Crect x='4' y='14' width='14' height='6' rx='2' fill='%23f5e6a3' opacity='0.85'/%3E%3Cpath d='M16 8 L20 4 L22 6 L18 10 Z' fill='%23e8d878'/%3E%3C/svg%3E") 4 20, crosshair;
 }
 
 .world {
@@ -900,7 +900,7 @@ body {
 .op-card.compose-over {
   outline: 2px dashed var(--chalk-yellow-deep);
   outline-offset: 2px;
-  background: rgba(232, 216, 120, 0.12);
+  background: rgba(245, 230, 163, 0.12);
 }
 .op-card-lineage {
   display: block;
@@ -925,7 +925,7 @@ body {
 .lens-card.merge-over {
   outline: 2px dashed var(--chalk-yellow-deep);
   outline-offset: 2px;
-  background: rgba(232, 216, 120, 0.12);
+  background: rgba(245, 230, 163, 0.12);
 }
 .lens-card.comparing {
   outline: 2px solid color-mix(in srgb, var(--ink) 35%, transparent);
@@ -1235,7 +1235,7 @@ body {
   color: var(--chalk-yellow-muted);
 }
 .walk-btn.branch:hover {
-  background: rgba(232, 216, 120, 0.18);
+  background: rgba(245, 230, 163, 0.18);
 }
 .walk-count {
   font-size: 12px;
@@ -1332,14 +1332,14 @@ body {
     background 0.15s ease;
 }
 .board-text.sel {
-  background: rgba(245, 240, 232, 0.05);
-  border-color: rgba(245, 240, 232, 0.22);
+  background: rgba(240, 240, 240, 0.05);
+  border-color: rgba(240, 240, 240, 0.22);
   box-shadow: 0 0 10px var(--chalk-glow);
 }
 .board-text.editing {
   outline: none;
-  background: rgba(26, 46, 26, 0.72);
-  border: 1px dashed rgba(245, 240, 232, 0.28);
+  background: rgba(0, 0, 0, 0.75);
+  border: 1px dashed rgba(240, 240, 240, 0.28);
   box-shadow: 0 0 12px var(--chalk-glow);
   cursor: text;
   min-width: 120px;
@@ -1360,7 +1360,7 @@ body {
 /* multi-selection bounds */
 .sel-box {
   position: absolute;
-  border: 1px dashed rgba(245, 240, 232, 0.35);
+  border: 1px dashed rgba(240, 240, 240, 0.35);
   border-radius: 4px;
   pointer-events: none;
   box-shadow: 0 0 8px var(--chalk-glow);
@@ -1370,7 +1370,7 @@ body {
 .lasso {
   position: absolute;
   border: 1px dashed var(--ink);
-  background: rgba(245, 240, 232, 0.04);
+  background: rgba(240, 240, 240, 0.04);
   border-radius: 3px;
   pointer-events: none;
   z-index: 4;
