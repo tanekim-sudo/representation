@@ -138,6 +138,33 @@ body {
   border-color: var(--ink);
   color: var(--ink);
 }
+.rail-fresh {
+  display: block;
+  width: calc(100% - 20px);
+  margin: 6px 10px 12px;
+  border: none;
+  background: transparent;
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: center;
+}
+.rail-fresh:hover {
+  color: var(--chalk-danger);
+  background: color-mix(in srgb, var(--chalk-danger) 6%, transparent);
+}
+.modal-sub {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.fresh-modal .modal-foot {
+  justify-content: flex-end;
+}
 .rail-create {
   display: block;
   margin: 10px 10px 6px;

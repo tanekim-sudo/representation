@@ -223,6 +223,25 @@ function migrateOperators(ops) {
 
 const ONBOARDED_KEY = "lens.onboarded.v1";
 
+const LENS_STORAGE_KEYS = [
+  ITEMS_KEY,
+  CAMERA_KEY,
+  OPERATORS_KEY,
+  LEGACY_OPERATORS_KEY,
+  STRUCTURES_KEY,
+  STRUCTSEQ_KEY,
+  OLD_NODES_KEY,
+  ARTIFACT_KEY,
+  OLD_SEEDS_KEY,
+  LENSES_KEY,
+  ACTIVE_LENS_KEY,
+  ONBOARDED_KEY,
+];
+
+function freshOperators() {
+  return migrateOperators(migrateOperatorStore(null));
+}
+
 const ROLES = [
   "investor",
   "founder",
@@ -1515,6 +1534,7 @@ export default function App() {
   const [captureNameOverride, setCaptureNameOverride] = useState(null);
   const captureSelRef = useRef(null);
   const [onboard, setOnboard] = useState(() => (localStorage.getItem(ONBOARDED_KEY) ? null : { step: "role" }));
+  const [freshConfirm, setFreshConfirm] = useState(false);
 
   const viewportRef = useRef(null);
   const inputLayerRef = useRef(null);
@@ -2375,6 +2395,47 @@ export default function App() {
   function skipOnboarding() {
     localStorage.setItem(ONBOARDED_KEY, "1");
     setOnboard(null);
+  }
+
+  function confirmStartFresh() {
+    setFreshConfirm(false);
+    for (const key of LENS_STORAGE_KEYS) localStorage.removeItem(key);
+    shareImportedRef.current = true;
+    const clean = clearShareFromLocation(window.location);
+    window.history.replaceState({}, "", clean);
+    historyRef.current = { past: [], future: [] };
+    setCanUndo(false);
+    setCanRedo(false);
+    pendingImageRef.current = null;
+    captureSelRef.current = null;
+    finishEditing();
+    setItems([]);
+    setCamera({ x: 0, y: 0, scale: 1 });
+    setOperators(freshOperators());
+    setStructures([]);
+    setLenses([]);
+    setActiveLensId(null);
+    setWalking(null);
+    setLensEditor(null);
+    setLensCompare(null);
+    setTool("highlight");
+    setMoveDraft("");
+    setSelection([]);
+    setDraft(null);
+    setLasso(null);
+    setJobs([]);
+    setOpEditor(null);
+    setExpanded({});
+    setDropReady(false);
+    setDropTargetId(null);
+    setHighlight(null);
+    setGesturing(false);
+    setImageArmed(false);
+    setRailTab("functions");
+    setRailDropOver(false);
+    setCaptureNameOverride(null);
+    setOnboard({ step: "role" });
+    showToast("Fresh start");
   }
 
   function openCreateFunction() {
@@ -3729,6 +3790,9 @@ export default function App() {
           <button className="rail-icon" title="set up for role" onClick={() => setOnboard({ step: "role" })}>
             ↻
           </button>
+          <button className="rail-icon" title="Start fresh — clear canvas and personal functions" onClick={() => setFreshConfirm(true)}>
+            ∅
+          </button>
         </div>
         <div className="rail-tabs">
           <button className={"rail-tab" + (railTab === "functions" ? " on" : "")} onClick={() => setRailTab("functions")}>
@@ -3966,6 +4030,9 @@ export default function App() {
         {railTab === "structures" && (
           <div className="rail-hint">drop selection here to save · drag onto canvas to plant</div>
         )}
+        <button type="button" className="rail-fresh" onClick={() => setFreshConfirm(true)}>
+          Start fresh
+        </button>
       </aside>
 
       <div className={"board-main" + (dropReady ? " drop-ready" : "") + (editing ? " editing-text" : "")}>
@@ -4317,6 +4384,25 @@ export default function App() {
       />
 
       {toast && <div className="toast">{toast}</div>}
+
+      {freshConfirm && (
+        <div className="modal-scrim" onClick={() => setFreshConfirm(false)}>
+          <div className="modal fresh-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Start fresh?</h3>
+            <p className="modal-sub">
+              Clears the canvas, your functions, moves, lenses, and symbols. Built-in thinking primitives stay.
+            </p>
+            <div className="modal-foot">
+              <button type="button" onClick={() => setFreshConfirm(false)}>
+                Cancel
+              </button>
+              <button type="button" className="primary del" onClick={confirmStartFresh}>
+                Clear everything
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {onboard && (
         <Onboarding state={onboard} onStart={runOnboarding} onSkip={skipOnboarding} onClose={() => setOnboard(null)} />
