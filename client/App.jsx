@@ -7,7 +7,8 @@ import {
   estimatePrimitiveMs,
 } from "../shared/transform-primitives.js";
 import { scaleEta, ETA } from "../shared/eta.js";
-import { phaseClientAbortMs } from "../shared/phase-timeouts.js";
+import { phaseClientAbortMs, PHASE_TIMEOUT } from "../shared/phase-timeouts.js";
+import { compileExecutionPlan } from "../server/plan.js";
 import { FUNCTION_ARCHITECT_STANDARDS } from "../shared/function-standards.js";
 
 const ITEMS_KEY = "lens.board.items.v1";
@@ -961,7 +962,8 @@ function parseApiResponse(res, raw) {
 
 function estimatePlanMs(plan) {
   if (!plan?.phases?.length) return ETA.default;
-  const raw = plan.phases.reduce((sum, p) => sum + (p.timeoutMs || 55000) + 5000, 8000);
+  const phaseMs = { resolve: 8000, research: 28000, synthesize: 14000 };
+  const raw = plan.phases.reduce((sum, p) => sum + (phaseMs[p.id] || 14000), 3000);
   return scaleEta(raw);
 }
 
@@ -1257,34 +1259,14 @@ function formatJobEta(ms) {
   return `~${Math.ceil(s / 60)}m remaining`;
 }
 
-async function fetchExecutionPlan(op, opMap, material) {
+async function runExecutionOnServer({ op, opMap, operators, material, image, onProgress, plan }) {
+  const executionPlan = plan || compileExecutionPlan(op, opMap, material);
   const ids = collectSubtreeIds(op.id, opMap);
   const subset = {};
   for (const id of ids) subset[id] = opMap[id];
-  const planRes = await fetch("/api/plan", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ op, opMap: subset, material }),
-  });
-  const { plan } = parseApiResponse(planRes, await planRes.text());
-  return { plan, opMap: subset };
-}
-
-async function runExecutionOnServer({ op, opMap, operators, material, image, onProgress, plan: planIn }) {
-  let plan = planIn;
-  let subset;
-  if (!plan) {
-    const fetched = await fetchExecutionPlan(op, opMap, material);
-    plan = fetched.plan;
-    subset = fetched.opMap;
-  } else {
-    const ids = collectSubtreeIds(op.id, opMap);
-    subset = {};
-    for (const id of ids) subset[id] = opMap[id];
-  }
 
   const context = { material, subject: material, research: "", resolveRaw: "" };
-  const phases = plan.phases || [];
+  const phases = executionPlan.phases || [];
   let output = "";
 
   for (let i = 0; i < phases.length; i++) {
@@ -1300,7 +1282,7 @@ async function runExecutionOnServer({ op, opMap, operators, material, image, onP
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           phaseId: phase.id,
-          plan,
+          plan: executionPlan,
           op,
           opMap: subset,
           operators,
@@ -1340,15 +1322,15 @@ async function runExecutionOnServer({ op, opMap, operators, material, image, onP
 }
 
 async function runClaude(prompt, text, opts = {}) {
-  const { image = null, system = null, maxTokens = null, research = false } = opts;
+  const { image = null, system = null, maxTokens = null, research = false, timeoutMs = null } = opts;
   const controller = new AbortController();
-  const timeoutMs = phaseClientAbortMs({ timeoutMs: 180000 });
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const abortMs = timeoutMs || phaseClientAbortMs({ timeoutMs: PHASE_TIMEOUT.synthesizeComposite });
+  const timer = setTimeout(() => controller.abort(), abortMs);
   try {
     const res = await fetch("/api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, text, count: 1, image, system, maxTokens, research }),
+      body: JSON.stringify({ prompt, text, count: 1, image, system, maxTokens, research, timeoutMs: abortMs }),
       signal: controller.signal,
     });
     const raw = await res.text();
@@ -1592,6 +1574,29 @@ export default function App() {
     return { scale, x: lx - wx * scale, y: ly - wy * scale };
   }
 
+  function placeEditCaret(id, cx, cy) {
+    const el = document.querySelector(`[data-item="${id}"].editing`);
+    if (!el?.isContentEditable) return;
+    el.focus();
+    try {
+      const range = document.caretRangeFromPoint?.(cx, cy);
+      if (range && el.contains(range.startContainer)) {
+        const s = window.getSelection();
+        s.removeAllRanges();
+        s.addRange(range);
+        return;
+      }
+    } catch {
+      /* ignore */
+    }
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    r.collapse(false);
+    const s = window.getSelection();
+    s.removeAllRanges();
+    s.addRange(r);
+  }
+
   function finishEditing() {
     const id = editingRef.current;
     if (!id) return;
@@ -1599,6 +1604,7 @@ export default function App() {
     if (el?.isContentEditable) {
       commitEdit(id, el.innerText ?? "");
     } else {
+      editingRef.current = null;
       setEditing(null);
     }
   }
@@ -1665,13 +1671,15 @@ export default function App() {
           })
         );
       } else if (g.mode === "pending") {
-        const dist = Math.hypot(cx - g.cx, cy - g.cy);
-        if (dist > 4) {
-          pushHistoryRef.current();
-          g.mode = "move";
-          g.moved = 0;
-          g.lastCx = cx;
-          g.lastCy = cy;
+        if (g.intent !== "edit") {
+          const dist = Math.hypot(cx - g.cx, cy - g.cy);
+          if (dist > 4) {
+            pushHistoryRef.current();
+            g.mode = "move";
+            g.moved = 0;
+            g.lastCx = cx;
+            g.lastCy = cy;
+          }
         }
       } else if (g.mode === "lasso") {
         const lp = vpLocal(cx, cy);
@@ -1820,12 +1828,19 @@ export default function App() {
             .map((it) => it.id);
           setSelection(picked);
         }
+      } else if (g.mode === "edit-click") {
+        placeEditCaret(g.hitId, g.cx, g.cy);
       } else if (g.mode === "pending") {
         if (g.intent === "edit" && g.ids?.length === 1) {
           const hit = itemsRef.current.find((i) => i.id === g.hitId);
           if (hit?.type === "text") {
-            editClickRef.current = { cx: g.cx, cy: g.cy };
-            setEditing(hit.id);
+            if (editingRef.current === hit.id) {
+              placeEditCaret(hit.id, g.cx, g.cy);
+            } else {
+              editClickRef.current = { cx: g.cx, cy: g.cy };
+              editingRef.current = hit.id;
+              setEditing(hit.id);
+            }
           }
         }
       } else if (g.mode === "move") {
@@ -2059,7 +2074,7 @@ export default function App() {
     }
 
     let out;
-    const { plan } = await fetchExecutionPlan(op, map, text);
+    const plan = compileExecutionPlan(op, map, text);
     const estimatedMs = estimatePlanMs(plan);
     patchJob(jobId, {
       step: plan.phases?.[0]?.label || op.name,
@@ -2067,15 +2082,27 @@ export default function App() {
       estimatedMs,
     });
     const onProgress = (step) => patchJob(jobId, { step });
-    out = await runExecutionOnServer({
-      op,
-      opMap: map,
-      operators,
-      material: text,
-      image,
-      onProgress,
-      plan,
-    });
+
+    if (plan.phases.length === 1 && plan.phases[0].id === "synthesize") {
+      const phase = plan.phases[0];
+      onProgress(phase.label);
+      out = await runClaude(phase.prompt, text.trim(), {
+        system: phase.system,
+        maxTokens: phase.maxTokens,
+        timeoutMs: phase.timeoutMs,
+        image,
+      });
+    } else {
+      out = await runExecutionOnServer({
+        op,
+        opMap: map,
+        operators,
+        material: text,
+        image,
+        onProgress,
+        plan,
+      });
+    }
 
     if (op.multi || op.name === "differentiate") {
       const parts = out
@@ -3044,10 +3071,25 @@ export default function App() {
 
     const w = clientToWorld(cx, cy);
     const lp = vpLocal(cx, cy);
-    const hit = itemAtPoint(cx, cy);
+    let hit = itemAtPoint(cx, cy);
 
-    if (editingRef.current && (!hit || hit.id !== editingRef.current)) {
-      finishEditing();
+    if (editingRef.current) {
+      if (hit?.id === editingRef.current) {
+        if (hit.type === "text" && textClickRegion(hit, cx, cy) === "interior") {
+          gesture.current = { mode: "edit-click", cx, cy, hitId: hit.id };
+          try {
+            e.currentTarget.setPointerCapture(e.pointerId);
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+        finishEditing();
+        hit = itemAtPoint(cx, cy);
+      } else {
+        finishEditing();
+        hit = itemAtPoint(cx, cy);
+      }
     }
 
     if (panning) {
@@ -3103,22 +3145,21 @@ export default function App() {
       return;
     }
 
-    const hitAfterEdit = itemAtPoint(cx, cy);
-    if (hitAfterEdit) {
-      const already = selRef.current.includes(hitAfterEdit.id);
+    if (hit) {
+      const already = selRef.current.includes(hit.id);
       const nextSel = e.shiftKey
         ? already
-          ? selRef.current.filter((id) => id !== hitAfterEdit.id)
-          : [...selRef.current, hitAfterEdit.id]
+          ? selRef.current.filter((id) => id !== hit.id)
+          : [...selRef.current, hit.id]
         : already
         ? selRef.current
-        : [hitAfterEdit.id];
+        : [hit.id];
       setSelection(nextSel);
       let intent = "move";
-      if (hitAfterEdit.type === "text" && nextSel.length === 1 && textClickRegion(hitAfterEdit, cx, cy) === "interior") {
+      if (hit.type === "text" && nextSel.length === 1 && textClickRegion(hit, cx, cy) === "interior") {
         intent = "edit";
       }
-      gesture.current = { mode: "pending", cx, cy, ids: nextSel, hitId: hitAfterEdit.id, intent };
+      gesture.current = { mode: "pending", cx, cy, ids: nextSel, hitId: hit.id, intent };
     } else {
       if (!e.shiftKey) setSelection([]);
       gesture.current = { mode: "lasso", x0: lp.x, y0: lp.y, x1: lp.x, y1: lp.y };
@@ -3151,6 +3192,7 @@ export default function App() {
     } else {
       updateItem(id, { text: clean });
     }
+    editingRef.current = null;
     setEditing(null);
   }
 
@@ -3901,7 +3943,7 @@ export default function App() {
         />
       )}
 
-      {selCaptureInfo?.canCapture && !editing && !walking && selItem && (
+      {selCaptureInfo?.canCapture && !walking && selItem && (
         <SelectionCaptureChip
           bbox={itemScreenBBox(selItem)}
           onSave={saveSelectionAsFunction}

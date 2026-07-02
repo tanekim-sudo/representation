@@ -264,7 +264,7 @@ body {
 }
 .sel-capture-chip {
   position: fixed;
-  z-index: 26;
+  z-index: 30;
   border: 1px solid color-mix(in srgb, #c9a227 45%, var(--line-2));
   background: var(--card);
   color: #5c4a12;
