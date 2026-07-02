@@ -67,6 +67,7 @@ export async function runPrompt({
   maxSearchUses = 5,
   timeoutMs = 90000,
   temperature = null,
+  compact = false,
 }) {
   const anthropic = getClient();
   if (!anthropic) {
@@ -84,10 +85,20 @@ export async function runPrompt({
   const img = imageBlock(image);
   const blocks = [];
   if (img) blocks.push(img);
-  blocks.push({ type: "text", text: `${prompt}\n\n---\n${text || ""}` });
+  const body = (text || "").trim();
+  if (compact && body) {
+    blocks.push({ type: "text", text: body });
+  } else {
+    blocks.push({ type: "text", text: body ? `${prompt}\n\n---\n${body}` : prompt });
+  }
 
   const max_tokens = Math.min(Math.max(parseInt(maxTokens, 10) || 4096, 256), 8192);
-  const sys = system && typeof system === "string" ? system : "Return only the requested output.";
+  const sys =
+    compact && prompt
+      ? `${system || "Return only the requested output."}\n\nMove: ${prompt}`
+      : system && typeof system === "string"
+        ? system
+        : "Return only the requested output.";
 
   const makeOne = async () => {
     const params = {

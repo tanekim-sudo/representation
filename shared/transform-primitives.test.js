@@ -39,20 +39,17 @@ describe("transform primitives", () => {
     assert.ok(!next.some((o) => o.name === "combine"));
   });
 
-  it("routes expand on sparse entity through resolve + research + transform", () => {
+  it("routes expand on sparse entity as single perceptual step", () => {
     const expand = TRANSFORM_PRIMITIVES.find((p) => p.name === "expand");
     const material = "bobyard ai startup";
-    assert.ok(primitiveNeedsResolve(expand, material));
-    assert.ok(primitiveNeedsResearch(expand, material));
-    assert.ok(estimatePrimitiveMs(expand, material) >= ETA.sameness);
-    assert.ok(estimatePrimitiveMs(expand, material) < 60000);
+    assert.ok(!primitiveNeedsResolve(expand, material));
+    assert.ok(!primitiveNeedsResearch(expand, material));
 
     const plan = compileExecutionPlan(expand, { [expand.id]: expand }, material);
-    assert.equal(plan.phases.length, 3);
-    assert.equal(plan.phases[0].id, "resolve");
-    assert.equal(plan.phases[1].id, "research");
-    assert.equal(plan.phases[2].id, "synthesize");
-    assert.match(plan.phases[2].prompt, /What else/i);
+    assert.equal(plan.phases.length, 1);
+    assert.equal(plan.phases[0].id, "synthesize");
+    assert.match(plan.phases[0].prompt, /What else/i);
+    assert.ok(plan.fastPath);
   });
 
   it("keeps primitive prompts short perceptual nudges", () => {

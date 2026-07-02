@@ -7,7 +7,7 @@ import fs from "node:fs";
 import { runPrompt, hasKey, MODEL } from "./claude.js";
 import { runPipeline } from "./pipeline.js";
 import { compileExecutionPlan } from "./plan.js";
-import { runPhase } from "./executor.js";
+import { runPhase, runExecutionPlan } from "./executor.js";
 import {
   encodeShareBundle,
   decodeShareToken,
@@ -67,6 +67,24 @@ app.post("/api/phase", async (req, res) => {
   } catch (err) {
     console.error("[lens] /api/phase failed:", err?.message || err);
     res.status(err?.status || 500).json({ error: err?.message || "Phase failed." });
+  }
+});
+
+app.post("/api/execute", async (req, res) => {
+  try {
+    const { op, opMap, operators, material, image } = req.body ?? {};
+    if (!op) return res.status(400).json({ error: "op is required" });
+    const data = await runExecutionPlan({
+      op,
+      opMap: opMap || {},
+      operators: operators || [],
+      material: material || "",
+      image: image || null,
+    });
+    res.json(data);
+  } catch (err) {
+    console.error("[lens] /api/execute failed:", err?.message || err);
+    res.status(err?.status || 500).json({ error: err?.message || "Execution failed." });
   }
 });
 

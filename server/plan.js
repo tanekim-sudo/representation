@@ -3,6 +3,7 @@ import {
   RESEARCH_SYSTEM,
   researchPrompt,
   SYNTHESIZE_SYSTEM,
+  SYNTHESIZE_SYSTEM_COMPACT,
   synthesizePrompt,
   outputContractForFunction,
 } from "./prompts.js";
@@ -52,13 +53,10 @@ export function opTreeNeedsResearch(op, opMap) {
   return false;
 }
 
+/** Research only when the function tree explicitly marks a research leaf. */
 export function shouldEnableResearch(op, opMap, material) {
   if (isTransformPrimitive(op)) return primitiveNeedsResearch(op, material);
-  if (opTreeNeedsResearch(op, opMap)) return true;
-  const sparse = (material || "").trim().length < 500;
-  const named = /\b(startup|ai|inc|corp|llc|labs|tech|company|platform|app)\b/i.test(material || "");
-  if (sparse && (op?.role || named)) return true;
-  return false;
+  return opTreeNeedsResearch(op, opMap);
 }
 
 function parseResolveOutput(text) {
@@ -75,68 +73,40 @@ function compileWorkflowSteps(leaves) {
   return leaves
     .map((leaf, i) => {
       const body = leaf.prompt || `Apply "${leaf.name}" to the subject.`;
-      const desc = leaf.description ? `\n   Description: ${leaf.description}` : "";
-      return `${i + 1}. ${leaf.name}${desc}\n   ${body}`;
+      const desc = leaf.description ? ` (${leaf.description})` : "";
+      return `${i + 1}. ${leaf.name}${desc}: ${body}`;
     })
-    .join("\n\n");
+    .join("\n");
 }
 
 /**
- * Primitives: resolve and/or research when appropriate, then one transform step.
- * Output stays a single coherent result — never multi-portal fan-out.
+ * Primitives and moves: one perceptual LLM call — no resolve/research orchestration.
  */
 function compileSimplePlan(op, material) {
   const prompt = (op.prompt || "").trim() || `Apply ${op.name} to the input.`;
-  const phases = [];
-  const plan = {
+  const phases = [
+    {
+      id: "synthesize",
+      label: op.name,
+      timeoutMs: synthesizeTimeoutMs(op.estimatedMs, false),
+      maxTokens: op.maxTokens || 1400,
+      prompt,
+      system: PRIMITIVE_SYSTEM,
+    },
+  ];
+  return {
     functionName: op.name,
     functionDescription: op.description || "",
     phases,
     fastPath: true,
+    synthesize: { prompt, system: PRIMITIVE_SYSTEM },
+    parseResolve: parseResolveOutput,
   };
-
-  if (primitiveNeedsResolve(op, material)) {
-    phases.push({
-      id: "resolve",
-      label: "identify subject",
-      timeoutMs: PHASE_TIMEOUT.resolve,
-      maxTokens: 1024,
-      prompt: RESOLVE_PROMPT,
-    });
-    plan.resolve = { prompt: RESOLVE_PROMPT };
-  }
-
-  if (primitiveNeedsResearch(op, material)) {
-    phases.push({
-      id: "research",
-      label: "research",
-      timeoutMs: PHASE_TIMEOUT.research,
-      maxTokens: 2048,
-      research: true,
-      maxSearchUses: 2,
-      system: RESEARCH_SYSTEM,
-    });
-    plan.research = { system: RESEARCH_SYSTEM };
-  }
-
-  phases.push({
-    id: "synthesize",
-    label: op.name,
-    timeoutMs: synthesizeTimeoutMs(op.estimatedMs, false),
-    maxTokens: op.maxTokens || 1400,
-    prompt,
-    system: PRIMITIVE_SYSTEM,
-  });
-  plan.synthesize = { prompt, system: PRIMITIVE_SYSTEM };
-  plan.parseResolve = parseResolveOutput;
-  return plan;
 }
 
 /**
- * Compile an infinitely nested function into a 1–3 phase execution plan.
- * - resolve: fast subject ID (sparse input)
- * - research: dedicated web search pass
- * - synthesize: all quality work in one compiled prompt (uses research context)
+ * Compile a function tree into 1–3 phases (resolve / research / synthesize).
+ * Research runs only when a leaf has research:true. Resolve only when sparse + resolve leaves exist.
  */
 export function compileExecutionPlan(op, opMap, material) {
   if (isTransformPrimitive(op) || isSingleStepPrompt(op, opMap)) {
@@ -160,9 +130,10 @@ export function compileExecutionPlan(op, opMap, material) {
     functionName: op?.name || "function",
     functionDescription: op?.description || "",
     phases,
+    fastPath: false,
   };
 
-  if (sparse) {
+  if (sparse && parseLeaves.length > 0) {
     const resolvePrompt =
       parseLeaves.length > 0
         ? `${parseLeaves.map((l) => l.prompt).join("\n")}\n\n${RESOLVE_PROMPT}`
@@ -171,7 +142,7 @@ export function compileExecutionPlan(op, opMap, material) {
       id: "resolve",
       label: "identify subject",
       timeoutMs: PHASE_TIMEOUT.resolve,
-      maxTokens: 1024,
+      maxTokens: 768,
       prompt: resolvePrompt,
     });
     plan.resolve = { prompt: resolvePrompt };
@@ -181,17 +152,18 @@ export function compileExecutionPlan(op, opMap, material) {
     const researchLeafPrompt = researchLeaves.map((l) => l.prompt).filter(Boolean).join("\n");
     phases.push({
       id: "research",
-      label: "web research",
+      label: "research",
       timeoutMs: PHASE_TIMEOUT.research,
-      maxTokens: 3072,
+      maxTokens: 2048,
       research: true,
-      maxSearchUses: 3,
+      maxSearchUses: 2,
       system: RESEARCH_SYSTEM,
       researchLeafPrompt,
     });
     plan.research = { researchLeafPrompt, system: RESEARCH_SYSTEM };
   }
 
+  const leafCount = workflowForSynth.length;
   const synthPrompt = synthesizePrompt(
     op?.name || "function",
     op?.description || "",
@@ -202,20 +174,37 @@ export function compileExecutionPlan(op, opMap, material) {
   phases.push({
     id: "synthesize",
     label: op?.name || "deliver",
-    timeoutMs: PHASE_TIMEOUT.synthesizeComposite,
-    maxTokens: 6144,
+    timeoutMs: synthesizeTimeoutMs(null, leafCount > 2),
+    maxTokens: leafCount > 2 ? 6144 : 4096,
     prompt: synthPrompt,
-    system: SYNTHESIZE_SYSTEM,
+    system: leafCount > 2 ? SYNTHESIZE_SYSTEM : SYNTHESIZE_SYSTEM_COMPACT,
   });
-  plan.synthesize = { prompt: synthPrompt, system: SYNTHESIZE_SYSTEM };
+  plan.synthesize = {
+    prompt: synthPrompt,
+    system: leafCount > 2 ? SYNTHESIZE_SYSTEM : SYNTHESIZE_SYSTEM_COMPACT,
+  };
 
   plan.parseResolve = parseResolveOutput;
   return plan;
 }
 
-/** Trim input for fast single-step transforms — no verbose wrappers. */
+/** Raw material for single-step perceptual transforms. */
 export function buildSimpleMaterial(material) {
   return (material || "").trim();
+}
+
+/** Fast synthesize input — includes prior phase context when present. */
+export function buildFastMaterial(context) {
+  const parts = [];
+  const material = (context.material || "").trim();
+  if (material) parts.push(material);
+  if (context.research?.trim()) {
+    parts.push(`Research:\n${context.research.trim()}`);
+  }
+  if (context.resolveRaw?.trim() && context.resolveRaw.trim() !== material) {
+    parts.push(`Subject:\n${context.resolveRaw.trim()}`);
+  }
+  return parts.join("\n\n");
 }
 
 export function buildPhaseMaterial(phaseId, context) {
@@ -223,16 +212,16 @@ export function buildPhaseMaterial(phaseId, context) {
   const parts = [];
 
   if (material?.trim()) {
-    parts.push(`WHITEBOARD MATERIAL:\n"""\n${material.trim()}\n"""`);
+    parts.push(`INPUT:\n${material.trim()}`);
   }
   if (subject?.trim() && subject !== material) {
-    parts.push(`RESOLVED SUBJECT:\n"""\n${subject.trim()}\n"""`);
+    parts.push(`SUBJECT: ${subject.trim()}`);
   }
-  if (resolveRaw?.trim()) {
-    parts.push(`SUBJECT ANALYSIS:\n"""\n${resolveRaw.trim()}\n"""`);
+  if (resolveRaw?.trim() && phaseId === "synthesize") {
+    parts.push(`ANALYSIS:\n${resolveRaw.trim()}`);
   }
   if (research?.trim() && phaseId === "synthesize") {
-    parts.push(`VERIFIED WEB RESEARCH (ground your deliverable in these facts):\n"""\n${research.trim()}\n"""`);
+    parts.push(`RESEARCH:\n${research.trim()}`);
   }
 
   return parts.join("\n\n");

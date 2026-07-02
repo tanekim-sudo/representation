@@ -16,7 +16,7 @@ import {
 import { scaleEta, ETA } from "../shared/eta.js";
 import { phaseClientAbortMs, PHASE_TIMEOUT } from "../shared/phase-timeouts.js";
 import { compileExecutionPlan } from "../server/plan.js";
-import { FUNCTION_ARCHITECT_STANDARDS } from "../shared/function-standards.js";
+import { FAST_FUNCTION_ARCHITECT_STANDARDS } from "../shared/function-standards.js";
 import {
   createOperatorBundle,
   createLensShareBundle,
@@ -332,24 +332,14 @@ function parseJSON(raw) {
   throw new Error("AI returned invalid JSON. Tap ↻ to rebuild, or try again.");
 }
 
-// The master system prompt — teaches Claude how to architect lens functions.
-const LENS_SYSTEM = `You are the function-architect for "lens" — an infinite thinking whiteboard where users drag FUNCTIONS onto sparse notes and get professional deliverables.
+// Teaches Claude how to architect lens functions (compact — faster creation).
+const LENS_SYSTEM = `You architect functions for "lens" — a thinking whiteboard. Users drag functions onto notes and get deliverables.
 
-LENS EXECUTION ARCHITECTURE (design functions for this)
-Functions can have infinite nested sub-steps in the UI, but at runtime a PLAN COMPILER flattens them into 1–3 PHASES:
+RUNTIME: plans compile to 1–3 phases — resolve (sparse only, if identify-subject leaf exists) → research (only if a leaf has research:true) → synthesize (all other steps merged).
 
-PHASE 1 — RESOLVE: Identify the subject entity from sparse input. Output: ENTITY, SEARCH_TERMS.
-PHASE 2 — RESEARCH (if needed): Dedicated web_search pass using SEARCH_TERMS. Mark ONE leaf with "research": true.
-PHASE 3 — SYNTHESIZE: ALL remaining steps compiled into one prompt. Uses research findings. Outputs final deliverable.
+Design leaves as short perceptual moves. ONE research leaf max per function.
 
-Design implications:
-- Sub-steps are organizational — write leaf prompts as instructions that will be MERGED into the synthesize phase.
-- Only ONE "research" leaf per function — it powers the research phase.
-- Resolve step: name it descriptively (e.g. "Identify Subject Entity"); prompt must extract ENTITY and SEARCH_TERMS.
-- Analyze/draft steps: leaf prompts must specify exact OUTPUT FORMAT — they run in synthesize phase.
-- NEVER design functions that refuse, discuss missing data, or meta-comment on the process.
-
-${FUNCTION_ARCHITECT_STANDARDS}
+${FAST_FUNCTION_ARCHITECT_STANDARDS}
 
 Return ONLY valid JSON.`;
 
@@ -464,53 +454,31 @@ Return ONLY JSON: {"functions":[{"name":"...","description":"..."}]} — exactly
 
 // decompose one function into a deep tree of sub-functions ending in primitives
 async function decomposeFunction(role, fn, operators, opMap) {
-  const prompt = `The user is a: ${role}.
-
-Decompose this function for lens's 3-phase runtime: resolve → research → synthesize.
-Apply the FUNCTION ARCHITECT STANDARDS from system context to every node.
+  const prompt = `Role: ${role}. Decompose this function into 3–5 steps for lens (identify subject → ONE research leaf → analyze → deliver).
 
 FUNCTION: ${fn.name}
 ${fn.description ? `Description: ${fn.description}` : ""}
 
-Pipeline (use these descriptive step names — adapt to the function):
-1. Identify Subject Entity — extract ENTITY + SEARCH_TERMS from sparse input like "bobyard ai startup"
-2. Gather Verified Facts — exactly ONE leaf with "research": true; hyper-specific prompt with OUTPUT FORMAT for fact bullets
-3. Analyze Using Framework — apply the function's analytical frame; leaf prompt must specify exact sections to produce
-4. Draft Final Deliverable — compile the finished work product; leaf prompt must specify exact OUTPUT FORMAT (all sections, tone, length)
+Leaves: short one-line prompts. ONE leaf with "research":true. Thesis-style functions: final leaf outputs Thesis, Market, Product, Traction, Team, Risks, Recommendation sections.
 
-For investment thesis functions, final OUTPUT FORMAT must include: ## Thesis, ## Market, ## Product, ## Traction, ## Team, ## Key Risks, ## Upside Scenario, ## Recommendation
-
-Every leaf prompt must include GOAL, INPUT, PROCESS, OUTPUT FORMAT, QUALITY BAR, CONSTRAINTS sections.
-
-Return ONLY JSON:
-{"name":"...","description":"...","steps":[{"name":"Identify Subject Entity","description":"...","prompt":"..."},{"name":"Gather Verified Facts","research":true,"description":"...","prompt":"..."},...]}
-
-Escape quotes and newlines inside all string values. No markdown fences.`;
-  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 8000 });
+JSON only:
+{"name":"...","description":"...","steps":[{"name":"...","description":"...","prompt":"..."},...]}`;
+  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 4096 });
   try {
     return parseJSON(out);
   } catch {
     const retry = await runClaude(
-      `${prompt}\n\nYour previous reply was not valid JSON. Return ONLY a single minified JSON object. Escape all quotes inside strings with backslash.`,
+      `${prompt}\n\nInvalid JSON. Return ONLY one minified JSON object.`,
       "",
-      { system: librarySystem(operators, opMap), maxTokens: 8000 }
+      { system: librarySystem(operators, opMap), maxTokens: 4096 }
     );
     return parseJSON(retry);
   }
 }
 
-// fallback leaf prompt when Claude omits one — still follows standards
 function buildDefaultLeafPrompt(name, description) {
-  const desc = (description || "").trim() || `Complete the "${name}" step on the subject material.`;
-  return `GOAL: ${desc}
-INPUT: Prior step output or whiteboard material about the subject.
-PROCESS:
-1. Read the input carefully and stay locked to the subject entity.
-2. Execute "${name}" with professional specificity — use verified facts when available.
-OUTPUT FORMAT:
-Return the finished result for this step only. Match the deliverable shape implied by: ${desc}
-QUALITY BAR: Specific, decisive, expert-grade — no vague generalities.
-CONSTRAINTS: Return ONLY the step output. No preamble. No meta-commentary. Never refuse sparse input.`;
+  const desc = (description || "").trim() || name;
+  return `${desc}. Return ONLY the step output.`;
 }
 
 // flatten a decomposition tree into flat operators; returns the root id
@@ -642,6 +610,7 @@ async function runMoveSequenceStep(stepOp, map, material, image, onProgress, ope
       maxTokens: phase.maxTokens,
       timeoutMs: phase.timeoutMs,
       image,
+      compact: plan.fastPath,
     });
   }
   return runExecutionOnServer({
@@ -674,36 +643,25 @@ async function runMoveSequence(op, map, material, image, onProgress, operators, 
 
 // create a full function from the user's plain-English description
 async function createFunctionFromProse(description, operators, opMap) {
-  const prompt = `The user wants to CREATE a new function for their lens whiteboard toolbox.
-Tailor it to their personal library (see system context) — complement existing functions, reuse their vocabulary and prompt style.
-Apply FUNCTION ARCHITECT STANDARDS from system context to EVERY node.
+  const prompt = `Create a function for the lens whiteboard.
 
-They described it in their own words:
+User description:
 """
 ${description}
 """
 
-Design a complete function tree: ordered sub-functions ending in leaves with hyper-specific prompts (pipeline where each step's output feeds the next).
+Return a tree: 2–4 sub-steps, leaves with short one-line prompts. Match their library style.
 
-Requirements:
-- Root name: 3–7 words, descriptive. Root description: input → deliverable shape.
-- Break into 2–5 ordered sub-functions with descriptive names and descriptions at every level.
-- Recurse 2–4 layers until every leaf is one atomic step with a full prompt (GOAL, INPUT, PROCESS, OUTPUT FORMAT, QUALITY BAR, CONSTRAINTS).
-- Composites have "steps" and NO "prompt". Leaves have hyper-specific "prompt" only.
-- Do not duplicate functions already in their library unless the user explicitly asks to recreate one.
-
-Return ONLY JSON:
-{"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}
-
-Escape quotes and newlines inside strings. No markdown fences.`;
-  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 8000 });
+JSON only:
+{"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}`;
+  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 4096 });
   try {
     return parseJSON(out);
   } catch {
     const retry = await runClaude(
-      `${prompt}\n\nPrevious reply was invalid JSON. Return ONLY one minified JSON object.`,
+      `${prompt}\n\nInvalid JSON before. Return ONLY one minified JSON object.`,
       "",
-      { system: librarySystem(operators, opMap), maxTokens: 8000 }
+      { system: librarySystem(operators, opMap), maxTokens: 4096 }
     );
     return parseJSON(retry);
   }
@@ -712,38 +670,26 @@ Escape quotes and newlines inside strings. No markdown fences.`;
 // edit an existing function tree from the user's prose instruction
 async function editFunctionWithProse(op, opMap, instruction, operators) {
   const current = serializeTree(op, opMap);
-  const prompt = `The user is EDITING an existing function on their lens whiteboard.
-Keep it consistent with their personal library (see system context) — same vocabulary, style, and transformation patterns.
-Apply FUNCTION ARCHITECT STANDARDS from system context to EVERY node you touch or add.
+  const prompt = `Edit this function. Preserve what wasn't asked to change. Short one-line leaf prompts.
 
-CURRENT FUNCTION (tree — composites have steps, leaves have prompts):
+CURRENT:
 ${current}
 
-The user wants these changes (in their own words):
+CHANGES:
 """
 ${instruction}
 """
 
-Apply their request. Preserve anything they didn't ask to change. You may rename, re-describe, re-prompt, reorder, add, remove, or split steps.
-- Every name: 3–7 words, descriptive.
-- Every node: required description (input → output).
-- Every leaf: hyper-specific prompt with GOAL, INPUT, PROCESS, OUTPUT FORMAT, QUALITY BAR, CONSTRAINTS.
-
-Return ONLY JSON for the COMPLETE updated function (same shape as create):
-{"name":"...","description":"...","steps":[{"name":"...","description":"...","steps":[...] OR "prompt":"..."}]}
-
-If this should become a single leaf with no sub-steps, return:
-{"name":"...","description":"...","prompt":"..."}
-
-Escape quotes and newlines inside strings. No markdown fences.`;
-  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 8000 });
+JSON only — complete updated tree:
+{"name":"...","description":"...","steps":[...] OR "prompt":"..."}`;
+  const out = await runClaude(prompt, "", { system: librarySystem(operators, opMap), maxTokens: 4096 });
   try {
     return parseJSON(out);
   } catch {
     const retry = await runClaude(
-      `${prompt}\n\nPrevious reply was invalid JSON. Return ONLY one minified JSON object.`,
+      `${prompt}\n\nInvalid JSON. Return ONLY one minified JSON object.`,
       "",
-      { system: librarySystem(operators, opMap), maxTokens: 8000 }
+      { system: librarySystem(operators, opMap), maxTokens: 4096 }
     );
     return parseJSON(retry);
   }
@@ -1489,64 +1435,60 @@ async function runExecutionOnServer({ op, opMap, operators, material, image, onP
   const subset = {};
   for (const id of ids) subset[id] = opMap[id];
 
-  const context = { material, subject: material, research: "", resolveRaw: "" };
   const phases = executionPlan.phases || [];
-  let output = "";
-
-  for (let i = 0; i < phases.length; i++) {
-    const phase = phases[i];
-    const timeoutMs = phaseClientAbortMs(phase);
-    onProgress?.(`${phase.label} (${i + 1}/${phases.length})`);
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await fetch("/api/phase", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          phaseId: phase.id,
-          plan: executionPlan,
-          op,
-          opMap: subset,
-          operators,
-          context,
-          image: phase.id === "synthesize" ? image : null,
-        }),
-        signal: controller.signal,
-      });
-      const data = parseApiResponse(res, await res.text());
-      if (phase.id === "resolve") {
-        context.subject = data.subject || data.output || context.subject;
-        context.resolveRaw = data.resolveRaw || data.output || "";
-      }
-      if (phase.id === "research") {
-        context.research = data.research || data.output || "";
-      }
-      if (phase.id === "synthesize") {
-        output = data.output || "";
-      }
-    } catch (err) {
-      if (phase.id === "research") {
-        context.research = "";
-        context.researchFallback = true;
-        onProgress?.("research skipped — synthesizing");
-        continue;
-      }
-      if (err.name === "AbortError") {
-        throw new Error(`${phase.label} timed out — try again.`);
-      }
-      throw err;
-    } finally {
-      clearTimeout(timer);
-    }
+  if (phases.length === 1 && phases[0].id === "synthesize") {
+    const phase = phases[0];
+    onProgress?.(phase.label);
+    return runClaude(phase.prompt, material.trim(), {
+      system: phase.system,
+      maxTokens: phase.maxTokens,
+      timeoutMs: phase.timeoutMs,
+      image,
+      compact: executionPlan.fastPath,
+    });
   }
 
-  return output;
+  onProgress?.(phases[0]?.label || op.name);
+  const timeoutMs = phases.reduce((sum, p) => sum + phaseClientAbortMs(p), 3000);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch("/api/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op,
+        opMap: subset,
+        operators,
+        material,
+        image,
+      }),
+      signal: controller.signal,
+    });
+    const data = parseApiResponse(res, await res.text());
+    for (let i = 0; i < (data.phasesRun || phases).length; i++) {
+      const pid = (data.phasesRun || phases)[i];
+      const phase = phases.find((p) => p.id === pid);
+      if (phase) onProgress?.(`${phase.label} (${i + 1}/${phases.length})`);
+    }
+    return data.output || "";
+  } catch (err) {
+    if (err.name === "AbortError") throw new Error("Request timed out — try again.");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function runClaude(prompt, text, opts = {}) {
-  const { image = null, system = null, maxTokens = null, research = false, timeoutMs = null } = opts;
+  const {
+    image = null,
+    system = null,
+    maxTokens = null,
+    research = false,
+    timeoutMs = null,
+    compact = false,
+  } = opts;
   const controller = new AbortController();
   const abortMs = timeoutMs || phaseClientAbortMs({ timeoutMs: PHASE_TIMEOUT.synthesizeComposite });
   const timer = setTimeout(() => controller.abort(), abortMs);
@@ -1554,7 +1496,17 @@ async function runClaude(prompt, text, opts = {}) {
     const res = await fetch("/api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, text, count: 1, image, system, maxTokens, research, timeoutMs: abortMs }),
+      body: JSON.stringify({
+        prompt,
+        text,
+        count: 1,
+        image,
+        system,
+        maxTokens,
+        research,
+        timeoutMs: abortMs,
+        compact,
+      }),
       signal: controller.signal,
     });
     const raw = await res.text();
@@ -2403,6 +2355,7 @@ export default function App() {
         maxTokens: phase.maxTokens,
         timeoutMs: phase.timeoutMs,
         image,
+        compact: plan.fastPath,
       });
     } else {
       out = await runExecutionOnServer({

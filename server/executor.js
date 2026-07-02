@@ -3,6 +3,7 @@ import {
   compileExecutionPlan,
   buildPhaseMaterial,
   buildSimpleMaterial,
+  buildFastMaterial,
   buildResearchPrompt,
 } from "./plan.js";
 import { RESOLVE_SYSTEM, RESEARCH_SYSTEM, SYNTHESIZE_SYSTEM } from "./prompts.js";
@@ -47,7 +48,7 @@ export async function runPhase(phaseId, plan, context, { operators, op, image, o
       maxTokens: phase.maxTokens,
       timeoutMs: phase.timeoutMs,
       research: true,
-      maxSearchUses: phase.maxSearchUses || 6,
+      maxSearchUses: phase.maxSearchUses || 3,
     });
     return { output: outputs[0] || "", research: outputs[0] || "" };
   }
@@ -55,23 +56,19 @@ export async function runPhase(phaseId, plan, context, { operators, op, image, o
   if (phaseId === "synthesize") {
     const fast = plan.fastPath;
     let sys = phase.system || SYNTHESIZE_SYSTEM;
-    if (!fast) {
-      if (op?.name) sys += `\n\nFunction: "${op.name}"`;
-      if (context.material?.trim()) {
-        sys += `\n\nOriginal subject: """${context.material.slice(0, 1000)}"""`;
-      }
-      if (operators?.length) {
-        const tops = operators.filter((o) => o.top).map((o) => o.name).slice(0, 8);
-        if (tops.length) sys += `\n\nUser toolbox: ${tops.join(", ")}`;
-      }
+    if (!fast && op?.name) {
+      sys += `\nFunction: "${op.name}"`;
     }
 
     const fallbackSearch = !fast && !!context.researchFallback && !context.research?.trim();
     if (fallbackSearch) {
-      sys += `\n\nWeb search available: run 1–2 quick searches on the entity, then write the deliverable.`;
+      sys += `\nWeb search available — 1 quick search if needed, then write the deliverable.`;
     }
 
-    const text = fast ? buildSimpleMaterial(context.material) : buildPhaseMaterial("synthesize", context);
+    const text = fast
+      ? buildFastMaterial(context) || buildSimpleMaterial(context.material)
+      : buildPhaseMaterial("synthesize", context);
+
     const { outputs } = await runPrompt({
       prompt: phase.prompt,
       text,
@@ -81,7 +78,8 @@ export async function runPhase(phaseId, plan, context, { operators, op, image, o
       timeoutMs: phase.timeoutMs,
       research: fallbackSearch,
       maxSearchUses: 2,
-      temperature: fast ? 0.35 : undefined,
+      temperature: fast ? 0.35 : 0.4,
+      compact: fast,
     });
     return { output: outputs[0] || "" };
   }
@@ -91,7 +89,7 @@ export async function runPhase(phaseId, plan, context, { operators, op, image, o
   throw err;
 }
 
-/** Run full compiled plan — used when client wants one server round-trip. */
+/** Run full compiled plan — one server-side loop, no per-phase HTTP hops. */
 export async function runExecutionPlan({ op, opMap, operators, material, image, onStep }) {
   const plan = compileExecutionPlan(op, opMap, material);
   const context = {
