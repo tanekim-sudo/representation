@@ -3674,7 +3674,7 @@ export default function App() {
   function buildExportHtml(parts, title) {
     const body = parts
       .map((p) => {
-        if (p.kind === "text") return `<p style="white-space:pre-wrap;font-family:Georgia,serif;line-height:1.5">${escapeHtml(p.content).replace(/\n/g, "<br>")}</p>`;
+        if (p.kind === "text") return `<p style="white-space:pre-wrap;font-family:Inter,system-ui,sans-serif;font-size:16px;line-height:1.5">${escapeHtml(p.content).replace(/\n/g, "<br>")}</p>`;
         if (p.kind === "image") return `<p><img src="${p.content}" style="max-width:100%;height:auto" alt="image"/></p>`;
         return `<p><em>${p.content}</em></p>`;
       })
