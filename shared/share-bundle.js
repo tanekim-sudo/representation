@@ -98,7 +98,7 @@ export function normalizeLegacyShare(raw) {
     return createPathBundle(raw.nodeId, raw.items, { name: "shared path" });
   }
   if (raw.kind === "lens-lens" && Array.isArray(raw.opTrees)) {
-    return createLensShareBundle(raw.name || "inherited lens", raw.opTrees, { name: raw.name });
+    return createLensShareBundle(raw.name || "uploaded lens", raw.opTrees, { name: raw.name });
   }
   return null;
 }

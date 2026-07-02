@@ -302,6 +302,15 @@ body {
   background: color-mix(in srgb, var(--chalk-yellow-deep) 20%, var(--card));
   border-color: var(--chalk-yellow-deep);
 }
+.sel-capture-save.doc-save,
+.rail-create.doc-save {
+  margin-bottom: 8px;
+}
+.sel-capture-chip.doc {
+  border-color: color-mix(in srgb, var(--chalk-blue) 45%, var(--line-2));
+  background: color-mix(in srgb, var(--chalk-blue) 10%, var(--card));
+  color: var(--ink);
+}
 .sel-capture-share {
   display: block;
   width: 100%;

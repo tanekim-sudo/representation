@@ -163,14 +163,7 @@ const CANVAS_TOOLS = {
     group: "canvas",
     label: "Select",
     icon: "↖",
-    hint: "Click to select and edit text · drag to move",
-  },
-  hand: {
-    id: "hand",
-    group: "canvas",
-    label: "Pan",
-    icon: "✋",
-    hint: "Drag to move the canvas.",
+    hint: "Drag objects to move · drag empty canvas to pan · shift+drag to select area",
   },
   image: {
     id: "image",
@@ -1052,6 +1045,9 @@ function parseSameness(out) {
 }
 
 function structurePreview(struct) {
+  if (struct.kind === "document" && struct.content?.trim()) {
+    return struct.content.trim().split("\n")[0].slice(0, 60);
+  }
   const texts = (struct.items || []).filter((it) => it.type === "text" && it.text?.trim()).map((it) => it.text.trim());
   if (texts.length) return texts[0].split("\n")[0].slice(0, 60);
   const imgs = (struct.items || []).filter((it) => it.type === "image").length;
@@ -1632,7 +1628,9 @@ export default function App() {
   const [lensEditor, setLensEditor] = useState(null); // { id|null, name, moveIds }
   const [lensCompare, setLensCompare] = useState(null); // { aId, bId? }
 
-  const [tool, setTool] = useState("highlight"); // highlight | select | text | pen | marker | eraser | hand
+  const [tool, setTool] = useState("highlight"); // highlight | select | pen | marker | eraser | image
+  const [spaceHeld, setSpaceHeld] = useState(false);
+  const [panning, setPanning] = useState(false);
   const [moveDraft, setMoveDraft] = useState("");
   const [selection, setSelection] = useState([]);
   const [editing, setEditing] = useState(null);
@@ -1662,6 +1660,7 @@ export default function App() {
   const camRef = useRef(camera);
   const itemsRef = useRef(items);
   const toolRef = useRef(tool);
+  const spaceHeldRef = useRef(false);
   const selRef = useRef(selection);
   const editingRef = useRef(editing);
   const combineRef = useRef(null);
@@ -1675,6 +1674,7 @@ export default function App() {
   camRef.current = camera;
   itemsRef.current = items;
   toolRef.current = tool;
+  spaceHeldRef.current = spaceHeld;
   selRef.current = selection;
   editingRef.current = editing;
 
@@ -1855,6 +1855,8 @@ export default function App() {
 
   const setGesturingRef = useRef(setGesturing);
   setGesturingRef.current = setGesturing;
+  const setPanningRef = useRef(setPanning);
+  setPanningRef.current = setPanning;
 
   // global pointer move/up so gestures work across canvas items
   useEffect(() => {
@@ -1968,6 +1970,7 @@ export default function App() {
       const g = gesture.current;
       gesture.current = null;
       if (!g) return;
+      if (g.mode === "pan") setPanningRef.current(false);
 
       if (g.mode === "draw") {
         if (g.points.length > 1) {
@@ -2148,10 +2151,11 @@ export default function App() {
         pendingImageRef.current = null;
         setImageArmed(false);
       }
-      // space toggles between the two modes: highlighter on, then off —
-      // leaving the highlighter wipes every highlight and returns to the mouse
+      // space: hold to pan · tap toggles highlighter ↔ pointer
       if (e.key === " " && !e.repeat && !walkingRef.current) {
         e.preventDefault();
+        spaceHeldRef.current = true;
+        setSpaceHeld(true);
         pendingImageRef.current = null;
         setImageArmed(false);
         if (toolRef.current === "highlight") {
@@ -2184,8 +2188,18 @@ export default function App() {
         eraseAtPointerRef.current(lastPointerRef.current.cx, lastPointerRef.current.cy);
       }
     }
+    function up(e) {
+      if (e.key === " ") {
+        spaceHeldRef.current = false;
+        setSpaceHeld(false);
+      }
+    }
     window.addEventListener("keydown", down);
-    return () => window.removeEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+    };
   }, []);
 
   // paste image or text
@@ -2994,6 +3008,35 @@ export default function App() {
     return saveSelectionByIds(selRef.current, extra);
   }
 
+  function saveSelectedAsDocument() {
+    const id = selRef.current.length === 1 ? selRef.current[0] : null;
+    if (!id) {
+      showToast("select a text idea to save");
+      return null;
+    }
+    const item = itemsRef.current.find((it) => it.id === id);
+    if (!item || item.type !== "text" || !item.text?.trim()) {
+      showToast("select a text idea to save");
+      return null;
+    }
+    const content = item.text.trim();
+    const name = content.split("\n")[0].slice(0, 48);
+    const struct = {
+      id: uid(),
+      kind: "document",
+      name,
+      title: name,
+      content,
+      createdAt: Date.now(),
+      savedAt: Date.now(),
+      items: [normalizeItem({ type: "text", x: 0, y: 0, text: content, w: item.w || 320 })],
+    };
+    setStructures((arr) => [struct, ...arr]);
+    setRailTab("structures");
+    showToast("Saved as document");
+    return struct;
+  }
+
   function pinOpToToolbox(opId) {
     const op = opMap[opId];
     if (!op) return;
@@ -3156,13 +3199,13 @@ export default function App() {
     setLensCompare(null);
   }
 
-  /** Share a lens: copy a link so anyone can inherit it. */
+  /** Share a lens: copy a link so anyone can upload it. */
   function exportLens(id) {
     shareLensLink(id);
   }
 
   function importLensData(data) {
-    const name = data.name || data.lens?.name || "inherited lens";
+    const name = data.name || data.lens?.name || "uploaded lens";
     const opTrees = data.opTrees || data.lens?.opTrees;
     if (!Array.isArray(opTrees) || !opTrees.length) throw new Error("not a lens");
     const moveIds = [];
@@ -3188,7 +3231,7 @@ export default function App() {
     setLenses((ls) => [lens, ...ls]);
     setActiveLensId(lens.id);
     setRailTab("functions");
-    showToast(`inherited · ${lens.name} — now looking through it`);
+    showToast(`Uploaded · ${lens.name} — now looking through it`);
   }
 
   function importLens(file) {
@@ -3546,17 +3589,39 @@ export default function App() {
 
   // ---- pointer gestures on the board ----
   function onPointerDown(e) {
+    if (e.button === 1) {
+      e.preventDefault();
+      setGesturing(true);
+      setPanning(true);
+      gesture.current = { mode: "pan", cx: e.clientX, cy: e.clientY, cam: { ...camRef.current } };
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
     if (e.button !== 0) return;
     setGesturing(true);
     const cx = e.clientX;
     const cy = e.clientY;
     lastPointerRef.current = { cx, cy };
-    const panning = toolRef.current === "hand";
     const t = toolRef.current;
 
     const w = clientToWorld(cx, cy);
     const lp = vpLocal(cx, cy);
     let hit = itemAtPoint(cx, cy);
+
+    if (spaceHeldRef.current) {
+      setPanning(true);
+      gesture.current = { mode: "pan", cx, cy, cam: { ...camRef.current } };
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
 
     if (editingRef.current) {
       if (hit?.id === editingRef.current) {
@@ -3575,12 +3640,6 @@ export default function App() {
         finishEditing();
         hit = itemAtPoint(cx, cy);
       }
-    }
-
-    if (panning) {
-      gesture.current = { mode: "pan", cx, cy, cam: { ...camRef.current } };
-      try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
-      return;
     }
 
     if (t === "image") {
@@ -3647,8 +3706,13 @@ export default function App() {
       gesture.current = { mode: "pending", cx, cy, ids: nextSel, hitId: hit.id, intent };
     } else {
       if (!e.shiftKey) setSelection([]);
-      gesture.current = { mode: "lasso", x0: lp.x, y0: lp.y, x1: lp.x, y1: lp.y };
-      setLasso({ x0: lp.x, y0: lp.y, x1: lp.x, y1: lp.y });
+      if (e.shiftKey) {
+        gesture.current = { mode: "lasso", x0: lp.x, y0: lp.y, x1: lp.x, y1: lp.y };
+        setLasso({ x0: lp.x, y0: lp.y, x1: lp.x, y1: lp.y });
+      } else {
+        setPanning(true);
+        gesture.current = { mode: "pan", cx, cy, cam: { ...camRef.current } };
+      }
     }
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -3842,7 +3906,7 @@ export default function App() {
         .map((it) => itemScreenBBox(it))
     : [];
   const cursorClass =
-    tool === "hand"
+    panning || spaceHeld
       ? "cur-grab"
       : tool === "highlight"
       ? "cur-highlight"
@@ -3905,7 +3969,7 @@ export default function App() {
           <div className="rail-title">lens</div>
           <button
             className="rail-icon"
-            title="receive a path — walk someone else's seeing"
+            title="Upload path file"
             onClick={() => {
               const input = document.createElement("input");
               input.type = "file";
@@ -3956,6 +4020,11 @@ export default function App() {
                 +
               </button>
             </div>
+            {selection.length === 1 && selItem?.type === "text" && (
+              <button type="button" className="sel-capture-save doc-save" onClick={saveSelectedAsDocument}>
+                Save as document
+              </button>
+            )}
             {selection.length === 1 && selItem && (selItem.type === "text" || selItem.type === "image") && (
               <div className="sel-capture-panel">
                 <div className="sel-capture-head">
@@ -4019,7 +4088,7 @@ export default function App() {
                   input.click();
                 }}
               >
-                ↓ inherit
+                ↓ Upload
               </button>
             </div>
             <div className="rail-scroll">
@@ -4136,6 +4205,11 @@ export default function App() {
             >
               + save selection
             </button>
+            {selection.length === 1 && selItem?.type === "text" && (
+              <button type="button" className="rail-create doc-save" onClick={saveSelectedAsDocument}>
+                Save as document
+              </button>
+            )}
             <div className="rail-scroll">
               {structures.length === 0 ? (
                 <p className="rail-empty">Save selections from the canvas, or discover structures via sameness.</p>
@@ -4436,6 +4510,7 @@ export default function App() {
         <SelectionCaptureChip
           bbox={itemScreenBBox(selItem)}
           onSave={saveSelectionAsFunction}
+          onSaveDocument={selItem.type === "text" ? saveSelectedAsDocument : null}
           onShareJourney={() => shareJourneyLink(selItem.id)}
         />
       )}
@@ -4751,7 +4826,7 @@ function BoardText({ item, selected, dropTarget, editing, editClickRef, onCommit
   );
 }
 
-function SelectionCaptureChip({ bbox, onSave, onShareJourney }) {
+function SelectionCaptureChip({ bbox, onSave, onSaveDocument, onShareJourney }) {
   const cx = (bbox.left + bbox.right) / 2;
   return (
     <div
@@ -4759,6 +4834,19 @@ function SelectionCaptureChip({ bbox, onSave, onShareJourney }) {
       style={{ left: cx, top: bbox.top - 34, transform: "translateX(-50%)" }}
       onPointerDown={(e) => e.stopPropagation()}
     >
+      {onSaveDocument && (
+        <button
+          type="button"
+          className="sel-capture-chip doc"
+          onClick={(e) => {
+            e.stopPropagation();
+            onSaveDocument();
+          }}
+          title="Save this idea as a document in Structures"
+        >
+          Save as document
+        </button>
+      )}
       <button
         type="button"
         className="sel-capture-chip"
@@ -4859,7 +4947,7 @@ function CanvasHud({ tool, selectionCount, imageArmed }) {
   } else if (tool === "highlight") {
     hint = "Scribble to erase · closed circle selects inside · space → clear highlights, back to mouse";
   } else if (tool === "select" && selectionCount === 0) {
-    hint = meta.hint + " · space → highlighter";
+    hint = meta.hint + " · space → highlighter · hold space or middle-click to pan";
   }
 
   return (
@@ -5163,7 +5251,7 @@ function LensCard({ lens, active, opMap, lenses, comparing, onUse, onEvolve, onS
       </div>
       <div className="lens-card-meta">
         {lens.mergedFrom && <span>⚭ merged from “{parentName(lens.mergedFrom[0])}” + “{parentName(lens.mergedFrom[1])}”</span>}
-        {lens.inherited && <span>↓ inherited</span>}
+        {lens.inherited && <span>uploaded</span>}
       </div>
       <div className="lens-card-actions">
         <button className={"lens-btn" + (active ? " on" : "")} onClick={onUse} title="make this your quick palette">
@@ -5175,7 +5263,7 @@ function LensCard({ lens, active, opMap, lenses, comparing, onUse, onEvolve, onS
         <button className={"lens-btn" + (comparing ? " on" : "")} onClick={onCompare} title="compare with another lens">
           ≍
         </button>
-        <button className="lens-btn" onClick={onSend} title="copy share link — someone else can inherit it">
+        <button className="lens-btn" onClick={onSend} title="copy share link">
           ↗
         </button>
         <button className="lens-btn danger" onClick={onDelete} title="delete lens">
@@ -5293,7 +5381,8 @@ function LensComparePanel({ a, b, opMap, onClose }) {
 
 function StructureCard({ struct, onDelete, onShare }) {
   const preview = structurePreview(struct);
-  const label = struct.structNum ? `#${struct.structNum}` : struct.kind || "idea";
+  const label =
+    struct.structNum ? `#${struct.structNum}` : struct.kind === "document" ? "document" : struct.kind || "idea";
   return (
     <div className="struct-card-wrap">
       <div
