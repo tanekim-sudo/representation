@@ -144,7 +144,7 @@ const CANVAS_TOOLS = {
     group: "canvas",
     label: "Select",
     icon: "↖",
-    hint: "Click to select · double-click to edit · drag to move",
+    hint: "Click to select and edit text · drag to move",
   },
   hand: {
     id: "hand",
@@ -1457,6 +1457,7 @@ export default function App() {
   const showToastRef = useRef(() => {});
   const pendingImageRef = useRef(null);
   const lastPointerRef = useRef(null);
+  const editClickRef = useRef(null);
   const eraseAtPointerRef = useRef(() => false);
   const historyRef = useRef({ past: [], future: [] });
   const pushHistoryRef = useRef(() => {});
@@ -1810,7 +1811,13 @@ export default function App() {
           setSelection(picked);
         }
       } else if (g.mode === "pending") {
-        /* click only — selection already set */
+        if (g.intent === "edit" && g.ids?.length === 1) {
+          const hit = itemsRef.current.find((i) => i.id === g.hitId);
+          if (hit?.type === "text") {
+            editClickRef.current = { cx: g.cx, cy: g.cy };
+            setEditing(hit.id);
+          }
+        }
       } else if (g.mode === "move") {
         if (g.ids?.length === 1 && (g.moved || 0) > COMBINE_THRESHOLD) {
           const exclude = new Set(g.ids);
@@ -2899,6 +2906,13 @@ export default function App() {
     return null;
   }
 
+  function textClickRegion(it, cx, cy) {
+    const bb = itemScreenBBox(it);
+    const m = 10;
+    if (cx < bb.left + m || cx > bb.right - m || cy < bb.top + m || cy > bb.bottom - m) return "border";
+    return "interior";
+  }
+
   function resolveTargetIds(atClient) {
     const sel = selRef.current;
     if (sel.length > 1 && atClient) {
@@ -2977,10 +2991,13 @@ export default function App() {
     const panning = toolRef.current === "hand";
     const t = toolRef.current;
 
-    finishEditing();
-
     const w = clientToWorld(cx, cy);
     const lp = vpLocal(cx, cy);
+    const hit = itemAtPoint(cx, cy);
+
+    if (editingRef.current && (!hit || hit.id !== editingRef.current)) {
+      finishEditing();
+    }
 
     if (panning) {
       gesture.current = { mode: "pan", cx, cy, cam: { ...camRef.current } };
@@ -2997,7 +3014,7 @@ export default function App() {
       return;
     }
 
-    if (t === "pen" || t === "marker" || t === "highlight" || t === "eraser") {
+    if (t === "pen" || t === "marker" || t === "eraser") {
       pushHistory();
     }
 
@@ -3009,20 +3026,25 @@ export default function App() {
     }
 
     if (t === "highlight") {
-      gesture.current = {
-        mode: "draw",
-        highlight: true,
-        points: [w],
-        deletedIds: new Set(),
-        lastCx: cx,
-        lastCy: cy,
-      };
-      setDraft({ points: [w], highlight: true });
-      try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
-      return;
+      const objHit = hit && (hit.type === "text" || hit.type === "image") ? hit : null;
+      if (!objHit) {
+        pushHistory();
+        gesture.current = {
+          mode: "draw",
+          highlight: true,
+          points: [w],
+          deletedIds: new Set(),
+          lastCx: cx,
+          lastCy: cy,
+        };
+        setDraft({ points: [w], highlight: true });
+        try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+        return;
+      }
     }
 
     if (t === "eraser") {
+      pushHistory();
       gesture.current = { mode: "erase" };
       const hit = itemAtPoint(cx, cy);
       if (hit) setItems((arr) => arr.filter((it) => it.id !== hit.id));
@@ -3030,18 +3052,22 @@ export default function App() {
       return;
     }
 
-    const hit = itemAtPoint(cx, cy);
-    if (hit) {
-      const already = selRef.current.includes(hit.id);
+    const hitAfterEdit = itemAtPoint(cx, cy);
+    if (hitAfterEdit) {
+      const already = selRef.current.includes(hitAfterEdit.id);
       const nextSel = e.shiftKey
         ? already
-          ? selRef.current.filter((id) => id !== hit.id)
-          : [...selRef.current, hit.id]
+          ? selRef.current.filter((id) => id !== hitAfterEdit.id)
+          : [...selRef.current, hitAfterEdit.id]
         : already
         ? selRef.current
-        : [hit.id];
+        : [hitAfterEdit.id];
       setSelection(nextSel);
-      gesture.current = { mode: "pending", cx, cy, ids: nextSel, hitId: hit.id };
+      let intent = "move";
+      if (hitAfterEdit.type === "text" && nextSel.length === 1 && textClickRegion(hitAfterEdit, cx, cy) === "interior") {
+        intent = "edit";
+      }
+      gesture.current = { mode: "pending", cx, cy, ids: nextSel, hitId: hitAfterEdit.id, intent };
     } else {
       if (!e.shiftKey) setSelection([]);
       gesture.current = { mode: "lasso", x0: lp.x, y0: lp.y, x1: lp.x, y1: lp.y };
@@ -3114,25 +3140,18 @@ export default function App() {
     setTool("select");
   }
 
-  // double-click: edit notes inline, or create text on blank canvas
+  // double-click blank canvas: create a text box
   function onDoubleClick(e) {
-    if (toolRef.current !== "select") return;
-    finishEditing();
+    if (!["select", "highlight"].includes(toolRef.current)) return;
     const hit = itemAtPoint(e.clientX, e.clientY);
-    if (hit?.type === "text") {
-      setSelection([hit.id]);
-      setEditing(hit.id);
-      return;
-    }
-    if (hit?.type === "image") {
-      setSelection([hit.id]);
-      return;
-    }
+    if (hit) return;
+    if (editingRef.current) finishEditing();
     const w = clientToWorld(e.clientX, e.clientY);
     const id = uid();
     pushHistory();
     setItems((arr) => [...arr, normalizeItem({ id, type: "text", x: w.x, y: w.y, text: "", w: 320 })]);
     setSelection([id]);
+    editClickRef.current = { cx: e.clientX, cy: e.clientY };
     setEditing(id);
   }
 
@@ -3669,8 +3688,6 @@ export default function App() {
                   className={"board-img" + (selection.includes(it.id) ? " sel" : "") + (dropTargetId === it.id ? " drop-target" : "")}
                   src={it.src}
                   style={{ ...itemStyle(it), width: it.w, height: it.h }}
-                  draggable={selection.includes(it.id)}
-                  onDragStart={(e) => selection.includes(it.id) && startSelectionDrag(e, [it.id])}
                   alt=""
                 />
               ) : (
@@ -3680,14 +3697,14 @@ export default function App() {
                   selected={selection.includes(it.id)}
                   dropTarget={dropTargetId === it.id}
                   editing={editing === it.id}
+                  editClickRef={editClickRef}
                   onCommit={(text) => commitEdit(it.id, text)}
-                  onDragStart={(e) => startSelectionDrag(e, [it.id])}
                 />
               )
             )}
 
           {/* selection box */}
-          {selBBox && selection.length > 0 && !canTransform && (
+          {selBBox && selection.length > 1 && (
             <div
               className="sel-box"
               style={{
@@ -3696,16 +3713,7 @@ export default function App() {
                 width: selBBox.maxx - selBBox.minx + 20,
                 height: selBBox.maxy - selBBox.miny + 20,
               }}
-            >
-              <div
-                className="sel-drag"
-                draggable
-                onDragStart={(e) => startSelectionDrag(e, selection)}
-                title="drag to toolbox to save"
-              >
-                ⠿
-              </div>
-            </div>
+            />
           )}
         </div>
 
@@ -3812,7 +3820,7 @@ export default function App() {
       {/* empty hint */}
       {items.length === 0 && (
         <div className="empty-hint">
-          <p>double-click to write · drag functions from the rail</p>
+          <p>double-click the canvas to write · drag functions from the rail</p>
           <button type="button" className="starter-btn" onClick={plantStarterThought}>
             ✦ try the highlighter
           </button>
@@ -4001,7 +4009,7 @@ function WalkOverlay({ walk, stepIndex, step, rects, onPrev, onNext, onBranch, o
   );
 }
 
-function BoardText({ item, selected, dropTarget, editing, onCommit, onDragStart }) {
+function BoardText({ item, selected, dropTarget, editing, editClickRef, onCommit }) {
   const ref = useRef(null);
   const seeded = useRef(false);
 
@@ -4012,6 +4020,21 @@ function BoardText({ item, selected, dropTarget, editing, onCommit, onDragStart 
         seeded.current = true;
       }
       ref.current.focus();
+      const pt = editClickRef?.current;
+      if (pt) {
+        editClickRef.current = null;
+        try {
+          const range = document.caretRangeFromPoint?.(pt.cx, pt.cy);
+          if (range && ref.current.contains(range.startContainer)) {
+            const s = window.getSelection();
+            s.removeAllRanges();
+            s.addRange(range);
+            return;
+          }
+        } catch {
+          /* ignore */
+        }
+      }
       const r = document.createRange();
       r.selectNodeContents(ref.current);
       r.collapse(false);
@@ -4020,7 +4043,7 @@ function BoardText({ item, selected, dropTarget, editing, onCommit, onDragStart 
       s.addRange(r);
     }
     if (!editing) seeded.current = false;
-  }, [editing, item.id]);
+  }, [editing, item.id, editClickRef]);
 
   const style = itemStyle(item);
 
@@ -4058,8 +4081,6 @@ function BoardText({ item, selected, dropTarget, editing, onCommit, onDragStart 
       }
       data-item={item.id}
       style={style}
-      draggable={selected}
-      onDragStart={(e) => selected && onDragStart?.(e)}
     >
       {item.text}
     </div>
@@ -4134,7 +4155,7 @@ function CanvasHud({ tool, selectionCount, imageArmed }) {
   } else if (selectionCount >= 2 && tool === "select") {
     hint = `${selectionCount} selected · drag to move · drag functions from the rail`;
   } else if (selectionCount > 0 && tool === "select") {
-    hint = `${selectionCount} selected · double-click to edit · drag to move`;
+    hint = `${selectionCount} selected · click text to edit · drag to move`;
   } else if (tool === "highlight") {
     hint = "Scribble to erase · closed circle selects inside · space → clear highlights, back to mouse";
   } else if (tool === "select" && selectionCount === 0) {
